@@ -5,6 +5,7 @@ import threading
 import time
 import logging
 import os
+from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from core.downloader import Downloader
@@ -20,6 +21,7 @@ class MainFrame(wx.Frame):
         self.provider = provider
         self.config_manager = config_manager
         self.downloader = Downloader(config_manager)
+        self.RELOAD_DEBOUNCE_MS = 10000  # coalesce feed updates to avoid rapid list refresh (SR spam)
         self.logger = logging.getLogger(__name__)
         self._setup_logging()
         
@@ -137,6 +139,22 @@ class MainFrame(wx.Frame):
             return text.strip()
         except:
             return html_content
+
+    def _format_display_date(self, date_str: str) -> str:
+        """
+        Present stored UTC dates in local time for readability.
+        Falls back gracefully on parse errors.
+        """
+        if not date_str:
+            return ""
+        try:
+            dt = date_parser.parse(date_str)
+            if not dt.tzinfo:
+                dt = dt.replace(tzinfo=timezone.utc)
+            local_dt = dt.astimezone()
+            return local_dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return date_str[:16]
 
     def init_menus(self):
         menubar = wx.MenuBar()
@@ -542,7 +560,10 @@ class MainFrame(wx.Frame):
             if not d: return 0
             try:
                 # Parse to timestamp for easy comparison
-                return date_parser.parse(d).timestamp()
+                dt = date_parser.parse(d)
+                if not dt.tzinfo:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp()
             except:
                 return 0 # Treat invalid dates as oldest
         
@@ -589,7 +610,7 @@ class MainFrame(wx.Frame):
         self.list_ctrl.Freeze()
         for i, article in enumerate(display_articles):
             idx = self.list_ctrl.InsertItem(i, article.title)
-            self.list_ctrl.SetItem(idx, 1, article.date[:16] if article.date else "")
+            self.list_ctrl.SetItem(idx, 1, self._format_display_date(article.date))
             self.list_ctrl.SetItem(idx, 2, article.author or "")
         if notice:
             info_idx = self.list_ctrl.InsertItem(self.list_ctrl.GetItemCount(), notice)
@@ -684,7 +705,8 @@ class MainFrame(wx.Frame):
         self.content_req_starts[req_id] = time.perf_counter()
 
         # Show lightweight header immediately
-        header = f"Title: {article.title}\nDate: {article.date}\nAuthor: {article.author}\nLink: {article.url}\n" + "-"*40 + "\n\n"
+        display_date = self._format_display_date(article.date)
+        header = f"Title: {article.title}\nDate: {display_date} (local)\nAuthor: {article.author}\nLink: {article.url}\n" + "-"*40 + "\n\n"
 
         # If we have a cached summary, show it instantly
         if article_id in self.summary_cache:
@@ -993,30 +1015,13 @@ class MainFrame(wx.Frame):
                 should_reload = True # Optimistic reload for categories
 
             if should_reload:
-                current_time = time.time()
-                # Debounce updates: ignore if less than 1s since last update for THIS view
-                if not hasattr(self, '_last_update_time'):
-                    self._last_update_time = 0
-                
-                if current_time - self._last_update_time < 1.0:
-                    # Too soon, but ensure we do update eventually. 
-                    # We can set a timer to check back, or just skip intermediate updates if we assume more will come.
-                    # For simplicity, let's just skip.
-                    # But wait, if it's the LAST update, we might miss it?
-                    # Better approach: Use a OneShot timer to trigger the reload.
-                    if not hasattr(self, '_reload_timer'):
-                        self._reload_timer = wx.Timer(self)
-                        self.Bind(wx.EVT_TIMER, self._on_reload_timer, self._reload_timer)
-                    
-                    # Restart timer (debounce)
-                    self._reload_timer.Start(1000, wx.TIMER_ONE_SHOT)
-                    return # Defer execution
-
-                self._last_update_time = current_time
-                self._do_reload_articles()
+                # Always coalesce via a oneshot timer; restart on every update
+                if not hasattr(self, '_reload_timer'):
+                    self._reload_timer = wx.Timer(self)
+                    self.Bind(wx.EVT_TIMER, self._on_reload_timer, self._reload_timer)
+                self._reload_timer.Start(self.RELOAD_DEBOUNCE_MS, wx.TIMER_ONE_SHOT)
 
     def _on_reload_timer(self, event):
-        self._last_update_time = time.time()
         self._do_reload_articles()
 
     def _do_reload_articles(self):

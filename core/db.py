@@ -7,11 +7,26 @@ log = logging.getLogger(__name__)
 
 if getattr(sys, 'frozen', False):
     APP_DIR = os.path.dirname(sys.executable)
+    PARENT_DIR = os.path.dirname(APP_DIR)
 else:
     # Use project root (parent of this file's directory) instead of current working directory
     APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    PARENT_DIR = APP_DIR
 
 DB_FILE = os.path.join(APP_DIR, "rss.db")
+
+# Ensure directory exists (useful for portable runs from a writable folder)
+os.makedirs(APP_DIR, exist_ok=True)
+
+# If frozen build lacks a DB, try copying from parent folder (e.g., repo root) so bundled data is reused.
+if getattr(sys, 'frozen', False) and not os.path.exists(DB_FILE):
+    parent_db = os.path.join(PARENT_DIR, "rss.db")
+    if os.path.exists(parent_db):
+        try:
+            import shutil
+            shutil.copyfile(parent_db, DB_FILE)
+        except Exception as e:
+            log.warning(f"Failed to copy parent rss.db: {e}")
 
 def init_db():
     # Use a shorter timeout for the initial check/setup to avoid hanging

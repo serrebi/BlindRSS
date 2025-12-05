@@ -198,8 +198,29 @@ class MinifluxProvider(RSSProvider):
         date = utils.normalize_date(
             entry.get("published_at") or entry.get("published"),
             entry.get("title") or "",
-            entry.get("content") or entry.get("summary") or ""
+            entry.get("content") or entry.get("summary") or "",
+            entry.get("url") or ""
         )
+        # If feed date is far in the future or normalization failed, fall back to created_at or 'now'
+        try:
+            if date == "0001-01-01 00:00:00":
+                raise ValueError("sentinel date")
+            dt = dateparser.parse(date)
+            if not dt.tzinfo:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt - datetime.now(timezone.utc) > timedelta(days=2):
+                raise ValueError("future skew")
+        except Exception:
+            fallback = utils.normalize_date(
+                entry.get("created_at"),
+                entry.get("title") or "",
+                entry.get("content") or entry.get("summary") or "",
+                entry.get("url") or ""
+            )
+            if fallback == "0001-01-01 00:00:00":
+                date = utils.format_datetime(datetime.now(timezone.utc))
+            else:
+                date = fallback
         
         if row:
             # Article exists, check if date needs updating

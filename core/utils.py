@@ -60,7 +60,16 @@ def extract_date_from_text(text: str):
             return datetime(year_int, month, day)
         except Exception:
             pass
-    # 2) ISO-like yyyy-mm-dd
+    # 2) URL-style /yyyy/mm/dd/ (common in blogs)
+    m_url = re.search(r"/(20\d{2}|19\d{2})/(0?[1-9]|1[0-2])/(0?[1-9]|[12][0-9]|3[01])/", text)
+    if m_url:
+        try:
+            y, mth, d = m_url.groups()
+            return datetime(int(y), int(mth), int(d))
+        except Exception:
+            pass
+
+    # 3) ISO-like yyyy-mm-dd
     m_iso = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
     if m_iso:
         try:
@@ -68,9 +77,11 @@ def extract_date_from_text(text: str):
             return datetime(y, mth, d)
         except Exception:
             pass
-    # 3) Month name forms (e.g., May 17 2021)
+    # 4) Month name forms (e.g., May 17 2021)
     # Clean up timezone abbreviations that confuse parser
     clean_text = re.sub(r'\b(PST|PDT|EST|EDT|CST|CDT|MST|MDT|AI|GMT|UTC)\b', '', text, flags=re.IGNORECASE)
+    # Insert a space before month names if glued to previous letters (e.g., "ASHWINNov 17, 2025")
+    clean_text = re.sub(r'([A-Za-z])(?=(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b)', r'\1 ', clean_text)
     # Only attempt parsing if we see something that looks like a date (Month name)
     # Simple heuristic: Check for month names
     if re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', clean_text, re.IGNORECASE):
@@ -100,8 +111,8 @@ def normalize_date(raw_date_input: any, title: str = "", content: str = "", url:
             # Assume UTC if naive, unless logic dictates otherwise. 
             dt_cmp = dt.replace(tzinfo=timezone.utc)
         
-        # Allow modest future skew (e.g., scheduled posts) but not far future release dates.
-        return (dt_cmp - now) <= timedelta(days=180) and dt_cmp.year > 1990
+        # Allow only minimal future skew (scheduled posts). Clamp to 2 days.
+        return (dt_cmp - now) <= timedelta(days=2) and dt_cmp.year >= 1900
 
     def parse_unix_timestamp(val):
         """Handle Unix timestamps (seconds or milliseconds)."""
@@ -139,7 +150,25 @@ def normalize_date(raw_date_input: any, title: str = "", content: str = "", url:
     if ts_dt:
         return format_datetime(ts_dt)
 
-    # 1) Prefer explicit feed/pub dates first
+    # 1) Title-derived dates (useful for archives but can contain release dates)
+    if title:
+        dt = extract_date_from_text(title)
+        if dt and valid(dt):
+            return format_datetime(dt)
+
+    # 2) URL-derived dates
+    if url:
+        dt = extract_date_from_text(url)
+        if dt and valid(dt):
+            return format_datetime(dt)
+
+    # 3) Check content
+    if content:
+        dt = extract_date_from_text(content)
+        if dt and valid(dt):
+            return format_datetime(dt)
+
+    # 4) Prefer explicit feed/pub dates last (often refreshed timestamps)
     raw_date_str = str(raw_date_input) if raw_date_input else ""
     if raw_date_str:
         # Try RFC 2822 (Standard RSS) first using email.utils
@@ -158,24 +187,6 @@ def normalize_date(raw_date_input: any, title: str = "", content: str = "", url:
                 return format_datetime(dt)
         except Exception:
             pass
-
-    # 2) Title-derived dates (useful for archives but can contain release dates)
-    if title:
-        dt = extract_date_from_text(title)
-        if dt and valid(dt):
-            return format_datetime(dt)
-
-    # 3) URL-derived dates
-    if url:
-        dt = extract_date_from_text(url)
-        if dt and valid(dt):
-            return format_datetime(dt)
-
-    # 4) Check content
-    if content:
-        dt = extract_date_from_text(content)
-        if dt and valid(dt):
-            return format_datetime(dt)
 
     # 5) Fallback sentinel
     return "0001-01-01 00:00:00"
