@@ -3,12 +3,20 @@
 This is an accessible, fast RSS + Podcast reader with a built‑in download manager, optamized for screen reader users.
 
 ## Features
+<<<<<<< HEAD
 - Screen reader friendly: standard wx controls, predictable focus.
 - Fast refresh; parallel feed fetch.
 - Podcast playback with chapters and playback speed changes.
 - Download Manager: queue from article context menu or player; per-feed folders; filenames Title - with dates; pause/resume/cancel/cancel all; max concurrent downloads is configurable.
 - Tray icon: restore, refresh, playback and download controls.
 - Close-to-tray option (off by default).
+=======
+*   **Screen Reader Friendly:** Uses standard controls.
+*   **Fast:** Instant startup and parallel feed refreshing.
+*   **Podcast Player:** Supports chapters. Auto-downloads if streaming fails. Installs python and Yt-DLP for Podcast support
+*   **Tray Icon:** Minimizes to system tray. Right-click for media controls.
+
+>>>>>>> 88255eb24e35b8b09dda4740fe20b0ce4d7db361
 
 ## Get it
 1) Download the latest `BlindRSS.exe` from Releases.
@@ -38,6 +46,7 @@ Player:
 - Enter: play selected chapter
 - Escape: hide player
 
+<<<<<<< HEAD
 ## Build from source
 Prereqs: Python 3.13, pip, PyInstaller.
 ```
@@ -48,3 +57,12 @@ Output: `dist/BlindRSS.exe`.
 
 ## Support
 Issues/PRs welcome; support is best-effort.
+=======
+## Files
+*   `BlindRSS.exe`: The application.
+*   `rss.db`: Database containing your feeds and articles.
+*   `config.json`: Configuration file.
+*   Keep these files together. They are created when you run the program for the first time.
+## Support:
+I do not really provide support, but if you notice a bug or you want to request a feature, feel free to open a new issue, and I can try to help you out.
+>>>>>>> 88255eb24e35b8b09dda4740fe20b0ce4d7db361
