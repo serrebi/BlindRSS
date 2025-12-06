@@ -51,7 +51,7 @@ class MinifluxProvider(RSSProvider):
             print(f"Miniflux error for {url}: {e}")
             return None
 
-    def refresh(self) -> bool:
+    def refresh(self, progress_cb=None) -> bool:
         self._req("PUT", "/v1/feeds/refresh")
         return True
 
@@ -205,7 +205,12 @@ class MinifluxProvider(RSSProvider):
                 if not content: return False
                 
                 try:
-                    soup = BeautifulSoup(content, 'xml')
+                    try:
+                        soup = BeautifulSoup(content, 'xml')
+                    except Exception as parser_exc:
+                        print(f"OPML xml parser unavailable, falling back to html.parser: {parser_exc}")
+                        soup = BeautifulSoup(content, 'html.parser')
+
                     if not soup.find('opml'):
                         soup = BeautifulSoup(content, 'html.parser')
                         

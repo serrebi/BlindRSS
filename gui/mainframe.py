@@ -3,21 +3,29 @@ import wx
 import webbrowser
 import threading
 import time
+import os
+import re
+from urllib.parse import urlsplit
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from .dialogs import AddFeedDialog, SettingsDialog
 from .player import PlayerFrame
 from .tray import BlindRSSTrayIcon
 from providers.base import RSSProvider
+from core.config import APP_DIR
+from core import utils
 
 class MainFrame(wx.Frame):
     def __init__(self, provider: RSSProvider, config_manager):
         super().__init__(None, title="BlindRSS", size=(1000, 700))
         self.provider = provider
         self.config_manager = config_manager
+        self.feed_map = {}
+        self.feed_nodes = {}
+        self._article_refresh_pending = False
         
         # Create independent player window
-        self.player_window = PlayerFrame(self)
+        self.player_window = PlayerFrame(self, config_manager)
         
         self.init_ui()
         self.init_menus()
@@ -96,19 +104,19 @@ class MainFrame(wx.Frame):
         import_opml_item = file_menu.Append(wx.ID_ANY, "&Import OPML...", "Import feeds from OPML")
         export_opml_item = file_menu.Append(wx.ID_ANY, "E&xport OPML...", "Export feeds to OPML")
         file_menu.AppendSeparator()
-        search_podcast_item = file_menu.Append(wx.ID_ANY, "Search &Podcast...", "Search and add a podcast feed")
-        file_menu.AppendSeparator()
         exit_item = file_menu.Append(wx.ID_EXIT, "E&xit", "Exit application")
         
         view_menu = wx.Menu()
         player_item = view_menu.Append(wx.ID_ANY, "Show &Player\tCtrl+P", "Show the media player window")
         
-        edit_menu = wx.Menu()
-        settings_item = edit_menu.Append(wx.ID_PREFERENCES, "&Settings...", "Configure application")
+        tools_menu = wx.Menu()
+        settings_item = tools_menu.Append(wx.ID_PREFERENCES, "&Settings...", "Configure application")
+        tools_menu.AppendSeparator()
+        search_podcast_item = tools_menu.Append(wx.ID_ANY, "Search &Podcast...", "Search and add a podcast feed")
         
         menubar.Append(file_menu, "&File")
-        menubar.Append(edit_menu, "&Edit")
         menubar.Append(view_menu, "&View")
+        menubar.Append(tools_menu, "&Tools")
         self.SetMenuBar(menubar)
         
         self.Bind(wx.EVT_MENU, self.on_add_feed, add_feed_item)
@@ -118,7 +126,6 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_remove_category, remove_cat_item)
         self.Bind(wx.EVT_MENU, self.on_import_opml, import_opml_item)
         self.Bind(wx.EVT_MENU, self.on_export_opml, export_opml_item)
-        self.Bind(wx.EVT_MENU, self.on_search_podcast, search_podcast_item)
         self.Bind(wx.EVT_MENU, self.on_show_player, player_item)
         self.Bind(wx.EVT_MENU, self.on_settings, settings_item)
         self.Bind(wx.EVT_MENU, self.on_exit, exit_item)
@@ -139,7 +146,7 @@ class MainFrame(wx.Frame):
 
     def _manual_refresh_thread(self):
         try:
-            self.provider.refresh()
+            self.provider.refresh(self._on_feed_refresh_progress)
             wx.CallAfter(self.refresh_feeds)
             # wx.CallAfter(self.SetTitle, "RSS Reader")
         except Exception as e:
@@ -237,6 +244,12 @@ class MainFrame(wx.Frame):
         menu = wx.Menu()
         open_item = menu.Append(wx.ID_ANY, "Open Article")
         copy_item = menu.Append(wx.ID_ANY, "Copy Link")
+        download_item = None
+        if idx != wx.NOT_FOUND and 0 <= idx < len(self.current_articles):
+            article_for_menu = self.current_articles[idx]
+            if article_for_menu.media_url:
+                download_item = menu.Append(wx.ID_ANY, "Download")
+                self.Bind(wx.EVT_MENU, lambda e, a=article_for_menu: self.on_download_article(a), download_item)
         
         # Bindings for list menu items need to use the current idx or selected article
         # on_article_activate (event) needs an event object, but I can re-create one or just call its core logic
@@ -293,7 +306,7 @@ class MainFrame(wx.Frame):
         while not self.stop_event.is_set():
             interval = int(self.config_manager.get("refresh_interval", 300))
             try:
-                if self.provider.refresh():
+                if self.provider.refresh(self._on_feed_refresh_progress):
                    wx.CallAfter(self.refresh_feeds)
             except Exception as e:
                 print(f"Refresh error: {e}")
@@ -313,6 +326,57 @@ class MainFrame(wx.Frame):
         except Exception as e:
             print(f"Error fetching feeds: {e}")
 
+    def _on_feed_refresh_progress(self, state):
+        # Called from worker threads inside provider.refresh; marshal to UI thread
+        wx.CallAfter(self._apply_feed_refresh_progress, state)
+
+    def _apply_feed_refresh_progress(self, state):
+        if not state:
+            return
+        feed_id = state.get("id")
+        if not feed_id:
+            return
+
+        title = state.get("title", "")
+        unread = state.get("unread_count", 0)
+        category = state.get("category", "Uncategorized")
+
+        # Update cached feed objects
+        feed_obj = self.feed_map.get(feed_id)
+        if feed_obj:
+            feed_obj.title = title or feed_obj.title
+            feed_obj.unread_count = unread
+            feed_obj.category = category
+
+        # Update tree label if present
+        node = self.feed_nodes.get(feed_id)
+        if node and node.IsOk():
+            label = f"{title} ({unread})" if unread > 0 else title
+            self.tree.SetItemText(node, label)
+
+        # If the selected view is impacted, schedule article reload
+        sel = self.tree.GetSelection()
+        if sel and sel.IsOk():
+            data = self.tree.GetItemData(sel)
+            if data:
+                typ = data.get("type")
+                if typ == "all":
+                    self._schedule_article_reload()
+                elif typ == "feed" and data.get("id") == feed_id:
+                    self._schedule_article_reload()
+                elif typ == "category" and data.get("id") == category:
+                    self._schedule_article_reload()
+
+    def _schedule_article_reload(self):
+        if self._article_refresh_pending:
+            return
+        self._article_refresh_pending = True
+        wx.CallLater(120, self._run_pending_article_reload)
+
+    def _run_pending_article_reload(self):
+        self._article_refresh_pending = False
+        self._reload_selected_articles()
+
     def _update_tree(self, feeds, all_cats):
         # Save selection to restore it later
         selected_item = self.tree.GetSelection()
@@ -323,6 +387,10 @@ class MainFrame(wx.Frame):
         self.tree.Freeze() # Stop updates while rebuilding
         self.tree.DeleteChildren(self.all_feeds_node)
         self.tree.DeleteChildren(self.root)
+
+        # Map feed id -> Feed and Tree items for quick lookup (downloads, labeling)
+        self.feed_map = {f.id: f for f in feeds}
+        self.feed_nodes = {}
         
         self.all_feeds_node = self.tree.AppendItem(self.root, "All Feeds")
         self.tree.SetItemData(self.all_feeds_node, {"type": "all", "id": "all"})
@@ -356,20 +424,59 @@ class MainFrame(wx.Frame):
                 node = self.tree.AppendItem(cat_node, title)
                 feed_data = {"type": "feed", "id": feed.id}
                 self.tree.SetItemData(node, feed_data)
+                self.feed_nodes[feed.id] = node
                 
                 # Check if this feed was selected
                 if selected_data and selected_data["type"] == "feed" and selected_data["id"] == feed.id:
                     item_to_select = node
 
         self.tree.ExpandAll()
-        
-        # Restore selection
+
+        # Restore selection (default to All Feeds on first load so the list populates)
+        selection_target = None
         if selected_data and selected_data["type"] == "all":
-             self.tree.SelectItem(self.all_feeds_node)
+            selection_target = self.all_feeds_node
         elif item_to_select and item_to_select.IsOk():
-             self.tree.SelectItem(item_to_select)
-             
+            selection_target = item_to_select
+        else:
+            selection_target = self.all_feeds_node
+
+        if selection_target and selection_target.IsOk():
+            self.tree.SelectItem(selection_target)
+
         self.tree.Thaw() # Resume updates
+
+        # Ensure article list refreshes after auto/remote refresh.
+        # Re-selecting items on a rebuilt tree does not always emit EVT_TREE_SEL_CHANGED,
+        # so explicitly trigger a load for the currently selected node.
+        self._reload_selected_articles()
+
+    def _reload_selected_articles(self):
+        """Fetch articles for the currently selected tree item."""
+        item = self.tree.GetSelection()
+        if not item.IsOk():
+            return
+
+        data = self.tree.GetItemData(item)
+        if not data:
+            return
+
+        if data["type"] == "all":
+            feed_id = "all"
+        elif data["type"] == "feed":
+            feed_id = data["id"]
+        elif data["type"] == "category":
+            feed_id = f"category:{data['id']}"
+        else:
+            return
+
+        # Use a fresh request id to avoid race conditions with any in-flight loads
+        self.current_request_id = time.time()
+        threading.Thread(
+            target=self._load_articles_thread,
+            args=(feed_id, self.current_request_id),
+            daemon=True
+        ).start()
 
     def on_tree_select(self, event):
         item = event.GetItem()
@@ -557,6 +664,132 @@ class MainFrame(wx.Frame):
             return True
         return False
 
+    def on_download_article(self, article):
+        if not article or not getattr(article, "media_url", None):
+            wx.MessageBox("No downloadable media found for this item.", "Download", wx.ICON_INFORMATION)
+            return
+        if not self.config_manager.get("downloads_enabled", False):
+            wx.MessageBox("Downloads are disabled. Enable them in Settings > Downloads.", "Downloads disabled", wx.ICON_INFORMATION)
+            return
+        threading.Thread(target=self._download_article_thread, args=(article,), daemon=True).start()
+
+    def _download_article_thread(self, article):
+        try:
+            url = article.media_url
+            resp = utils.safe_requests_get(url, stream=True, timeout=30)
+            resp.raise_for_status()
+
+            ext = self._guess_extension(url, resp.headers.get("Content-Type"))
+            download_root = self.config_manager.get("download_path", os.path.join(APP_DIR, "podcasts"))
+            if not download_root:
+                download_root = os.path.join(APP_DIR, "podcasts")
+
+            feed_title = self._get_feed_title(article.feed_id) or "Feed"
+            feed_folder = self._safe_name(feed_title)
+            target_dir = os.path.join(download_root, feed_folder)
+            os.makedirs(target_dir, exist_ok=True)
+
+            base_name = self._safe_name(article.title) or "episode"
+            target_path = self._unique_path(os.path.join(target_dir, base_name + ext))
+
+            with open(target_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+
+            self._apply_download_retention(target_dir)
+            wx.CallAfter(lambda: wx.MessageBox(f"Downloaded to:\n{target_path}", "Download complete"))
+        except Exception as e:
+            wx.CallAfter(lambda: wx.MessageBox(f"Download failed: {e}", "Download error", wx.ICON_ERROR))
+
+    def _guess_extension(self, url, content_type=None):
+        path = urlsplit(url).path if url else ""
+        ext = os.path.splitext(path)[1]
+        if ext and len(ext) <= 5:
+            return ext
+
+        mapping = {
+            "audio/mpeg": ".mp3",
+            "audio/mp3": ".mp3",
+            "audio/mp4": ".m4a",
+            "audio/aac": ".aac",
+            "audio/ogg": ".ogg",
+            "audio/opus": ".opus",
+            "audio/x-wav": ".wav",
+            "audio/wav": ".wav",
+            "audio/flac": ".flac"
+        }
+        if content_type:
+            ctype = content_type.split(";")[0].strip().lower()
+            if ctype in mapping:
+                return mapping[ctype]
+            for prefix, mapped in mapping.items():
+                if ctype.startswith(prefix):
+                    return mapped
+        return ".mp3"
+
+    def _safe_name(self, text):
+        if not text:
+            return "untitled"
+        cleaned = re.sub(r'[\\\\/:*?"<>|]+', "_", text)
+        cleaned = cleaned.strip().rstrip(".")
+        return cleaned[:120] or "untitled"
+
+    def _unique_path(self, path):
+        if not os.path.exists(path):
+            return path
+        base, ext = os.path.splitext(path)
+        counter = 1
+        while True:
+            candidate = f"{base}-{counter}{ext}"
+            if not os.path.exists(candidate):
+                return candidate
+            counter += 1
+
+    def _apply_download_retention(self, folder):
+        label = self.config_manager.get("download_retention", "Unlimited")
+        seconds = self._retention_seconds(label)
+        if seconds is None:
+            return
+        cutoff = time.time() - seconds
+        try:
+            for name in os.listdir(folder):
+                path = os.path.join(folder, name)
+                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+        except Exception as e:
+            print(f"Retention cleanup failed for {folder}: {e}")
+
+    def _retention_seconds(self, label):
+        table = {
+            "1 day": 86400,
+            "3 days": 3 * 86400,
+            "1 week": 7 * 86400,
+            "2 weeks": 14 * 86400,
+            "3 weeks": 21 * 86400,
+            "1 month": 30 * 86400,
+            "2 months": 60 * 86400,
+            "6 months": 180 * 86400,
+            "1 year": 365 * 86400,
+            "2 years": 730 * 86400,
+            "5 years": 1825 * 86400,
+            "Unlimited": None
+        }
+        return table.get(label, None)
+
+    def _get_feed_title(self, feed_id):
+        feed = self.feed_map.get(feed_id) if hasattr(self, "feed_map") else None
+        if feed:
+            return feed.title
+        try:
+            feeds = self.provider.get_feeds()
+            for f in feeds:
+                if f.id == feed_id:
+                    return f.title
+        except Exception:
+            pass
+        return None
+
     def on_add_feed(self, event):
         cats = self.provider.get_categories()
         if not cats: cats = ["Uncategorized"]
@@ -596,24 +829,18 @@ class MainFrame(wx.Frame):
                     self.refresh_feeds()
 
     def on_import_opml(self, event, target_category=None):
-        print("DEBUG: on_import_opml triggered")
         dlg = wx.FileDialog(self, "Import OPML", wildcard="OPML files (*.opml)|*.opml", style=wx.FD_OPEN)
         if dlg.ShowModal() == wx.ID_OK:
             path = dlg.GetPath()
-            print(f"DEBUG: Selected path: {path}")
             # wx.BusyInfo("Importing feeds... This may take a while.") # potentially problematic
-            print("DEBUG: Starting import thread...")
             threading.Thread(target=self._import_opml_thread, args=(path, target_category), daemon=True).start()
         dlg.Destroy()
 
     def _import_opml_thread(self, path, target_category):
-        print(f"DEBUG: Thread started for {path}")
         try:
             success = self.provider.import_opml(path, target_category)
-            print(f"DEBUG: import_opml returned {success}")
             wx.CallAfter(self._post_import_opml, success)
         except Exception as e:
-            print(f"DEBUG: Exception in thread: {e}")
             import traceback
             traceback.print_exc()
 
@@ -640,6 +867,11 @@ class MainFrame(wx.Frame):
             data = dlg.get_data()
             for k, v in data.items():
                 self.config_manager.set(k, v)
+            if "playback_speed" in data:
+                try:
+                    self.player_window.set_playback_speed(data["playback_speed"])
+                except Exception:
+                    pass
         dlg.Destroy()
 
     def on_exit(self, event):

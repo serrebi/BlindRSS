@@ -1,17 +1,19 @@
 import sqlite3
 import os
-import sys
-
-if getattr(sys, 'frozen', False):
-    APP_DIR = os.path.dirname(sys.executable)
-else:
-    APP_DIR = os.getcwd()
+from core.config import APP_DIR
 
 DB_FILE = os.path.join(APP_DIR, "rss.db")
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
     c = conn.cursor()
+    # Improve concurrent writer/readers when refresh runs in multiple threads
+    try:
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
+        c.execute("PRAGMA busy_timeout=60000")
+    except Exception:
+        pass
     
     c.execute('''CREATE TABLE IF NOT EXISTS feeds (
         id TEXT PRIMARY KEY,
@@ -84,4 +86,11 @@ def init_db():
     conn.close()
 
 def get_connection():
-    return sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    return conn

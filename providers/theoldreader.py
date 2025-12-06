@@ -65,7 +65,7 @@ class TheOldReaderProvider(RSSProvider):
             h["Authorization"] = f"GoogleLogin auth={self.token}"
         return h
 
-    def refresh(self) -> bool:
+    def refresh(self, progress_cb=None) -> bool:
         if not self._login():
             print("TheOldReader: Refresh skipped due to login failure.")
             return False

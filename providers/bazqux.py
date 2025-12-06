@@ -40,7 +40,7 @@ class BazQuxProvider(RSSProvider):
             h["Authorization"] = f"GoogleLogin auth={self.token}"
         return h
 
-    def refresh(self) -> bool:
+    def refresh(self, progress_cb=None) -> bool:
         return self._login()
 
     def get_feeds(self) -> List[Feed]:

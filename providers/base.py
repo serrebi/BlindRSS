@@ -35,8 +35,11 @@ class RSSProvider(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def refresh(self) -> bool:
-        """Triggers a sync/refresh of feeds."""
+    def refresh(self, progress_cb=None) -> bool:
+        """
+        Triggers a sync/refresh of feeds.
+        progress_cb: optional callable accepting a feed-state dict per completed feed.
+        """
         pass
 
     @abc.abstractmethod

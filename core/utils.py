@@ -5,15 +5,57 @@ import logging
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from dateutil import parser as dateparser
+from dateutil.parser import UnknownTimezoneWarning
 from io import BytesIO
 from core.db import get_connection
+import warnings
 
 log = logging.getLogger(__name__)
+
+warnings.filterwarnings("ignore", category=UnknownTimezoneWarning)
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'application/rss+xml,application/xml,application/atom+xml,text/xml;q=0.9,*/*;q=0.8'
 }
+
+# Common timezone abbreviations mapping for dateutil
+TZINFOS = {
+    "UTC": 0,
+    "GMT": 0,
+    "EST": -18000,
+    "EDT": -14400,
+    "CST": -21600,
+    "CDT": -18000,
+    "MST": -25200,
+    "MDT": -21600,
+    "PST": -28800,
+    "PDT": -25200,
+}
+
+def build_playback_speeds(start: float = 0.5, stop: float = 4.0, step: float = 0.12):
+    """
+    Generate a list of playback speeds rounded to 2 decimals, inclusive of bounds.
+    Default range: 0.50x .. 4.00x in 0.12 increments (VLC-safe window).
+    """
+    speeds = []
+    val = round(start, 2)
+    upper = round(stop, 2)
+    while val <= upper + 1e-9:
+        speeds.append(val)
+        val = round(val + step, 2)
+    if speeds[-1] != upper:
+        speeds.append(upper)
+    # Always include true 1.00x so "Normal" snaps exactly, not ~0.98x
+    speeds.append(1.0)
+    # Deduplicate and sort to keep monotonic order, but drop near-1.0 variants like 0.98
+    speeds = sorted(set(round(v, 2) for v in speeds))
+    cleaned = []
+    for v in speeds:
+        if abs(v - 1.0) <= 0.025 and abs(v - 1.0) > 1e-9:
+            continue
+        cleaned.append(v)
+    return cleaned
 
 def safe_requests_get(url, **kwargs):
     """Wrapper for requests.get with default browser headers."""
@@ -67,9 +109,19 @@ def extract_date_from_text(text: str):
             pass
     # 3) Month name forms (e.g., May 17 2021)
     try:
-        dt = dateparser.parse(text, fuzzy=True, default=datetime(1900, 1, 1))
-        if dt.year > 1900:
-            return dt
+        dt = dateparser.parse(text, fuzzy=True, default=datetime(1900, 1, 1), tzinfos=TZINFOS)
+        if dt and dt.year > 1900:
+            # If parser only saw a bare year (fills month/day with defaults), skip it;
+            # we don't want to override feed dates with year-only hints like "2025".
+            lower = text.lower()
+            has_month_day_hint = (
+                re.search(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\s+\d{1,2}", lower) or
+                re.search(r"\d{1,2}[/-]\d{1,2}", text) or
+                re.search(r"\d{4}-\d{1,2}-\d{1,2}", text)
+            )
+            only_year = (dt.month == 1 and dt.day == 1 and not has_month_day_hint)
+            if not only_year:
+                return dt
     except Exception:
         pass
     return None
@@ -106,7 +158,7 @@ def normalize_date(raw_date_str: str, title: str = "", content: str = "", url: s
     # 3) Check raw feed date
     if raw_date_str:
         try:
-            dt = dateparser.parse(raw_date_str)
+            dt = dateparser.parse(raw_date_str, tzinfos=TZINFOS)
             if valid(dt):
                 return format_datetime(dt)
         except Exception:

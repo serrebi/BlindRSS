@@ -1,4 +1,8 @@
 import wx
+import re
+import os
+from core import utils
+from core.config import APP_DIR
 
 class AddFeedDialog(wx.Dialog):
     def __init__(self, parent, categories):
@@ -44,60 +48,161 @@ class SettingsDialog(wx.Dialog):
     def __init__(self, parent, config):
         super().__init__(parent, title="Settings", size=(500, 600))
         self.config = config
+        self.speed_choices = [self._display_speed(v) for v in utils.build_playback_speeds()]
+        self.retention_choices = [
+            "1 day", "3 days", "1 week", "2 weeks", "3 weeks",
+            "1 month", "2 months", "6 months",
+            "1 year", "2 years", "5 years", "Unlimited"
+        ]
         
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        panel = wx.Panel(self)
-        panel_sizer = wx.BoxSizer(wx.VERTICAL)
-        
-        # Provider Selection
+        # Top-level notebook: General / Providers
+        nb_main = wx.Notebook(self)
+
+        # --- General tab ---
+        p_general = wx.Panel(nb_main)
+        gen_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        hbox1 = wx.BoxSizer(wx.HORIZONTAL)
+        hbox1.Add(wx.StaticText(p_general, label="Refresh Interval (seconds):"), flag=wx.RIGHT, border=8)
+        self.sp_refresh = wx.SpinCtrl(p_general, min=30, max=3600, initial=int(self.config.get("refresh_interval", 300)))
+        hbox1.Add(self.sp_refresh, proportion=1)
+        gen_sizer.Add(hbox1, flag=wx.EXPAND|wx.ALL, border=10)
+
+        hbox_conc = wx.BoxSizer(wx.HORIZONTAL)
+        hbox_conc.Add(wx.StaticText(p_general, label="Max concurrent refreshes:"), flag=wx.RIGHT, border=8)
+        self.sp_max_concurrent = wx.SpinCtrl(p_general, min=1, max=64, initial=int(self.config.get("max_concurrent_refreshes", 12)))
+        hbox_conc.Add(self.sp_max_concurrent, proportion=1)
+        gen_sizer.Add(hbox_conc, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.TOP, border=10)
+
+        hbox_host = wx.BoxSizer(wx.HORIZONTAL)
+        hbox_host.Add(wx.StaticText(p_general, label="Per-host concurrency:"), flag=wx.RIGHT, border=8)
+        self.sp_per_host = wx.SpinCtrl(p_general, min=1, max=16, initial=int(self.config.get("per_host_max_connections", 3)))
+        hbox_host.Add(self.sp_per_host, proportion=1)
+        gen_sizer.Add(hbox_host, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.TOP, border=10)
+
+        hbox_timeout = wx.BoxSizer(wx.HORIZONTAL)
+        hbox_timeout.Add(wx.StaticText(p_general, label="Feed timeout (seconds):"), flag=wx.RIGHT, border=8)
+        self.sp_feed_timeout = wx.SpinCtrl(p_general, min=5, max=120, initial=int(self.config.get("feed_timeout_seconds", 15)))
+        hbox_timeout.Add(self.sp_feed_timeout, proportion=1)
+        gen_sizer.Add(hbox_timeout, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.TOP, border=10)
+
+        hbox_retries = wx.BoxSizer(wx.HORIZONTAL)
+        hbox_retries.Add(wx.StaticText(p_general, label="Retry attempts per feed:"), flag=wx.RIGHT, border=8)
+        self.sp_feed_retries = wx.SpinCtrl(p_general, min=0, max=5, initial=int(self.config.get("feed_retry_attempts", 1)))
+        hbox_retries.Add(self.sp_feed_retries, proportion=1)
+        gen_sizer.Add(hbox_retries, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.TOP, border=10)
+
+        self.cb_skip_silence = wx.CheckBox(p_general, label="Skip silence during playback (requires ffmpeg)")
+        self.cb_skip_silence.SetValue(bool(self.config.get("skip_silence", False)))
+        gen_sizer.Add(self.cb_skip_silence, flag=wx.EXPAND|wx.ALL, border=10)
+
+        hbox_speed = wx.BoxSizer(wx.HORIZONTAL)
+        hbox_speed.Add(wx.StaticText(p_general, label="Playback speed:"), flag=wx.RIGHT|wx.ALIGN_CENTER_VERTICAL, border=8)
+        self.cb_playback_speed = wx.ComboBox(
+            p_general,
+            choices=self.speed_choices,
+            style=wx.CB_READONLY
+        )
+        nearest = self._nearest_speed_value(self.config.get("playback_speed", 1.0))
+        self.cb_playback_speed.SetValue(self._display_speed(nearest))
+        hbox_speed.Add(self.cb_playback_speed, proportion=1)
+        gen_sizer.Add(hbox_speed, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.TOP, border=10)
+
+        p_general.SetSizer(gen_sizer)
+        nb_main.AddPage(p_general, "General")
+
+        # --- Downloads tab ---
+        p_downloads = wx.Panel(nb_main)
+        self._init_downloads_tab(p_downloads)
+        nb_main.AddPage(p_downloads, "Downloads")
+
+        # --- Providers tab ---
+        p_prov = wx.Panel(nb_main)
+        prov_sizer = wx.BoxSizer(wx.VERTICAL)
+
         hbox_prov = wx.BoxSizer(wx.HORIZONTAL)
-        hbox_prov.Add(wx.StaticText(panel, label="Active Provider:"), flag=wx.RIGHT, border=8)
-        self.cb_provider = wx.ComboBox(panel, choices=["local", "miniflux", "theoldreader", "inoreader", "bazqux"], style=wx.CB_READONLY)
+        hbox_prov.Add(wx.StaticText(p_prov, label="Active Provider:"), flag=wx.RIGHT, border=8)
+        self.cb_provider = wx.ComboBox(p_prov, choices=["local", "miniflux", "theoldreader", "inoreader", "bazqux"], style=wx.CB_READONLY)
         self.cb_provider.SetValue(self.config.get("active_provider", "local"))
         hbox_prov.Add(self.cb_provider, proportion=1)
-        panel_sizer.Add(hbox_prov, flag=wx.EXPAND|wx.ALL, border=10)
-        
-        # Refresh Interval
-        hbox1 = wx.BoxSizer(wx.HORIZONTAL)
-        hbox1.Add(wx.StaticText(panel, label="Refresh Interval (seconds):"), flag=wx.RIGHT, border=8)
-        self.sp_refresh = wx.SpinCtrl(panel, min=30, max=3600, initial=int(self.config.get("refresh_interval", 300)))
-        hbox1.Add(self.sp_refresh, proportion=1)
-        panel_sizer.Add(hbox1, flag=wx.EXPAND|wx.LEFT|wx.RIGHT, border=10)
-        
-        # Notebook for Provider Settings
-        nb = wx.Notebook(panel)
-        
-        # Miniflux Tab
-        self.p_mf = wx.Panel(nb)
+        prov_sizer.Add(hbox_prov, flag=wx.EXPAND|wx.ALL, border=10)
+
+        nb_prov = wx.Notebook(p_prov)
+
+        self.p_mf = wx.Panel(nb_prov)
         self._init_miniflux_tab(self.p_mf)
-        nb.AddPage(self.p_mf, "Miniflux")
-        
-        # TheOldReader Tab
-        self.p_tor = wx.Panel(nb)
+        nb_prov.AddPage(self.p_mf, "Miniflux")
+
+        self.p_tor = wx.Panel(nb_prov)
         self._init_tor_tab(self.p_tor)
-        nb.AddPage(self.p_tor, "TheOldReader")
-        
-        # Inoreader Tab
-        self.p_ino = wx.Panel(nb)
+        nb_prov.AddPage(self.p_tor, "TheOldReader")
+
+        self.p_ino = wx.Panel(nb_prov)
         self._init_ino_tab(self.p_ino)
-        nb.AddPage(self.p_ino, "Inoreader")
-        
-        # BazQux Tab
-        self.p_bz = wx.Panel(nb)
+        nb_prov.AddPage(self.p_ino, "Inoreader")
+
+        self.p_bz = wx.Panel(nb_prov)
         self._init_bz_tab(self.p_bz)
-        nb.AddPage(self.p_bz, "BazQux")
-        
-        panel_sizer.Add(nb, 1, wx.EXPAND|wx.ALL, 10)
-        
-        panel.SetSizer(panel_sizer)
-        
-        main_sizer.Add(panel, 1, wx.EXPAND)
+        nb_prov.AddPage(self.p_bz, "BazQux")
+
+        prov_sizer.Add(nb_prov, 1, wx.EXPAND|wx.ALL, 10)
+        p_prov.SetSizer(prov_sizer)
+        nb_main.AddPage(p_prov, "Providers")
+
+        main_sizer.Add(nb_main, 1, wx.EXPAND|wx.ALL, 5)
         
         btns = self.CreateButtonSizer(wx.OK | wx.CANCEL)
         main_sizer.Add(btns, flag=wx.EXPAND|wx.ALL, border=10)
         
         self.SetSizer(main_sizer)
+
+    def _init_downloads_tab(self, p):
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self.chk_enable_downloads = wx.CheckBox(p, label="Enable downloads")
+        self.chk_enable_downloads.SetValue(bool(self.config.get("downloads_enabled", False)))
+        self.chk_enable_downloads.Bind(wx.EVT_CHECKBOX, self._on_download_toggle)
+        sizer.Add(self.chk_enable_downloads, 0, wx.EXPAND|wx.ALL, 10)
+
+        hbox_path = wx.BoxSizer(wx.HORIZONTAL)
+        hbox_path.Add(wx.StaticText(p, label="Download location:"), 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 8)
+        default_path = self.config.get("download_path") or os.path.join(APP_DIR, "podcasts")
+        self.tc_download_path = wx.TextCtrl(p, value=str(default_path))
+        hbox_path.Add(self.tc_download_path, 1, wx.EXPAND)
+        self.btn_browse_download = wx.Button(p, label="Browse...")
+        self.btn_browse_download.Bind(wx.EVT_BUTTON, self._on_browse_download)
+        hbox_path.Add(self.btn_browse_download, 0, wx.LEFT, 8)
+        sizer.Add(hbox_path, 0, wx.EXPAND|wx.LEFT|wx.RIGHT|wx.TOP, 10)
+
+        hbox_keep = wx.BoxSizer(wx.HORIZONTAL)
+        hbox_keep.Add(wx.StaticText(p, label="Keep episodes for:"), 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 8)
+        self.cb_retention = wx.ComboBox(p, choices=self.retention_choices, style=wx.CB_READONLY)
+        current_retention = self.config.get("download_retention", "Unlimited")
+        if current_retention not in self.retention_choices:
+            current_retention = "Unlimited"
+        self.cb_retention.SetValue(current_retention)
+        hbox_keep.Add(self.cb_retention, 1)
+        sizer.Add(hbox_keep, 0, wx.EXPAND|wx.LEFT|wx.RIGHT|wx.TOP, 10)
+
+        p.SetSizer(sizer)
+        self._update_download_controls_state()
+
+    def _on_download_toggle(self, event):
+        self._update_download_controls_state()
+
+    def _update_download_controls_state(self):
+        enabled = self.chk_enable_downloads.GetValue()
+        for ctrl in (self.tc_download_path, self.btn_browse_download, self.cb_retention):
+            ctrl.Enable(enabled)
+
+    def _on_browse_download(self, event):
+        style = wx.DD_DEFAULT_STYLE | wx.DD_NEW_DIR_BUTTON
+        dlg = wx.DirDialog(self, "Choose download folder", defaultPath=self.tc_download_path.GetValue(), style=style)
+        if dlg.ShowModal() == wx.ID_OK:
+            self.tc_download_path.SetValue(dlg.GetPath())
+        dlg.Destroy()
 
     def _init_miniflux_tab(self, p):
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -201,9 +306,47 @@ class SettingsDialog(wx.Dialog):
         
         return {
             "refresh_interval": self.sp_refresh.GetValue(),
+            "max_concurrent_refreshes": self.sp_max_concurrent.GetValue(),
+            "per_host_max_connections": self.sp_per_host.GetValue(),
+            "feed_timeout_seconds": self.sp_feed_timeout.GetValue(),
+            "feed_retry_attempts": self.sp_feed_retries.GetValue(),
             "active_provider": self.cb_provider.GetValue(),
+            "skip_silence": self.cb_skip_silence.GetValue(),
+            "playback_speed": self._parse_speed(self.cb_playback_speed.GetValue()),
+            "downloads_enabled": self.chk_enable_downloads.GetValue(),
+            "download_path": self.tc_download_path.GetValue(),
+            "download_retention": self.cb_retention.GetValue(),
             "providers": self.config["providers"]
         }
+
+    def _format_speed(self, speed):
+        try:
+            return f"{float(speed):.2f}"
+        except Exception:
+            return "1.00"
+
+    def _display_speed(self, speed):
+        val = self._format_speed(speed)
+        if abs(float(val) - 1.0) < 1e-6:
+            return f"Normal ({val}x)"
+        return f"{val}x"
+
+    def _parse_speed(self, text):
+        m = re.search(r"[0-9]+(?:\.[0-9]+)?", str(text))
+        if not m:
+            return 1.0
+        try:
+            return float(m.group(0))
+        except Exception:
+            return 1.0
+
+    def _nearest_speed_value(self, speed):
+        try:
+            speed = float(speed)
+        except Exception:
+            speed = 1.0
+        speeds = utils.build_playback_speeds()
+        return min(speeds, key=lambda v: abs(v - speed))
 
 
 class PodcastSearchDialog(wx.Dialog):

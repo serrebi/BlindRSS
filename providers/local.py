@@ -5,13 +5,19 @@ import threading
 import sqlite3
 import concurrent.futures
 from typing import List, Dict, Any
+from collections import defaultdict
+from urllib.parse import urlparse
 from .base import RSSProvider, Feed, Article
 from core.db import get_connection, init_db
 from core.discovery import discover_feed
 from core import utils
-from bs4 import BeautifulSoup as BS
+from bs4 import BeautifulSoup as BS, XMLParsedAsHTMLWarning
 import xml.etree.ElementTree as ET
 import logging
+import warnings
+
+# Avoid noisy warnings when falling back to HTML parser for XML content
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 log = logging.getLogger(__name__)
 
@@ -23,20 +29,30 @@ class LocalProvider(RSSProvider):
     def get_name(self) -> str:
         return "Local RSS"
 
-    def refresh(self) -> bool:
+    def refresh(self, progress_cb=None) -> bool:
         conn = get_connection()
         c = conn.cursor()
-        # Fetch etag/last_modified for conditional get
-        c.execute("SELECT id, url, etag, last_modified FROM feeds")
+        # Fetch etag/last_modified for conditional get plus metadata for UI updates
+        c.execute("SELECT id, url, title, category, etag, last_modified FROM feeds")
         feeds = c.fetchall()
         conn.close()
 
         if not feeds:
             return True
 
+        max_workers = max(1, int(self.config.get("max_concurrent_refreshes", 12) or 1))
+        per_host_limit = max(1, int(self.config.get("per_host_max_connections", 3) or 1))
+        feed_timeout = max(1, int(self.config.get("feed_timeout_seconds", 15) or 15))
+        retries = max(0, int(self.config.get("feed_retry_attempts", 1) or 0))
+
+        host_limits = defaultdict(lambda: threading.Semaphore(per_host_limit))
+
+        def task(feed_row):
+            return self._refresh_single_feed(feed_row, host_limits, feed_timeout, retries, progress_cb)
+
         # Increase workers for network-bound tasks
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-            futures = {executor.submit(self._refresh_single_feed, f[0], f[1], f[2], f[3]): f for f in feeds}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(task, f): f for f in feeds}
             for future in concurrent.futures.as_completed(futures):
                 try:
                     future.result()
@@ -44,25 +60,55 @@ class LocalProvider(RSSProvider):
                     log.error(f"Refresh worker error: {e}")
         return True
 
-    def _refresh_single_feed(self, feed_id, feed_url, etag, last_modified):
+    def _refresh_single_feed(self, feed_row, host_limits, feed_timeout, retries, progress_cb):
         # Each thread gets its own connection
+        feed_id, feed_url, feed_title, feed_category, etag, last_modified = feed_row
+        status = "ok"
+        new_items = 0
+        error_msg = None
+        final_title = feed_title or "Unknown Feed"
+
+        headers = {}
+        if etag: headers['If-None-Match'] = etag
+        if last_modified: headers['If-Modified-Since'] = last_modified
+
+        host = urlparse(feed_url).hostname or feed_url
+        limiter = host_limits[host]
+
+        xml_text = None
+        new_etag = None
+        new_last_modified = None
+
         try:
-            headers = {}
-            if etag: headers['If-None-Match'] = etag
-            if last_modified: headers['If-Modified-Since'] = last_modified
-            
-            try:
-                resp = utils.safe_requests_get(feed_url, headers=headers, timeout=15)
-                if resp.status_code == 304:
-                    # Not modified, skip parsing
-                    return
-                resp.raise_for_status()
-                xml_text = resp.text
-                
-                new_etag = resp.headers.get('ETag')
-                new_last_modified = resp.headers.get('Last-Modified')
-            except Exception as e:
-                log.error(f"Network error fetching {feed_url}: {e}")
+            with limiter:
+                last_exc = None
+                attempts = retries + 1
+                for attempt in range(1, attempts + 1):
+                    try:
+                        resp = utils.safe_requests_get(feed_url, headers=headers, timeout=feed_timeout)
+                        if resp.status_code == 304:
+                            status = "not_modified"
+                            new_etag = etag
+                            new_last_modified = last_modified
+                            break
+                        resp.raise_for_status()
+                        xml_text = resp.text
+                        new_etag = resp.headers.get('ETag')
+                        new_last_modified = resp.headers.get('Last-Modified')
+                        break
+                    except Exception as e:
+                        last_exc = e
+                        status = "error"
+                        error_msg = str(e)
+                        if attempt <= retries:
+                            backoff = min(4, attempt)  # simple backoff
+                            time.sleep(backoff)
+                            continue
+                        raise last_exc
+
+            if status == "not_modified":
+                return
+            if xml_text is None:
                 return
 
             d = feedparser.parse(xml_text)
@@ -70,7 +116,13 @@ class LocalProvider(RSSProvider):
             # Build chapter map
             chapter_map = {}
             try:
-                soup = BS(xml_text, "xml")
+                # Prefer XML parser if available (lxml), otherwise fall back to built-in HTML parser
+                try:
+                    soup = BS(xml_text, "xml")
+                except Exception as parser_exc:
+                    log.info(f"XML parser unavailable for chapter map on {feed_url}; falling back to html.parser ({parser_exc})")
+                    soup = BS(xml_text, "html.parser")
+
                 for item in soup.find_all("item"):
                     chap = item.find(["podcast:chapters", "psc:chapters", "chapters"])
                     if chap:
@@ -91,9 +143,10 @@ class LocalProvider(RSSProvider):
             conn = get_connection()
             c = conn.cursor()
             
-            feed_title = d.feed.get('title', 'Unknown Feed')
+            final_title = d.feed.get('title', final_title)
             c.execute("UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?", 
-                      (feed_title, new_etag, new_last_modified, feed_id))
+                      (final_title, new_etag, new_last_modified, feed_id))
+            conn.commit()
             
             for entry in d.entries:
                 content = ""
@@ -133,6 +186,7 @@ class LocalProvider(RSSProvider):
                     existing_date = row[0] or ""
                     if existing_date != date:
                             c.execute("UPDATE articles SET date = ? WHERE id = ?", (date, article_id))
+                            conn.commit()
                     continue
 
                 media_url = None
@@ -154,6 +208,8 @@ class LocalProvider(RSSProvider):
 
                 c.execute("INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
                             (article_id, feed_id, title, url, content, date, author, media_url, media_type))
+                conn.commit()
+                new_items += 1
                 
                 chapter_url = None
                 if 'podcast_chapters' in entry:
@@ -173,7 +229,51 @@ class LocalProvider(RSSProvider):
             conn.commit()
             conn.close()
         except Exception as e:
+            error_msg = str(e)
+            status = "error"
             log.error(f"Error processing feed {feed_url}: {e}")
+        finally:
+            state = self._collect_feed_state(feed_id, final_title, feed_category, status, new_items, error_msg)
+            self._emit_progress(progress_cb, state)
+
+    def _collect_feed_state(self, feed_id, title, category, status, new_items, error_msg):
+        unread = 0
+        conn = None
+        try:
+            conn = get_connection()
+            c = conn.cursor()
+            c.execute("SELECT title, category FROM feeds WHERE id = ?", (feed_id,))
+            row = c.fetchone()
+            if row:
+                title = row[0] or title
+                category = row[1] or category
+            c.execute("SELECT COUNT(*) FROM articles WHERE feed_id = ? AND is_read = 0", (feed_id,))
+            unread = c.fetchone()[0] or 0
+        except Exception as e:
+            log.debug(f"Feed state fetch failed for {feed_id}: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        return {
+            "id": feed_id,
+            "title": title,
+            "category": category or "Uncategorized",
+            "unread_count": unread,
+            "status": status,
+            "new_items": new_items,
+            "error": error_msg,
+        }
+
+    def _emit_progress(self, progress_cb, state):
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(state)
+        except Exception as e:
+            log.debug(f"Progress callback failed: {e}")
 
     def get_feeds(self) -> List[Feed]:
         conn = get_connection()
@@ -283,7 +383,7 @@ class LocalProvider(RSSProvider):
         import sys
         
         log_filename = os.path.join(os.getcwd(), f"opml_debug_{int(time.time())}_{uuid.uuid4().hex[:4]}.log")
-        print(f"DEBUG: Attempting to log to {log_filename}")
+        # Optionally log to file if needed; removed verbose debug print
         
         try:
             with open(log_filename, "w", encoding="utf-8") as log:
@@ -394,7 +494,7 @@ class LocalProvider(RSSProvider):
                     write_log(traceback.format_exc())
                     return False
         except Exception as e:
-            print(f"DEBUG: FATAL ERROR opening log file: {e}")
+            # Logging file failed; continue without logging
             return False
 
     def export_opml(self, path: str) -> bool:

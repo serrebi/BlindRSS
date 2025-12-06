@@ -1,14 +1,12 @@
 import sys
 import multiprocessing
 
-# Ensure dependencies are present before importing GUI
-# Only runs when running from source (not frozen)
-if not getattr(sys, 'frozen', False):
-    try:
-        from core.dependency_check import check_and_install_dependencies
-        check_and_install_dependencies()
-    except ImportError:
-        pass 
+# Ensure dependencies/media tools are present (even when frozen)
+try:
+    from core.dependency_check import check_and_install_dependencies
+    check_and_install_dependencies()
+except Exception:
+    pass 
 
 import wx
 from core.config import ConfigManager
