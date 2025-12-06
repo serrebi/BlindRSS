@@ -4,6 +4,10 @@ import importlib.metadata
 import shutil
 import platform
 import os
+import urllib.request
+import contextlib
+import ctypes
+import winreg
 
 
 def _run_quiet(cmd, timeout=900):
@@ -137,10 +141,86 @@ def ensure_media_tools():
             install_with([["zypper", "--non-interactive", "install"] + pkgs])
         return
 
+
+def _ensure_yt_dlp_cli():
+    """
+    Make sure a standalone yt-dlp binary exists and is on PATH (Windows).
+    Safe for frozen executables; avoids pip and repeated self-launch.
+    """
+    if platform.system().lower() != "windows":
+        return
+
+    if shutil.which("yt-dlp") or shutil.which("yt-dlp.exe"):
+        return
+
+    base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    bin_dir = os.path.join(base_dir, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    dest = os.path.join(bin_dir, "yt-dlp.exe")
+
+    if not os.path.isfile(dest):
+        url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+        try:
+            with contextlib.closing(urllib.request.urlopen(url, timeout=30)) as r, open(dest, "wb") as f:
+                shutil.copyfileobj(r, f)
+        except Exception:
+            return
+
+    current = os.environ.get("PATH", "")
+    if bin_dir not in current.split(os.pathsep):
+        os.environ["PATH"] = os.pathsep.join([bin_dir, current])
+
+    _add_bin_to_user_path(bin_dir)
+
+
+def _add_bin_to_user_path(bin_dir):
+    """Persist bin_dir to the current user's PATH (Windows) silently."""
+    try:
+        if platform.system().lower() != "windows":
+            return
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+            try:
+                existing, _ = winreg.QueryValueEx(key, "PATH")
+            except FileNotFoundError:
+                existing = ""
+            parts = existing.split(os.pathsep) if existing else []
+            if bin_dir in parts:
+                return
+            new_path = os.pathsep.join(parts + [bin_dir]) if existing else bin_dir
+            winreg.SetValueEx(key, "PATH", 0, winreg.REG_EXPAND_SZ, new_path)
+        # Notify running processes (best-effort, silent on failure)
+        try:
+            buf = ctypes.create_unicode_buffer("Environment")
+            HWND_BROADCAST = 0xFFFF
+            WM_SETTINGCHANGE = 0x1A
+            SMTO_ABORTIFHUNG = 0x0002
+            ctypes.windll.user32.SendMessageTimeoutW(
+                HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+                ctypes.addressof(buf),
+                SMTO_ABORTIFHUNG, 5000, None
+            )
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 def check_and_install_dependencies():
     """
     Checks for required packages and installs/updates them silently if missing.
     """
+    # When frozen by PyInstaller, sys.executable is the bundled .exe. Running
+    # `[sys.executable, '-m', 'pip', ...]` would just relaunch this app
+    # repeatedly instead of pip, spawning infinite copies. Skip installs there
+    # and only fix up PATH/media tools/yt-dlp CLI.
+    if getattr(sys, "frozen", False):
+        _maybe_add_windows_path()
+        _ensure_yt_dlp_cli()
+        try:
+            ensure_media_tools()
+        except Exception:
+            pass
+        return
+
     required = {'yt-dlp', 'wxpython', 'feedparser', 'requests', 'beautifulsoup4', 'python-dateutil', 'mutagen', 'python-vlc'}
     # pkg_resources is deprecated; use importlib.metadata instead
     installed = set()
@@ -174,5 +254,10 @@ def check_and_install_dependencies():
     # Media backends (system packages)
     try:
         ensure_media_tools()
+    except Exception:
+        pass
+
+    try:
+        _ensure_yt_dlp_cli()
     except Exception:
         pass

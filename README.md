@@ -1,20 +1,28 @@
 # BlindRSS
-A vibed rss reader for screen reader users.
-## 1. What this app does
-- A Blind-friendly RSS and podcast reader with keyboard-first controls.
-- Lets you subscribe, refresh, read, and play feeds without sighted UI tricks.
-- Plays podcasts with chapters support, playback speed, and skip silence support.
-- Keeps feeds, articles, and settings locally so you control your data.
-- Supports a few different services, like TheOldReader, Miniflux, and more!
-- OPML import/export and podcast search.
 
-## 2. What you need before you start
+## 1. What this app does
+- Blind-friendly RSS and podcast reader with keyboard-first controls.
+- Lets you subscribe, refresh, read, and play feeds without sighted UI tricks.
+- Plays podcasts with chapters and falls back to download if streaming fails.
+- Keeps feeds, articles, and settings locally so you control your data.
+
+## 2. Main features
+- Works with screen readers; uses standard wxPython controls.
+- Fast startup; refreshes feeds in parallel and uses HTTP cache headers.
+- Plays audio via VLC; supports YouTube links and enclosure media.
+- Optional skip-silence filter (needs ffmpeg); adjustable playback speed.
+- Podcast chapters shown and keyboard-selectable.
+- Tray icon for quick restore, refresh, and player controls.
+- OPML import/export; feed discovery helps with YouTube channel/user/playlist URLs.
+- Categories to group feeds; unread counts shown in the tree.
+
+## 3. What you need before you start
 - Windows with a terminal and your screen reader (NVDA/JAWS) running.
 - Python 3.13 installed globally (`python --version`).
 - Pip available (`pip --version`).
 - VLC media player installed system-wide.
 - Internet access for feeds and installing dependencies.
-- ffmpeg.
+- ffmpeg installed if you want the skip-silence option (optional).
 
 ## 4. Installing BlindRSS
 1. Open a terminal in the folder where you want the app.
