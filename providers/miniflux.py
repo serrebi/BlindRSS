@@ -1,20 +1,11 @@
 import requests
 import re
-import os
-import time
-import sqlite3
-import concurrent.futures
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
 from dateutil import parser as dateparser
 from .base import RSSProvider, Feed, Article
 from core import utils
-from core.signals import SignalManager
-import logging
-from core.db import get_connection
-
-log = logging.getLogger(__name__)
 
 class MinifluxProvider(RSSProvider):
     def __init__(self, config: Dict[str, Any]):
@@ -24,11 +15,9 @@ class MinifluxProvider(RSSProvider):
         self.base_url = re.sub(r'/v1/?$', '', url)
         self.headers = {
             "X-Auth-Token": self.conf.get("api_key", ""),
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "BlindRSS/1.0"
         }
-        # Do not merge with utils.HEADERS as RSS accept headers break JSON APIs
+        # Merge with default browser headers for better compatibility
+        self.headers.update(utils.HEADERS)
         
     def get_name(self) -> str:
         return "Miniflux"
@@ -47,11 +36,6 @@ class MinifluxProvider(RSSProvider):
         try:
             # Uses self.headers which now includes User-Agent
             resp = requests.request(method, url, headers=self.headers, json=json, params=params, timeout=10)
-            
-            if resp.status_code == 401:
-                print(f"Miniflux Authentication Failed (401) for {url}. Please check your API Key in config.json.")
-                return None
-                
             resp.raise_for_status()
             
             if resp.status_code == 204:
@@ -68,235 +52,8 @@ class MinifluxProvider(RSSProvider):
             return None
 
     def refresh(self) -> bool:
-        log.info("MinifluxProvider.refresh() called.")
-        # Step 1: Tell Miniflux server to refresh its feeds (gets new items into Miniflux)
         self._req("PUT", "/v1/feeds/refresh")
-
-        # Step 2: Fetch all feeds from Miniflux
-        miniflux_feeds_data = self._req("GET", "/v1/feeds")
-        if not miniflux_feeds_data:
-            log.error("MinifluxProvider: Failed to fetch feeds from Miniflux.")
-            return False
-        log.debug(f"MinifluxProvider: Fetched {len(miniflux_feeds_data)} feeds from Miniflux.")
-
-        # Optional throttles for testing/CI to avoid syncing tens of thousands of entries
-        max_test_feeds = int(os.getenv("MINIFLUX_TEST_FEEDS", "0") or "0")
-        page_limit_override = int(os.getenv("MINIFLUX_PAGE_LIMIT", "0") or "0")
-
-        def latest_ts_for_feed(cur, feed_id: str):
-            cur.execute("SELECT MAX(date) FROM articles WHERE feed_id=?", (feed_id,))
-            row = cur.fetchone()
-            if not row or not row[0]:
-                return None
-            try:
-                dt = dateparser.parse(row[0])
-                if not dt.tzinfo:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                now_ts = datetime.now(timezone.utc).timestamp()
-                ts = int(dt.timestamp())
-                # Guard against bad stored dates that are far in the future which would stop incremental sync.
-                if ts > now_ts + 2*24*3600:
-                    return None
-                return ts
-            except Exception:
-                return None
-
-        with get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM articles")
-            total_existing = c.fetchone()[0] or 0
-            if total_existing < 10:
-                self._seed_recent_entries(c, conn)
-        # Parallelize per-feed sync to reduce delays
-        max_workers = min(6, len(miniflux_feeds_data) or 1)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_feed = {}
-            processed_feeds = 0
-            for mf_feed in miniflux_feeds_data:
-                if max_test_feeds:
-                    if processed_feeds >= max_test_feeds:
-                        break
-                future = executor.submit(self._sync_single_feed, mf_feed, page_limit_override)
-                future_to_feed[future] = mf_feed
-                processed_feeds += 1
-            # Wait for all without raising to keep best-effort behavior
-            for future in concurrent.futures.as_completed(future_to_feed):
-                exc = future.exception()
-                if exc:
-                    feed_title = future_to_feed[future].get("title", "unknown")
-                    log.error(f"MinifluxProvider: feed '{feed_title}' sync error: {exc}")
-        log.info("MinifluxProvider: All feed articles processed and transaction committed.")
-        log.info("MinifluxProvider.refresh() completed.")
         return True
-
-    def _execute_retry(self, cursor, sql, params=(), retries=6, delay=0.2):
-        for attempt in range(retries):
-            try:
-                cursor.execute(sql, params)
-                return
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() and attempt < retries - 1:
-                    time.sleep(delay * (attempt + 1))
-                    continue
-                raise
-
-    def _latest_ts_for_feed(self, cursor, feed_id: str):
-        cursor.execute("SELECT MAX(date) FROM articles WHERE feed_id=?", (feed_id,))
-        row = cursor.fetchone()
-        if not row or not row[0]:
-            return None
-        try:
-            dt = dateparser.parse(row[0])
-            if not dt.tzinfo:
-                dt = dt.replace(tzinfo=timezone.utc)
-            now_ts = datetime.now(timezone.utc).timestamp()
-            ts = int(dt.timestamp())
-            if ts > now_ts + 2 * 24 * 3600:
-                return None
-            return ts
-        except Exception:
-            return None
-
-    def _sync_single_feed(self, mf_feed: Dict[str, Any], page_limit_override: int):
-        feed_id = str(mf_feed["id"])
-        feed_title = mf_feed["title"]
-        feed_url = mf_feed["site_url"]
-        feed_category = mf_feed.get("category", {}).get("title", "Uncategorized")
-
-        with get_connection() as conn:
-            c = conn.cursor()
-            self._execute_retry(
-                c,
-                "INSERT OR IGNORE INTO feeds (id, url, title, category, icon_url) VALUES (?, ?, ?, ?, ?)",
-                (feed_id, feed_url, feed_title, feed_category, mf_feed.get("icon", {}).get("data", ""))
-            )
-
-            limit = page_limit_override if page_limit_override > 0 else 100
-            published_after_ts = self._latest_ts_for_feed(c, feed_id)
-            c.execute("SELECT COUNT(*) FROM articles WHERE feed_id=?", (feed_id,))
-            existing_count = c.fetchone()[0] or 0
-            cold_start = existing_count < 100
-            if cold_start:
-                published_after_ts = None
-
-            for status in ["unread", "read"]:
-                offset = 0
-                while True:
-                    params = {
-                        "feed_id": feed_id,
-                        "direction": "desc",
-                        "order": "published_at",
-                        "limit": limit,
-                        "status": status,
-                        "offset": offset
-                    }
-                    if published_after_ts:
-                        params["published_after"] = published_after_ts - 60
-
-                    data = self._req("GET", "/v1/entries", params=params)
-                    if not data or not data.get("entries"):
-                        break
-                    entries = data.get("entries", [])
-
-                    for entry in entries:
-                        self._process_miniflux_entry_into_db(entry, feed_id, c)
-
-                    conn.commit()
-                    if entries:
-                        SignalManager.emit("feed_update", {"feed_id": feed_id, "count": len(entries)})
-
-                    if len(entries) < limit or os.getenv("MINIFLUX_TEST_STOP_FIRST_PAGE"):
-                        break
-                    offset += limit
-
-        log.debug(f"MinifluxProvider: Finished feed '{feed_title}' with limit {limit}.")
-
-    def _seed_recent_entries(self, cursor, conn):
-        """
-        On empty DB, quickly fetch a global batch of latest unread entries so first-run UI is populated immediately.
-        """
-        try:
-            data = self._req("GET", "/v1/entries", params={
-                "direction": "desc",
-                "order": "published_at",
-                "limit": 200,
-                "status": "unread"
-            })
-            if not data or not data.get("entries"):
-                return
-            per_feed_counts = {}
-            for entry in data.get("entries", []):
-                feed_id = str(entry["feed_id"])
-                self._process_miniflux_entry_into_db(entry, feed_id, cursor)
-                per_feed_counts[feed_id] = per_feed_counts.get(feed_id, 0) + 1
-            conn.commit()
-            for fid, cnt in per_feed_counts.items():
-                SignalManager.emit("feed_update", {"feed_id": fid, "count": cnt})
-            log.info(f"MinifluxProvider: Seeded {sum(per_feed_counts.values())} recent entries for empty DB.")
-        except Exception as e:
-            log.warning(f"MinifluxProvider: seed recent entries failed: {e}")
-
-    def _process_miniflux_entry_into_db(self, entry, feed_id, cursor):
-        article_id = str(entry["id"])
-        
-        # Check if article exists in local DB for this feed
-        self._execute_retry(cursor, "SELECT date FROM articles WHERE id = ? AND feed_id = ?", (article_id, feed_id))
-        row = cursor.fetchone()
-        
-        media_url = None
-        media_type = None
-        enclosures = entry.get("enclosures", [])
-        if enclosures:
-            media_url = enclosures[0].get("url")
-            media_type = enclosures[0].get("mime_type")
-
-        date = utils.normalize_date(
-            entry.get("published_at") or entry.get("published"),
-            entry.get("title") or "",
-            entry.get("content") or entry.get("summary") or "",
-            entry.get("url") or "",
-            entry.get("created_at") or ""
-        )
-        # If feed date is far in the future or normalization failed, fall back to created_at or 'now'
-        try:
-            if date == "0001-01-01 00:00:00":
-                raise ValueError("sentinel date")
-            dt = dateparser.parse(date)
-            if not dt.tzinfo:
-                dt = dt.replace(tzinfo=timezone.utc)
-            if dt - datetime.now(timezone.utc) > timedelta(days=2):
-                raise ValueError("future skew")
-        except Exception:
-            fallback = utils.normalize_date(
-                entry.get("created_at"),
-                entry.get("title") or "",
-                entry.get("content") or entry.get("summary") or "",
-                entry.get("url") or ""
-            )
-            if fallback == "0001-01-01 00:00:00":
-                date = utils.format_datetime(datetime.now(timezone.utc))
-            else:
-                date = fallback
-        
-        if row:
-            # Article exists, check if date needs updating
-            existing_date = row[0] or ""
-            if existing_date != date:
-                self._execute_retry(cursor,
-                                    "UPDATE articles SET title=?, url=?, content=?, date=?, author=?, is_read=?, media_url=?, media_type=? WHERE id=? AND feed_id=?",
-                                    (entry["title"], entry["url"], entry.get("content", ""), date, entry.get("author", ""), 
-                                     (1 if entry.get("status") == "read" else 0), media_url, media_type, article_id, feed_id))
-        else:
-            # New article, insert it
-            try:
-                self._execute_retry(cursor,
-                                    "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                    (article_id, feed_id, entry["title"], entry["url"], entry.get("content", ""), date, entry.get("author", ""), 
-                                     (1 if entry.get("status") == "read" else 0), media_url, media_type))
-                # Chapter fetching is now lazy-loaded on selection/play
-            except Exception as e:
-                log.error(f"ERROR_MINIFLUX_DB: MinifluxProvider failed to insert article {article_id} for feed {feed_id}: {e}")
-
 
     def get_feeds(self) -> List[Feed]:
         data = self._req("GET", "/v1/feeds")
@@ -322,48 +79,60 @@ class MinifluxProvider(RSSProvider):
 
         return feeds
 
-    def get_articles(self, feed_id: str, max_items: int = None) -> List[Article]:
-        conn = get_connection()
-        c = conn.cursor()
+    def get_articles(self, feed_id: str) -> List[Article]:
+        params = {"direction": "desc", "order": "published_at", "limit": 300}
         
-        if feed_id == "all":
-            query = "SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type FROM articles ORDER BY date DESC"
-            if max_items:
-                query += f" LIMIT {int(max_items)}"
-            c.execute(query)
-        elif feed_id.startswith("category:"):
-            cat_name = feed_id.split(":", 1)[1]
-            query = """
-                SELECT a.id, a.feed_id, a.title, a.url, a.content, a.date, a.author, a.is_read, a.media_url, a.media_type
-                FROM articles a
-                JOIN feeds f ON a.feed_id = f.id
-                WHERE f.category = ?
-                ORDER BY a.date DESC
-            """
-            if max_items:
-                query += f" LIMIT {int(max_items)}"
-            c.execute(query, (cat_name,))
-        else:
-            query = "SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type FROM articles WHERE feed_id = ? ORDER BY date DESC"
-            if max_items:
-                query += f" LIMIT {int(max_items)}"
-            c.execute(query, (feed_id,))
+        if feed_id.startswith("category:"):
+            cat_title = feed_id.split(":", 1)[1]
+            cats = self._req("GET", "/v1/categories")
+            if cats:
+                for c in cats:
+                    if c["title"] == cat_title:
+                        params["category_id"] = c["id"]
+                        break
+        elif feed_id != "all":
+            params["feed_id"] = feed_id
             
-        rows = c.fetchall()
+        data = self._req("GET", "/v1/entries", params=params)
+        if not data: return []
         
-        article_ids = [r[0] for r in rows]
+        entries = data.get("entries", [])
+        article_ids = [str(e["id"]) for e in entries]
         chapters_map = utils.get_chapters_batch(article_ids)
         
         articles = []
-        for row in rows:
-            chs = chapters_map.get(row[0], [])
-            chs.sort(key=lambda x: x["start"])
+        for entry in entries:
+            media_url = None
+            media_type = None
             
+            enclosures = entry.get("enclosures", [])
+            if enclosures:
+                media_url = enclosures[0].get("url")
+                media_type = enclosures[0].get("mime_type")
+            
+            date = utils.normalize_date(
+                entry.get("published_at") or entry.get("published"),
+                entry.get("title") or "",
+                entry.get("content") or entry.get("summary") or ""
+            )
+
+            article_id = str(entry["id"])
+            # Use batch result
+            chapters = chapters_map.get(article_id, [])
+
             articles.append(Article(
-                id=row[0], feed_id=row[1], title=row[2], url=row[3], content=row[4], date=row[5], author=row[6], is_read=bool(row[7]),
-                media_url=row[8], media_type=row[9], chapters=chs
+                id=article_id,
+                feed_id=str(entry["feed_id"]),
+                title=entry["title"],
+                url=entry["url"],
+                content=entry.get("content", ""),
+                date=date,
+                author=entry.get("author", ""),
+                is_read=entry.get("status") == "read",
+                media_url=media_url,
+                media_type=media_type,
+                chapters=chapters
             ))
-        conn.close()
         return articles
 
     def get_article_chapters(self, article_id: str) -> List[Dict]:
@@ -396,17 +165,8 @@ class MinifluxProvider(RSSProvider):
         return []
 
     def mark_read(self, article_id: str) -> bool:
-        res = self._req("PUT", "/v1/entries", json={"entry_ids": [int(article_id)], "status": "read"})
-        
-        # Also update local database
-        if res is not None:
-            conn = get_connection()
-            c = conn.cursor()
-            c.execute("UPDATE articles SET is_read = 1 WHERE id = ?", (article_id,))
-            conn.commit()
-            conn.close()
-            return True
-        return False
+        self._req("PUT", "/v1/entries", json={"entry_ids": [int(article_id)], "status": "read"})
+        return True
 
     def add_feed(self, url: str, category: str = "Uncategorized") -> bool:
         cats = self._req("GET", "/v1/categories")

@@ -4,21 +4,14 @@ import sys
 
 if getattr(sys, 'frozen', False):
     APP_DIR = os.path.dirname(sys.executable)
-    PARENT_DIR = os.path.dirname(APP_DIR)
 else:
-    # Store config alongside the code (project root) regardless of launch cwd
-    APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    PARENT_DIR = APP_DIR
+    APP_DIR = os.getcwd()
 
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 
 DEFAULT_CONFIG = {
     "refresh_interval": 300,  # seconds
-    "auto_download_podcasts": False,
-    "auto_download_period": "1w",
     "active_provider": "local",
-    "close_to_tray": False,
-    "max_downloads": 10,
     "providers": {
         "local": {
             "feeds": [] # List of feed URLs/data
@@ -50,20 +43,6 @@ class ConfigManager:
         self.config = self.load_config()
 
     def load_config(self):
-        if not os.path.exists(APP_DIR):
-            os.makedirs(APP_DIR, exist_ok=True)
-
-        # If frozen build is missing config.json but parent folder has one (e.g., repo root),
-        # copy it beside the executable to keep portability.
-        if getattr(sys, 'frozen', False) and not os.path.exists(CONFIG_FILE):
-            parent_cfg = os.path.join(PARENT_DIR, "config.json")
-            if os.path.exists(parent_cfg):
-                try:
-                    import shutil
-                    shutil.copyfile(parent_cfg, CONFIG_FILE)
-                except Exception as e:
-                    print(f"Warning: failed to copy parent config.json: {e}")
-
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, 'r') as f:

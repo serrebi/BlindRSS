@@ -4,27 +4,24 @@ import uuid
 import logging
 import sqlite3
 from datetime import datetime, timezone, timedelta
-import email.utils
 from dateutil import parser as dateparser
 from io import BytesIO
 from core.db import get_connection
 
 log = logging.getLogger(__name__)
 
-# Default headers for network calls
 HEADERS = {
-    "User-Agent": "BlindRSS/1.0 (+https://github.com/)",
-    "Accept": "*/*",
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/rss+xml,application/xml,application/atom+xml,text/xml;q=0.9,*/*;q=0.8'
 }
 
 def safe_requests_get(url, **kwargs):
-    """requests.get with default headers and sane timeouts."""
-    headers = kwargs.pop("headers", None) or {}
-    merged = HEADERS.copy()
-    merged.update(headers)
-    if "timeout" not in kwargs:
-        kwargs["timeout"] = 15
-    return requests.get(url, headers=merged, **kwargs)
+    """Wrapper for requests.get with default browser headers."""
+    headers = kwargs.pop("headers", {})
+    # Merge with defaults, preserving caller's headers if they exist
+    final_headers = HEADERS.copy()
+    final_headers.update(headers)
+    return requests.get(url, headers=final_headers, **kwargs)
 
 # --- Date Parsing ---
 
@@ -34,7 +31,7 @@ def format_datetime(dt: datetime) -> str:
         dt = dt.astimezone(timezone.utc)
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
-def extract_date_from_text(text: str, require_day: bool = False):
+def extract_date_from_text(text: str):
     """
     Try multiple date patterns inside arbitrary text.
     Returns datetime or None.
@@ -60,16 +57,7 @@ def extract_date_from_text(text: str, require_day: bool = False):
             return datetime(year_int, month, day)
         except Exception:
             pass
-    # 2) URL-style /yyyy/mm/dd/ (common in blogs)
-    m_url = re.search(r"/(20\d{2}|19\d{2})/(0?[1-9]|1[0-2])/(0?[1-9]|[12][0-9]|3[01])/", text)
-    if m_url:
-        try:
-            y, mth, d = m_url.groups()
-            return datetime(int(y), int(mth), int(d))
-        except Exception:
-            pass
-
-    # 3) ISO-like yyyy-mm-dd
+    # 2) ISO-like yyyy-mm-dd
     m_iso = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
     if m_iso:
         try:
@@ -77,114 +65,61 @@ def extract_date_from_text(text: str, require_day: bool = False):
             return datetime(y, mth, d)
         except Exception:
             pass
-    # 4) Month name forms (e.g., May 17 2021)
-    # Clean up timezone abbreviations that confuse parser
-    clean_text = re.sub(r'\b(PST|PDT|EST|EDT|CST|CDT|MST|MDT|AI|GMT|UTC)\b', '', text, flags=re.IGNORECASE)
-    # Insert a space before month names if glued to previous letters (e.g., "ASHWINNov 17, 2025")
-    clean_text = re.sub(r'([A-Za-z])(?=(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b)', r'\1 ', clean_text)
-    # Only attempt parsing if we see something that looks like a date (Month name)
-    # Simple heuristic: Check for month names
-    if re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', clean_text, re.IGNORECASE):
-        # If caller wants a day, skip month-year only matches
-        if require_day and not re.search(r'\b\d{1,2}\b', clean_text):
-            pass
-        else:
-            # Inject current year when none present to avoid defaulting to 1900
-            if not re.search(r'\b(19|20)\d{2}\b', clean_text):
-                now_year = datetime.now(timezone.utc).year
-                clean_text = f"{clean_text} {now_year}"
-            try:
-                dt = dateparser.parse(clean_text, fuzzy=True, default=datetime(1900, 1, 1))
-                if dt.year > 1900:
-                    # If inferred date is >60 days in future, roll back one year (year-boundary heuristic)
-                    if (dt - datetime.now(timezone.utc)).days > 60:
-                        dt = dt.replace(year=dt.year - 1)
-                    return dt
-            except Exception:
-                pass
+    # 3) Month name forms (e.g., May 17 2021)
+    try:
+        dt = dateparser.parse(text, fuzzy=True, default=datetime(1900, 1, 1))
+        if dt.year > 1900:
+            return dt
+    except Exception:
+        pass
     return None
 
-def normalize_date(raw_date_input: any, title: str = "", content: str = "", url: str = "", fallback_iso: str = "") -> str:
+def normalize_date(raw_date_str: str, title: str = "", content: str = "", url: str = "") -> str:
     """
     Robust date normalizer.
     Prioritizes dates found explicitly in the Title or URL, as some feeds (e.g. archives) 
     put the original air date there while using a recent timestamp for pubDate.
-    
-    raw_date_input can be a string, a datetime object, or a time.struct_time.
     """
     now = datetime.now(timezone.utc)
     
-    def to_utc(dt: datetime):
-        if not dt:
-            return None
+    def valid(dt: datetime) -> bool:
+        if not dt: return False
         if dt.tzinfo:
-            return dt.astimezone(timezone.utc)
-        return dt.replace(tzinfo=timezone.utc)
+            dt_cmp = dt.astimezone(timezone.utc)
+        else:
+            dt_cmp = dt.replace(tzinfo=timezone.utc)
+        # discard if more than 2 days in future (some timezones are ahead)
+        return (dt_cmp - now) <= timedelta(days=2)
 
-    def valid(dt: datetime):
-        if not dt:
-            return False
-        dt = to_utc(dt)
-        return dt.year >= 1990 and (dt - now) <= timedelta(days=2)
+    # 1) Check Title first (highest priority for archives)
+    if title:
+        dt = extract_date_from_text(title)
+        if dt and valid(dt):
+            return format_datetime(dt)
 
-    def parse_any(val):
-        if val is None:
-            return None
-        if isinstance(val, datetime):
-            return to_utc(val)
-        if hasattr(val, 'tm_year'):
-            try:
-                return datetime(*val[:6], tzinfo=timezone.utc)
-            except Exception:
-                return None
-        if isinstance(val, (int, float)) or (isinstance(val, str) and re.fullmatch(r"-?\\d+(?:\\.\\d+)?", val.strip())):
-            try:
-                ts = float(val)
-                if abs(ts) > 1e12:
-                    ts /= 1000.0
-                return datetime.fromtimestamp(ts, timezone.utc)
-            except Exception:
-                return None
-        if isinstance(val, str):
-            s = val.strip()
-            try:
-                return to_utc(email.utils.parsedate_to_datetime(s))
-            except Exception:
-                pass
-            try:
-                tzinfos = {"PST": -28800, "PDT": -25200, "EST": -18000, "EDT": -14400, "CST": -21600, "CDT": -18000, "MST": -25200, "MDT": -21600}
-                return to_utc(dateparser.parse(s, tzinfos=tzinfos))
-            except Exception:
-                return None
-        return None
+    # 2) Check URL
+    if url:
+        dt = extract_date_from_text(url)
+        if dt and valid(dt):
+            return format_datetime(dt)
 
-    # 1) raw input
-    dt = parse_any(raw_date_input)
-    if valid(dt):
-        return format_datetime(dt)
+    # 3) Check raw feed date
+    if raw_date_str:
+        try:
+            dt = dateparser.parse(raw_date_str)
+            if valid(dt):
+                return format_datetime(dt)
+        except Exception:
+            pass
 
-    # 2) title (requires day)
-    dt = extract_date_from_text(title, require_day=True) if title else None
-    if valid(dt):
-        return format_datetime(dt)
+    # 4) Check content
+    if content:
+        dt = extract_date_from_text(content)
+        if dt and valid(dt):
+            return format_datetime(dt)
 
-    # 3) url
-    dt = extract_date_from_text(url, require_day=True) if url else None
-    if valid(dt):
-        return format_datetime(dt)
-
-    # 4) content
-    dt = extract_date_from_text(content, require_day=True) if content else None
-    if valid(dt):
-        return format_datetime(dt)
-
-    # 5) fallback_iso
-    dt = parse_any(fallback_iso)
-    if valid(dt):
-        return format_datetime(dt)
-
-    # 6) now
-    return format_datetime(now)
+    # 5) Fallback sentinel
+    return "0001-01-01 00:00:00"
 
 
 # --- Chapters ---
@@ -261,7 +196,7 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
             log.warning(f"Chapter fetch failed for {chapter_url}: {e}")
 
     # 2) ID3 CHAP frames if audio
-    if media_url and media_type and (media_type.startswith("audio/") or "podcast" in media_type or media_url.lower().split("?")[0].endswith("mp3")):
+    if media_url and media_type and (media_type.startswith("audio/") or "podcast" in media_type or media_url.endswith("mp3")):
         try:
             from mutagen.id3 import ID3
             # Fetch first 2MB (usually enough for ID3v2 header)
@@ -291,6 +226,6 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
         except ImportError:
             log.info("mutagen not installed, skipping ID3 chapter parse.")
         except Exception as e:
-            log.debug(f"ID3 chapter parse failed for {media_url}: {e}")
+            log.info(f"ID3 chapter parse failed for {media_url}: {e}")
 
     return chapters_out

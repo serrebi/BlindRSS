@@ -9,7 +9,6 @@ from .base import RSSProvider, Feed, Article
 from core.db import get_connection, init_db
 from core.discovery import discover_feed
 from core import utils
-from core.signals import SignalManager
 from bs4 import BeautifulSoup as BS
 import xml.etree.ElementTree as ET
 import logging
@@ -25,7 +24,6 @@ class LocalProvider(RSSProvider):
         return "Local RSS"
 
     def refresh(self) -> bool:
-        # log.debug("LocalProvider.refresh() called.")
         conn = get_connection()
         c = conn.cursor()
         # Fetch etag/last_modified for conditional get
@@ -49,126 +47,131 @@ class LocalProvider(RSSProvider):
     def _refresh_single_feed(self, feed_id, feed_url, etag, last_modified):
         # Each thread gets its own connection
         try:
-            current_url = feed_url
-            page_count = 0
-            visited_urls = set()
+            headers = {}
+            if etag: headers['If-None-Match'] = etag
+            if last_modified: headers['If-Modified-Since'] = last_modified
             
-            while current_url and page_count < 50: # Limit to prevent infinite loops
-                if current_url in visited_urls:
-                    break
-                visited_urls.add(current_url)
+            try:
+                resp = utils.safe_requests_get(feed_url, headers=headers, timeout=15)
+                if resp.status_code == 304:
+                    # Not modified, skip parsing
+                    return
+                resp.raise_for_status()
+                xml_text = resp.text
                 
-                headers = {}
-                # Only use conditional GET for the main feed URL (first page)
-                # DISABLED for debugging: Force refresh
-                # if page_count == 0:
-                #     if etag: headers['If-None-Match'] = etag
-                #     if last_modified: headers['If-Modified-Since'] = last_modified
-                
-                try:
-                    resp = utils.safe_requests_get(current_url, headers=headers, timeout=15)
-                    if resp.status_code == 304:
-                        # Not modified. If it's the first page, we assume nothing changed.
-                        if page_count == 0:
-                            return
-                        else:
-                            # Weird for subsequent pages but break just in case
-                            break
-                    resp.raise_for_status()
-                    xml_text = resp.text
-                    
-                    # Capture ETag/LM only for the first page
-                    new_etag = resp.headers.get('ETag') if page_count == 0 else None
-                    new_last_modified = resp.headers.get('Last-Modified') if page_count == 0 else None
-                except Exception as e:
-                    log.error(f"Network error fetching {current_url}: {e}")
-                    break
+                new_etag = resp.headers.get('ETag')
+                new_last_modified = resp.headers.get('Last-Modified')
+            except Exception as e:
+                log.error(f"Network error fetching {feed_url}: {e}")
+                return
 
-                d = feedparser.parse(xml_text)
-                # log.debug(f"Parsed {len(d.entries)} entries for {feed_url}")
-                
-                # Build chapter map
-                chapter_map = {}
-                # ... (rest of chapter map logic) ...
+            d = feedparser.parse(xml_text)
+            
+            # Build chapter map
+            chapter_map = {}
+            try:
+                soup = BS(xml_text, "xml")
+                for item in soup.find_all("item"):
+                    chap = item.find(["podcast:chapters", "psc:chapters", "chapters"])
+                    if chap:
+                        chap_url = chap.get("url") or chap.get("href") or chap.get("src") or chap.get("link")
+                        if chap_url:
+                            guid = item.find("guid")
+                            link = item.find("link")
+                            key = None
+                            if guid and guid.text:
+                                key = guid.text.strip()
+                            elif link and link.text:
+                                key = link.text.strip()
+                            if key:
+                                chapter_map[key] = chap_url
+            except Exception as e:
+                log.warning(f"Chapter map build failed for {feed_url}: {e}")
 
-                conn = get_connection()
-                c = conn.cursor()
+            conn = get_connection()
+            c = conn.cursor()
+            
+            feed_title = d.feed.get('title', 'Unknown Feed')
+            c.execute("UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?", 
+                      (feed_title, new_etag, new_last_modified, feed_id))
+            
+            for entry in d.entries:
+                content = ""
+                if 'content' in entry:
+                    content = entry.content[0].value
+                elif 'summary_detail' in entry:
+                    content = entry.summary_detail.value
+                elif 'summary' in entry:
+                    content = entry.summary
+                elif 'description' in entry:
+                    content = entry.description
                 
-                # ... (rest of feed title update) ...
-                
-                new_items_in_batch = 0
-                
-                for entry in d.entries:
-                    content = ""
-                    # ... (rest of content parsing) ...
-                    
-                    article_id = entry.get('id', entry.get('link', ''))
-                    if not article_id:
-                        continue
+                article_id = entry.get('id', entry.get('link', ''))
+                if not article_id:
+                    continue
 
-                    title = entry.get('title', 'No Title')
-                    url = entry.get('link', '')
-                    author = entry.get('author', 'Unknown')
+                title = entry.get('title', 'No Title')
+                url = entry.get('link', '')
+                author = entry.get('author', 'Unknown')
 
-                    raw_date = entry.get('published') or entry.get('updated') or entry.get('pubDate') or entry.get('date')
-                    parsed_date_obj = entry.get('published_parsed') or entry.get('updated_parsed')
-                    
-                    date = utils.normalize_date(
-                        parsed_date_obj if parsed_date_obj else (str(raw_date) if raw_date else ""), 
-                        title, 
-                        content or (entry.get('summary') or ''),
-                        url
-                    )
-
-                    c.execute("SELECT date FROM articles WHERE id = ? AND feed_id = ?", (article_id, feed_id))
-                    row = c.fetchone()
-                    if row:
-                        existing_date = row[0] or ""
-                        # Update if date changed OR if we are fixing a bad date (0001...)
-                        if existing_date != date and (date != "0001-01-01 00:00:00" or existing_date == "0001-01-01 00:00:00"):
-                                c.execute("UPDATE articles SET date = ? WHERE id = ? AND feed_id = ?", (date, article_id, feed_id))
-                        continue
-                    
-                    # New item logic
-                    media_url = None
-                    media_type = None
-                    # ... (rest of media_url/type extraction) ...
-
-                    try:
-                        c.execute("INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-                                    (article_id, feed_id, title, url, content, date, author, media_url, media_type))
-                        new_items_in_batch += 1
-                    except Exception as e:
-                        log.error(f"Failed to insert article '{article_id}' for feed '{feed_id}': {e}")
-                    
-                    # Chapter fetching is now lazy-loaded on selection/play to prevent performance issues
-                    chapter_url = None
+                raw_date = entry.get('published') or entry.get('updated') or entry.get('pubDate') or entry.get('date')
+                if not raw_date:
+                        parsed = entry.get('published_parsed') or entry.get('updated_parsed')
+                        if parsed:
+                            raw_date = time.strftime("%Y-%m-%d %H:%M:%S", parsed)
                 
-                conn.commit()
-                conn.close()
+                date = utils.normalize_date(
+                    str(raw_date) if raw_date else "", 
+                    title, 
+                    content or (entry.get('summary') or ''),
+                    url
+                )
 
-                if new_items_in_batch > 0:
-                    SignalManager.emit("feed_update", {"feed_id": feed_id, "count": new_items_in_batch})
-                
-                # Check for next page
-                next_link = None
-                if hasattr(d, 'feed') and hasattr(d.feed, 'links'):
-                    for link in d.feed.links:
-                        if link.get('rel') == 'next':
-                            next_link = link.get('href')
-                            break
-                
-                # If no new items were found in this batch, and we are deep in history (page > 0),
-                # we can assume we have everything else.
-                if new_items_in_batch == 0 and page_count > 0:
-                    break
-                
-                if next_link:
-                    current_url = next_link
-                    page_count += 1
-                else:
-                    break
+                c.execute("SELECT date FROM articles WHERE id = ?", (article_id,))
+                row = c.fetchone()
+                if row:
+                    existing_date = row[0] or ""
+                    if existing_date != date:
+                            c.execute("UPDATE articles SET date = ? WHERE id = ?", (date, article_id))
+                    continue
 
+                media_url = None
+                media_type = None
+                if 'enclosures' in entry and len(entry.enclosures) > 0:
+                    enclosure = entry.enclosures[0]
+                    enc_type = getattr(enclosure, "type", "") or ""
+                    enc_href = getattr(enclosure, "href", None)
+                    audio_exts = (".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".wav", ".flac")
+                    if enc_type.startswith("audio/") or enc_type.startswith("video/"):
+                        media_url = enc_href
+                        media_type = enc_type
+                    elif enc_href and enc_href.lower().endswith(audio_exts):
+                        media_url = enc_href
+                        media_type = enc_type or "audio/mpeg"
+                elif 'yt_videoid' in entry:
+                    media_url = url
+                    media_type = "video/youtube"
+
+                c.execute("INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                            (article_id, feed_id, title, url, content, date, author, media_url, media_type))
+                
+                chapter_url = None
+                if 'podcast_chapters' in entry:
+                    chapters_tag = entry.podcast_chapters
+                    chapter_url = getattr(chapters_tag, 'href', None) or getattr(chapters_tag, 'url', None) or getattr(chapters_tag, 'value', None)
+                if not chapter_url and 'psc_chapters' in entry:
+                    chapters_tag = entry.psc_chapters
+                    chapter_url = getattr(chapters_tag, 'href', None) or getattr(chapters_tag, 'url', None) or getattr(chapters_tag, 'value', None)
+                
+                if not chapter_url:
+                    key = entry.get('guid') or entry.get('id') or entry.get('link')
+                    if key and key in chapter_map:
+                        chapter_url = chapter_map[key]
+
+                utils.fetch_and_store_chapters(article_id, media_url, media_type, chapter_url)
+            
+            conn.commit()
+            conn.close()
         except Exception as e:
             log.error(f"Error processing feed {feed_url}: {e}")
 
@@ -189,32 +192,23 @@ class LocalProvider(RSSProvider):
         conn.close()
         return feeds
 
-    def get_articles(self, feed_id: str, max_items: int = None) -> List[Article]:
+    def get_articles(self, feed_id: str) -> List[Article]:
         conn = get_connection()
         c = conn.cursor()
         
         if feed_id == "all":
-            query = "SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type FROM articles ORDER BY date DESC"
-            if max_items:
-                query += f" LIMIT {int(max_items)}"
-            c.execute(query)
+            c.execute("SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type FROM articles ORDER BY date DESC")
         elif feed_id.startswith("category:"):
             cat_name = feed_id.split(":", 1)[1]
-            query = """
+            c.execute("""
                 SELECT a.id, a.feed_id, a.title, a.url, a.content, a.date, a.author, a.is_read, a.media_url, a.media_type
                 FROM articles a
                 JOIN feeds f ON a.feed_id = f.id
                 WHERE f.category = ?
                 ORDER BY a.date DESC
-            """
-            if max_items:
-                query += f" LIMIT {int(max_items)}"
-            c.execute(query, (cat_name,))
+            """, (cat_name,))
         else:
-            query = "SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type FROM articles WHERE feed_id = ? ORDER BY date DESC"
-            if max_items:
-                query += f" LIMIT {int(max_items)}"
-            c.execute(query, (feed_id,))
+            c.execute("SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type FROM articles WHERE feed_id = ? ORDER BY date DESC", (feed_id,))
             
         rows = c.fetchall()
         

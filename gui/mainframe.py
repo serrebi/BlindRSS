@@ -3,31 +3,21 @@ import wx
 import webbrowser
 import threading
 import time
-import logging
-import os
-from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
-from core.downloader import Downloader
-from core.signals import SignalManager
 from .dialogs import AddFeedDialog, SettingsDialog
 from .player import PlayerFrame
 from .tray import BlindRSSTrayIcon
 from providers.base import RSSProvider
-from core import db as db_core
 
 class MainFrame(wx.Frame):
     def __init__(self, provider: RSSProvider, config_manager):
         super().__init__(None, title="BlindRSS", size=(1000, 700))
         self.provider = provider
         self.config_manager = config_manager
-        self.downloader = Downloader(config_manager)
-        self.RELOAD_DEBOUNCE_MS = 10000  # coalesce feed updates to avoid rapid list refresh (SR spam)
-        self.logger = logging.getLogger(__name__)
-        self._setup_logging()
         
         # Create independent player window
-        self.player_window = PlayerFrame(self, downloader=self.downloader)
+        self.player_window = PlayerFrame(self)
         
         self.init_ui()
         self.init_menus()
@@ -35,22 +25,17 @@ class MainFrame(wx.Frame):
         
         self.tray_icon = BlindRSSTrayIcon(self)
         
-        SignalManager.subscribe(self.on_signal)
-        
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.Bind(wx.EVT_ICONIZE, self.on_iconize)
-        
-        # Initial load (Load tree from DB first for speed)
-        self.refresh_feeds(force_remote=False)
-        self.tree.SetFocus()
         
         # Start background refresh loop (daemon so it can't keep the app alive)
         self.stop_event = threading.Event()
         self.refresh_thread = threading.Thread(target=self.refresh_loop, daemon=True)
         self.refresh_thread.start()
-
-        # If this is a fresh install (no articles yet), trigger an immediate blocking sync once
-        threading.Thread(target=self._initial_sync_if_empty, daemon=True).start()
+        
+        # Initial load
+        self.refresh_feeds()
+        self.tree.SetFocus()
 
     def init_ui(self):
         # Main Splitter: Tree vs Content Area
@@ -85,96 +70,17 @@ class MainFrame(wx.Frame):
         
         # Store article objects for the list
         self.current_articles = []
-        self.current_view_id = "all"
-        # Performance guardrails for large lists (keep UI/screen reader responsive)
-        self.MAX_DISPLAY_ALL = 300          # rows shown in All view
-        self.MAX_DISPLAY_CATEGORY = 220     # per category
-        self.MAX_DISPLAY_FEED = 150         # per single feed
-        self.MAX_FETCH_ALL = 600            # rows fetched from DB for All view
-        self.MAX_FETCH_CATEGORY = 400       # rows fetched for category view
-        self.MAX_FETCH_FEED = 300           # rows fetched for single feed
-        self.TRUNCATION_NOTICE_ROW = "Load more (older items)…"
-        self.show_full_once = False
-        self.truncation_row_index = -1
-        self.content_cache = {}
-        self.summary_cache = {}
-        self.content_request_id = None
-        self.MAX_CONTENT_CHARS = 6000   # keep screen reader responsive
-        self.page_size = 80
-        self.current_page = 1
-        self.full_articles = []
-        self.content_req_starts = {}
-        self._prewarm_thread = None
-        self.last_content_id = None
-        self.last_content_text = None
-        self.pending_select_index = None
-
-    def _setup_logging(self):
-        """Ensure file logging is configured even if app wasn't started via main.py."""
-        root = logging.getLogger()
-        if not root.handlers:
-            if os.getenv("BLINDRSS_DEBUG"):
-                log_path = os.path.join(os.getcwd(), "blindrss_debug.log")
-                fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-                fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
-                fh.setFormatter(fmt)
-                root.addHandler(fh)
-                sh = logging.StreamHandler()
-                sh.setFormatter(fmt)
-                root.addHandler(sh)
-                root.setLevel(logging.DEBUG)
-                self.logger.setLevel(logging.DEBUG)
-            else:
-                # No logging for release unless env is set
-                root.addHandler(logging.NullHandler())
-                root.setLevel(logging.CRITICAL)
-                self.logger.setLevel(logging.CRITICAL)
-
 
     def _strip_html(self, html_content):
         if not html_content:
             return ""
         try:
-            if "<" not in html_content:
-                return html_content.strip()
             soup = BeautifulSoup(html_content, 'html.parser')
             # Get text with basic formatting preservation
             text = soup.get_text(separator='\n\n')
             return text.strip()
         except:
             return html_content
-
-    def _initial_sync_if_empty(self):
-        """
-        For new users (empty DB), run one immediate refresh so the first view isn't blank.
-        """
-        try:
-            if db_core.has_articles():
-                return
-            # Run provider refresh once synchronously
-            try:
-                self.provider.refresh()
-            except Exception as e:
-                print(f"Initial sync error: {e}")
-            wx.CallAfter(self.refresh_feeds)
-        except Exception:
-            pass
-
-    def _format_display_date(self, date_str: str) -> str:
-        """
-        Present stored UTC dates in local time for readability.
-        Falls back gracefully on parse errors.
-        """
-        if not date_str:
-            return ""
-        try:
-            dt = date_parser.parse(date_str)
-            if not dt.tzinfo:
-                dt = dt.replace(tzinfo=timezone.utc)
-            local_dt = dt.astimezone()
-            return local_dt.strftime("%Y-%m-%d %H:%M")
-        except Exception:
-            return date_str[:16]
 
     def init_menus(self):
         menubar = wx.MenuBar()
@@ -196,16 +102,13 @@ class MainFrame(wx.Frame):
         
         view_menu = wx.Menu()
         player_item = view_menu.Append(wx.ID_ANY, "Show &Player\tCtrl+P", "Show the media player window")
-        load_full_item = view_menu.Append(wx.ID_ANY, "Load Full Current View", "Temporarily load all items (may be slow)")
         
-        tools_menu = wx.Menu()
-        dm_item = tools_menu.Append(wx.ID_ANY, "Download &Manager", "View and control downloads")
-        tools_menu.AppendSeparator()
-        settings_item = tools_menu.Append(wx.ID_PREFERENCES, "&Settings...", "Configure application")
+        edit_menu = wx.Menu()
+        settings_item = edit_menu.Append(wx.ID_PREFERENCES, "&Settings...", "Configure application")
         
         menubar.Append(file_menu, "&File")
+        menubar.Append(edit_menu, "&Edit")
         menubar.Append(view_menu, "&View")
-        menubar.Append(tools_menu, "&Tools")
         self.SetMenuBar(menubar)
         
         self.Bind(wx.EVT_MENU, self.on_add_feed, add_feed_item)
@@ -217,15 +120,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_export_opml, export_opml_item)
         self.Bind(wx.EVT_MENU, self.on_search_podcast, search_podcast_item)
         self.Bind(wx.EVT_MENU, self.on_show_player, player_item)
-        self.Bind(wx.EVT_MENU, self.on_load_full_view, load_full_item)
         self.Bind(wx.EVT_MENU, self.on_settings, settings_item)
-        self.Bind(wx.EVT_MENU, self.on_download_manager, dm_item)
         self.Bind(wx.EVT_MENU, self.on_exit, exit_item)
-
-    def on_download_manager(self, event):
-        from gui.dialogs import DownloadManagerDialog
-        dlg = DownloadManagerDialog(self, self.downloader)
-        dlg.ShowModal()
 
     def init_shortcuts(self):
         # Add accelerator for Ctrl+R (F5 is handled by menu item text usually, but being explicit helps)
@@ -245,19 +141,12 @@ class MainFrame(wx.Frame):
         try:
             self.provider.refresh()
             wx.CallAfter(self.refresh_feeds)
-            self.downloader.start_auto_download(self.provider)
             # wx.CallAfter(self.SetTitle, "RSS Reader")
         except Exception as e:
             print(f"Manual refresh error: {e}")
             # wx.CallAfter(self.SetTitle, "RSS Reader")
 
     def on_close(self, event):
-        # If user chose "close to tray", hide instead of exiting
-        if self.config_manager.get("close_to_tray", False) and event:
-            event.Veto()
-            self.Hide()
-            return
-
         # Close player window cleanly
         if self.player_window:
             self.player_window.Destroy()
@@ -347,39 +236,16 @@ class MainFrame(wx.Frame):
 
         menu = wx.Menu()
         open_item = menu.Append(wx.ID_ANY, "Open Article")
-        download_item = menu.Append(wx.ID_ANY, "Download Media")
-        
-        # Add Queue Option if playable
-        article = self.current_articles[idx] if 0 <= idx < len(self.current_articles) else None
-        if article and self._should_play_in_player(article):
-            queue_item = menu.Append(wx.ID_ANY, "Add to Queue")
-            self.Bind(wx.EVT_MENU, lambda e: self.on_queue_article(article), queue_item)
-
         copy_item = menu.Append(wx.ID_ANY, "Copy Link")
         
         # Bindings for list menu items need to use the current idx or selected article
         # on_article_activate (event) needs an event object, but I can re-create one or just call its core logic
         # For simplicity, pass idx to lambda
-        self.Bind(wx.EVT_MENU, lambda e: self.on_article_activate(event=wx.ListEvent(wx.wxEVT_LIST_ITEM_ACTIVATED, self.list_ctrl.GetId())), open_item)
-        self.Bind(wx.EVT_MENU, lambda e, a=article: self.on_download_article(a), download_item)
+        self.Bind(wx.EVT_MENU, lambda e: self.on_article_activate(event=wx.ListEvent(wx.EVT_LIST_ITEM_ACTIVATED.type, self.list_ctrl.GetId(), idx=idx)), open_item)
         self.Bind(wx.EVT_MENU, lambda e: self.on_copy_link(idx), copy_item)
         
         self.list_ctrl.PopupMenu(menu, menu_pos)
         menu.Destroy()
-
-    def on_queue_article(self, article):
-        is_youtube = (article.media_type or "").lower() == "video/youtube"
-        chapters = getattr(article, "chapters", None)
-        self.player_window.add_to_queue(article.media_url, is_youtube, chapters)
-
-    def on_download_article(self, article):
-        if not article or not article.media_url:
-            return
-        if hasattr(self, "downloader") and self.downloader:
-            self.downloader.queue_article(article)
-        else:
-            # Fallback: download through player path
-            self.player_window.load_media(article, False)
 
     def on_copy_link(self, idx):
         if 0 <= idx < len(self.current_articles):
@@ -429,14 +295,13 @@ class MainFrame(wx.Frame):
             try:
                 if self.provider.refresh():
                    wx.CallAfter(self.refresh_feeds)
-                   self.downloader.start_auto_download(self.provider)
             except Exception as e:
                 print(f"Refresh error: {e}")
                 
             # Sleep in one shot but wake early if closing
             self.stop_event.wait(interval)
 
-    def refresh_feeds(self, force_remote=False):
+    def refresh_feeds(self):
         # Offload data fetching to background thread to prevent blocking UI
         threading.Thread(target=self._refresh_feeds_worker, daemon=True).start()
 
@@ -503,9 +368,6 @@ class MainFrame(wx.Frame):
              self.tree.SelectItem(self.all_feeds_node)
         elif item_to_select and item_to_select.IsOk():
              self.tree.SelectItem(item_to_select)
-        elif not selected_data:
-             # Default to All Feeds if nothing selected
-             self.tree.SelectItem(self.all_feeds_node)
              
         self.tree.Thaw() # Resume updates
 
@@ -541,267 +403,76 @@ class MainFrame(wx.Frame):
                 daemon=True
             ).start()
 
-    def on_load_full_view(self, event):
-        # User-triggered: temporarily disable truncation for current view
-        self.show_full_once = True
-        self._do_reload_articles()
-
     def _load_articles_thread(self, feed_id, request_id):
         try:
-            max_items = None
-            if feed_id == "all":
-                max_items = self.MAX_FETCH_ALL
-            elif str(feed_id).startswith("category:"):
-                max_items = self.MAX_FETCH_CATEGORY
-            else:
-                max_items = self.MAX_FETCH_FEED
-
-            try:
-                articles = self.provider.get_articles(feed_id, max_items=max_items)
-            except TypeError:
-                articles = self.provider.get_articles(feed_id)
-
-            wx.CallAfter(self._populate_articles, articles, request_id, feed_id)
+            articles = self.provider.get_articles(feed_id)
+            wx.CallAfter(self._populate_articles, articles, request_id)
         except Exception as e:
             print(f"Error loading articles: {e}")
-            wx.CallAfter(self._populate_articles, [], request_id, feed_id)
+            wx.CallAfter(self._populate_articles, [], request_id)
 
-    def _populate_articles(self, articles, request_id, feed_id, reuse_sorted=False):
+    def _populate_articles(self, articles, request_id):
         # If a newer request was started, ignore this result
         if not hasattr(self, 'current_request_id') or request_id != self.current_request_id:
             return
-        self.current_view_id = feed_id
-        self.truncation_row_index = -1
-        if not reuse_sorted:
-            self.current_page = 1
 
         # Client-side sort to ensure chronological order
         def parse_date_safe(d):
             if not d: return 0
             try:
                 # Parse to timestamp for easy comparison
-                dt = date_parser.parse(d)
-                if not dt.tzinfo:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.timestamp()
+                return date_parser.parse(d).timestamp()
             except:
                 return 0 # Treat invalid dates as oldest
         
-        # Sort descending (newest first) unless caller reused sorted list
-        if not reuse_sorted:
-            articles.sort(key=lambda a: parse_date_safe(a.date), reverse=True)
-
-        # Trim to keep UI responsive
-        max_rows = self.MAX_DISPLAY_ALL if feed_id == "all" else (
-            self.MAX_DISPLAY_CATEGORY if str(feed_id).startswith("category:") else self.MAX_DISPLAY_FEED
-        )
-        self.full_articles = articles
-
-        # Pagination: always show latest page_size * current_page (capped by limits unless user requests full once)
-        effective_cap = max_rows
-        if self.show_full_once:
-            effective_cap = len(self.full_articles)
-            self.show_full_once = False
-        slice_end = min(len(self.full_articles), self.page_size * self.current_page, effective_cap)
-        display_articles = self.full_articles[:slice_end]
-        truncated = slice_end < len(self.full_articles)
-
-        # Capture currently selected article ID to restore
-        selected_id = None
-        current_idx = self.list_ctrl.GetFocusedItem()
-        if current_idx != -1 and current_idx < len(self.current_articles):
-            selected_id = self.current_articles[current_idx].id
-        # If we triggered "load more", jump to the first newly added item
-        if self.pending_select_index is not None:
-            new_idx_to_select = self.pending_select_index
-            selected_id = None  # override ID-based restore
-        else:
-            new_idx_to_select = -1
+        # Sort descending (newest first)
+        articles.sort(key=lambda a: parse_date_safe(a.date), reverse=True)
         
-        self.current_articles = display_articles
-        notice = self.TRUNCATION_NOTICE_ROW if truncated else None
-        self.truncation_row_index = len(display_articles) if notice else -1
-
+        self.current_articles = articles
         self.list_ctrl.DeleteAllItems()
-        if not display_articles and not notice:
+        
+        if not articles:
             self.list_ctrl.InsertItem(0, "No articles found.")
             return
-
+            
         self.list_ctrl.Freeze()
-        for i, article in enumerate(display_articles):
+        for i, article in enumerate(self.current_articles):
             idx = self.list_ctrl.InsertItem(i, article.title)
-            self.list_ctrl.SetItem(idx, 1, self._format_display_date(article.date))
+            # Format date to be more readable if possible, otherwise keep raw
+            self.list_ctrl.SetItem(idx, 1, article.date[:16] if article.date else "")
             self.list_ctrl.SetItem(idx, 2, article.author or "")
-        if notice:
-            info_idx = self.list_ctrl.InsertItem(self.list_ctrl.GetItemCount(), notice)
-            self.list_ctrl.SetItem(info_idx, 1, "")
-            self.list_ctrl.SetItem(info_idx, 2, "")
         self.list_ctrl.Thaw()
-        self.current_articles = display_articles
-
-        if selected_id and new_idx_to_select == -1:
-            for i, art in enumerate(display_articles):
-                if art.id == selected_id:
-                    new_idx_to_select = i
-                    break
-
-        target_idx = new_idx_to_select if new_idx_to_select != -1 else None
-        self.pending_select_index = None
-
-        # Pre-warm cache for the first page to avoid per-item lag (limited)
-        self._prewarm_cache(display_articles[:20])
-
-        # Apply selection after list is populated
-        if target_idx is not None:
-            self._select_index(target_idx)
-
-    def _prewarm_cache(self, articles):
-        # Cancel previous prewarm thread if still running? We'll just let it finish; light work.
-        if not articles:
-            return
-
-        def worker():
-            for art in articles:
-                aid = getattr(art, "id", None)
-                if not aid or aid in self.content_cache:
-                    continue
-                try:
-                    text = self._strip_html(art.content)
-                    if len(text) > self.MAX_CONTENT_CHARS:
-                        text = text[:self.MAX_CONTENT_CHARS] + "\n\n[content truncated]"
-                    short = text[:1000] + ("…" if len(text) > 1000 else "")
-                    self.content_cache[aid] = text
-                    self.summary_cache[aid] = short
-                except Exception:
-                    continue
-
-        # Always start a new prewarm thread; let old one finish in background
-        self._prewarm_thread = threading.Thread(target=worker, daemon=True)
-        self._prewarm_thread.start()
-
-    def _select_index(self, idx):
-        if idx < 0 or idx >= self.list_ctrl.GetItemCount():
-            return
-        self.list_ctrl.Freeze()
-        self.list_ctrl.Select(idx)
-        self.list_ctrl.Focus(idx)
-        self.list_ctrl.EnsureVisible(idx)
-        self.list_ctrl.Thaw()
-        if self.logger.isEnabledFor(logging.DEBUG):
-            self.logger.debug("select_index: idx=%s", idx)
+        
+        # Optional: Restore focus to list if needed, but user might be navigating tree
+        # self.list_ctrl.SetFocus() 
 
     # def load_articles(self, feed_id):  <-- Replaced by the thread logic above
     
     def on_article_select(self, event):
         idx = event.GetIndex()
-        if idx == self.truncation_row_index:
-            # Show hint instead of article content
-            self.content_ctrl.SetValue("Press Enter on this row to load the full list for this view.")
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug("list_select: truncation_row idx=%s", idx)
-            return
-
         if 0 <= idx < len(self.current_articles):
             article = self.current_articles[idx]
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(
-                    "list_select: idx=%s id=%s title_len=%s content_len=%s summary_cached=%s full_cached=%s",
-                    idx,
-                    getattr(article, "id", None),
-                    len(article.title or ""),
-                    len(article.content or ""),
-                    getattr(article, "id", None) in self.summary_cache,
-                    getattr(article, "id", None) in self.content_cache,
-                )
             self.selected_article_id = article.id # Track selection
-            # Kick off async content render
-            self._load_content_async(article)
-
-    def _load_content_async(self, article):
-        # Debounce by request id
-        req_id = time.time()
-        self.content_request_id = req_id
-        article_id = article.id
-        self.content_req_starts[req_id] = time.perf_counter()
-
-        # Show lightweight header immediately
-        display_date = self._format_display_date(article.date)
-        header = f"Title: {article.title}\nDate: {display_date} (local)\nAuthor: {article.author}\nLink: {article.url}\n" + "-"*40 + "\n\n"
-
-        # If we have a cached summary, show it instantly
-        if article_id in self.summary_cache:
-            self._set_content_text(header + self.summary_cache[article_id] + "\n\n[loading full content…]")
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug("content_load: summary_cache_hit id=%s", article_id)
-        else:
-            self._set_content_text(header + "Loading content…")
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug("content_load: summary_cache_miss id=%s", article_id)
-
-        # Serve full from cache if available
-        if article_id in self.content_cache:
-            cached = self.content_cache[article_id]
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug("content_load: full_cache_hit id=%s", article_id)
-            self._apply_content_if_current(req_id, header + cached, article)
-            return
-
-        # Parse in background to avoid UI stall
-        def worker():
-            try:
-                text = self._strip_html(article.content)
-                if len(text) > self.MAX_CONTENT_CHARS:
-                    text = text[:self.MAX_CONTENT_CHARS] + "\n\n[content truncated]"
-                self.content_cache[article_id] = text
-                # Save shorter summary for instant reuse
-                short = text[:1000] + ("…" if len(text) > 1000 else "")
-                self.summary_cache[article_id] = short
-                if self.logger.isEnabledFor(logging.DEBUG):
-                    self.logger.debug(
-                        "content_load: parsed id=%s len=%s truncated=%s",
-                        article_id,
-                        len(text),
-                        len(text) >= self.MAX_CONTENT_CHARS,
-                    )
-            except Exception:
-                text = article.content or ""
-                if self.logger.isEnabledFor(logging.DEBUG):
-                    self.logger.debug("content_load: parse_fail id=%s", article_id)
-            wx.CallAfter(self._apply_content_if_current, req_id, header + text, article)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _set_content_text(self, text):
-        # Avoid redundant updates to keep SR responsive
-        if text == getattr(self, "last_content_text", None):
-            return
-        self.content_ctrl.Freeze()
-        self.content_ctrl.SetValue(text)
-        self.content_ctrl.Thaw()
-        self.last_content_text = text
-
-    def _apply_content_if_current(self, req_id, full_text, article):
-        if req_id != self.content_request_id:
-            self.logger.info("content_apply: stale req_id=%s current=%s", req_id, self.content_request_id)
-            return
-        elapsed = None
-        if req_id in self.content_req_starts:
-            elapsed = time.perf_counter() - self.content_req_starts.pop(req_id, 0)
-        if self.logger.isEnabledFor(logging.DEBUG):
-            self.logger.debug(
-                "content_apply: ok id=%s elapsed_ms=%s",
-                getattr(article, "id", None),
-                round(elapsed * 1000, 1) if elapsed is not None else "n/a",
-            )
-        self._set_content_text(full_text)
-
-        # Mark read in background
-        if not article.is_read:
-            threading.Thread(target=self.provider.mark_read, args=(article.id,), daemon=True).start()
-            article.is_read = True
-
-        # Fetch chapters in background to avoid UI lag
-        # Chapters are loaded on demand when playing to keep selection lightweight
+            
+            # Prepare content
+            header = f"Title: {article.title}\n"
+            header += f"Date: {article.date}\n"
+            header += f"Author: {article.author}\n"
+            header += f"Link: {article.url}\n"
+            header += "-" * 40 + "\n\n"
+            
+            content = self._strip_html(article.content)
+            full_text = header + content
+            
+            self.content_ctrl.SetValue(full_text)
+            
+            # Mark read in background
+            if not article.is_read:
+                threading.Thread(target=self.provider.mark_read, args=(article.id,), daemon=True).start()
+                article.is_read = True
+            
+            # Fetch chapters in background to avoid UI lag
+            threading.Thread(target=self._load_chapters_thread, args=(article,), daemon=True).start()
 
     def _load_chapters_thread(self, article):
         chapters = getattr(article, "chapters", None)
@@ -839,21 +510,16 @@ class MainFrame(wx.Frame):
     def on_article_activate(self, event):
         # Double click or Enter
         idx = event.GetIndex()
-        if idx == self.truncation_row_index:
-            # User requested more items for this view
-            self.pending_select_index = len(self.current_articles)  # first new item after expansion
-            self.current_page += 1
-            self._populate_articles(self.full_articles, self.current_request_id, self.current_view_id, reuse_sorted=True)
-            return
         if 0 <= idx < len(self.current_articles):
             article = self.current_articles[idx]
+            
             if self._should_play_in_player(article):
                 is_youtube = (article.media_type or "").lower() == "video/youtube"
                 # Use cached chapters if available
                 chapters = getattr(article, "chapters", None)
                 
                 # Open player IMMEDIATELY with what we have (avoid blocking)
-                self.player_window.load_media(article, is_youtube)
+                self.player_window.load_media(article.media_url, is_youtube, chapters)
                 if not self.player_window.IsShown():
                     self.player_window.Show()
                 self.player_window.Raise()
@@ -887,7 +553,7 @@ class MainFrame(wx.Frame):
         if media_type == "video/youtube":
             return True
         # Some feeds mislabel audio; fall back to extension sniffing
-        if url.split('?')[0].endswith(audio_exts):
+        if url.endswith(audio_exts):
             return True
         return False
 
@@ -1001,72 +667,6 @@ class MainFrame(wx.Frame):
 
             wx.BusyInfo("Adding podcast feed...")
             threading.Thread(target=self._add_feed_thread, args=(url, cat), daemon=True).start()
-
-    def on_signal(self, event_type, data):
-        if event_type == "feed_update":
-            wx.CallAfter(self._handle_feed_update, data)
-
-    def _handle_feed_update(self, data):
-        feed_id = data.get("feed_id")
-        # If the updated feed is currently selected, reload the list
-        selected_item = self.tree.GetSelection()
-        if selected_item.IsOk():
-            item_data = self.tree.GetItemData(selected_item)
-            if not item_data: return
-            
-            should_reload = False
-            
-            # 1. Exact feed match
-            if item_data.get("type") == "feed" and item_data.get("id") == feed_id:
-                should_reload = True
-            
-            # 2. "All Feeds" is selected
-            elif item_data.get("type") == "all":
-                should_reload = True
-                
-            # 3. Category of this feed is selected (requires lookup, skip if complex or just reload "all")
-            elif item_data.get("type") == "category":
-                # We'd need to know if feed_id belongs to this category.
-                # Since we don't have easy lookup here without DB query, we can optimistically reload 
-                # if ANY category is selected, or just let the user wait?
-                # Let's do a quick check if we have the category name in data (we don't).
-                # For now, let's assume user mainly watches "All Feeds" or specific feed.
-                # But to be safe/responsive, if we are viewing a category, we probably want updates.
-                should_reload = True # Optimistic reload for categories
-
-            if should_reload:
-                # Always coalesce via a oneshot timer; restart on every update
-                if not hasattr(self, '_reload_timer'):
-                    self._reload_timer = wx.Timer(self)
-                    self.Bind(wx.EVT_TIMER, self._on_reload_timer, self._reload_timer)
-                self._reload_timer.Start(self.RELOAD_DEBOUNCE_MS, wx.TIMER_ONE_SHOT)
-
-    def _on_reload_timer(self, event):
-        self._do_reload_articles()
-
-    def _do_reload_articles(self):
-        selected_item = self.tree.GetSelection()
-        if selected_item.IsOk():
-            item_data = self.tree.GetItemData(selected_item)
-            if item_data:
-                current_view_id = None
-                if item_data.get("type") == "all": current_view_id = "all"
-                elif item_data.get("type") == "category": current_view_id = f"category:{item_data.get('id')}"
-                elif item_data.get("type") == "feed": current_view_id = item_data.get("id")
-                
-                if current_view_id:
-                    # Trigger refresh in background (avoid blocking UI)
-                    self.current_request_id = time.time()
-                    threading.Thread(
-                        target=self._load_articles_thread,
-                        args=(current_view_id, self.current_request_id),
-                        daemon=True
-                    ).start()
-        
-        # Update tree label with new unread count?
-        # This requires finding the tree item for the feed_id. 
-        # Since we don't have a map of id->item, we might skip or do a full tree refresh later.
-        # For now, just list update is key.
 
     def real_close(self):
         # Standardize shutdown path

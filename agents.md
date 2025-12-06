@@ -63,20 +63,3 @@
 2.  **Dates:** Use `core.utils.normalize_date`. Trust Title/URL dates over Feed metadata if discrepancies exist.
 3.  **Performance:** Use `get_chapters_batch` for lists. Never loop DB queries in UI threads.
 4.  **Naming:** App is **BlindRSS**.
-
-## 2025-12 Release Notes (current state)
-- **Downloads:**
-  - Article context menu includes “Download”; player Download also queues into Download Manager.
-  - Files saved as `Podcasts/<feed title>/Title - YYYY-MM-DD.ext` (sanitized; per-feed folders).
-  - Max concurrent downloads configurable in Settings (`max_downloads`, default 10); queue processes newest first; Pause/Resume/Cancel/Cancel All in Download Manager (Tools + Tray).
-- **Player:**
-  - Speed changes apply immediately after play; VLC uses low caching (`--network/file/live-caching=50`, jitter off) for minimal latency.
-  - Chapters fetched lazily; playback rate re-applied on load for VLC and MediaCtrl.
-- **UI/UX:**
-  - “Close button sends app to system tray” setting (default off).
-  - Tools menu: Download Manager above Settings (Settings at bottom); tray menu also has download controls.
-  - “Load more” keeps focus on the first newly loaded item.
-- **Logging:**
-  - Disabled by default; set `BLINDRSS_DEBUG=1` to enable DEBUG logs to `blindrss_debug.log`.
-- **Build/Paths:**
-  - PyInstaller output: `dist/BlindRSS.exe`. Config/DB live beside exe when frozen, or repo root when running from source.

@@ -36,9 +36,6 @@ class BlindRSSTrayIcon(wx.adv.TaskBarIcon):
         menu.AppendSeparator()
         
         refresh_item = menu.Append(wx.ID_ANY, "Refresh Feeds")
-        dm_item = menu.Append(wx.ID_ANY, "Download Manager")
-        pause_dl = menu.Append(wx.ID_ANY, "Pause Downloads")
-        resume_dl = menu.Append(wx.ID_ANY, "Resume Downloads")
         menu.AppendSeparator()
         
         # Media Controls
@@ -58,9 +55,6 @@ class BlindRSSTrayIcon(wx.adv.TaskBarIcon):
         
         self.Bind(wx.EVT_MENU, self.on_restore, restore_item)
         self.Bind(wx.EVT_MENU, self.on_refresh, refresh_item)
-        self.Bind(wx.EVT_MENU, self.on_download_manager, dm_item)
-        self.Bind(wx.EVT_MENU, self.on_pause_downloads, pause_dl)
-        self.Bind(wx.EVT_MENU, self.on_resume_downloads, resume_dl)
         self.Bind(wx.EVT_MENU, self.on_play, play_item)
         self.Bind(wx.EVT_MENU, self.on_pause, pause_item)
         self.Bind(wx.EVT_MENU, self.on_stop, stop_item)
@@ -88,17 +82,6 @@ class BlindRSSTrayIcon(wx.adv.TaskBarIcon):
     def on_pause(self, event):
         if self.frame.player_window and self.frame.player_window.panel:
             self.frame.player_window.panel.on_pause(None)
-
-    def on_download_manager(self, event):
-        self.frame.on_download_manager(event)
-
-    def on_pause_downloads(self, event):
-        if hasattr(self.frame, "downloader"):
-            self.frame.downloader.pause_all()
-
-    def on_resume_downloads(self, event):
-        if hasattr(self.frame, "downloader"):
-            self.frame.downloader.resume_all()
 
     def on_stop(self, event):
         if self.frame.player_window and self.frame.player_window.panel:

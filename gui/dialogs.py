@@ -1,5 +1,4 @@
 import wx
-import math
 
 class AddFeedDialog(wx.Dialog):
     def __init__(self, parent, categories):
@@ -51,13 +50,23 @@ class SettingsDialog(wx.Dialog):
         panel = wx.Panel(self)
         panel_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        # Notebook for All Settings
-        nb = wx.Notebook(panel)
+        # Provider Selection
+        hbox_prov = wx.BoxSizer(wx.HORIZONTAL)
+        hbox_prov.Add(wx.StaticText(panel, label="Active Provider:"), flag=wx.RIGHT, border=8)
+        self.cb_provider = wx.ComboBox(panel, choices=["local", "miniflux", "theoldreader", "inoreader", "bazqux"], style=wx.CB_READONLY)
+        self.cb_provider.SetValue(self.config.get("active_provider", "local"))
+        hbox_prov.Add(self.cb_provider, proportion=1)
+        panel_sizer.Add(hbox_prov, flag=wx.EXPAND|wx.ALL, border=10)
         
-        # General Tab
-        self.p_gen = wx.Panel(nb)
-        self._init_general_tab(self.p_gen)
-        nb.AddPage(self.p_gen, "General")
+        # Refresh Interval
+        hbox1 = wx.BoxSizer(wx.HORIZONTAL)
+        hbox1.Add(wx.StaticText(panel, label="Refresh Interval (seconds):"), flag=wx.RIGHT, border=8)
+        self.sp_refresh = wx.SpinCtrl(panel, min=30, max=3600, initial=int(self.config.get("refresh_interval", 300)))
+        hbox1.Add(self.sp_refresh, proportion=1)
+        panel_sizer.Add(hbox1, flag=wx.EXPAND|wx.LEFT|wx.RIGHT, border=10)
+        
+        # Notebook for Provider Settings
+        nb = wx.Notebook(panel)
         
         # Miniflux Tab
         self.p_mf = wx.Panel(nb)
@@ -89,77 +98,6 @@ class SettingsDialog(wx.Dialog):
         main_sizer.Add(btns, flag=wx.EXPAND|wx.ALL, border=10)
         
         self.SetSizer(main_sizer)
-
-    def _init_general_tab(self, p):
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        
-        # Active Provider
-        hbox_prov = wx.BoxSizer(wx.HORIZONTAL)
-        hbox_prov.Add(wx.StaticText(p, label="Active Provider:"), flag=wx.RIGHT|wx.ALIGN_CENTER_VERTICAL, border=8)
-        self.cb_provider = wx.ComboBox(p, choices=["local", "miniflux", "theoldreader", "inoreader", "bazqux"], style=wx.CB_READONLY)
-        self.cb_provider.SetValue(self.config.get("active_provider", "local"))
-        hbox_prov.Add(self.cb_provider, proportion=1)
-        sizer.Add(hbox_prov, flag=wx.EXPAND|wx.ALL, border=10)
-        
-        # Refresh Interval
-        hbox1 = wx.BoxSizer(wx.HORIZONTAL)
-        hbox1.Add(wx.StaticText(p, label="Refresh Interval (seconds):"), flag=wx.RIGHT|wx.ALIGN_CENTER_VERTICAL, border=8)
-        self.sp_refresh = wx.SpinCtrl(p, min=30, max=3600, initial=int(self.config.get("refresh_interval", 300)))
-        hbox1.Add(self.sp_refresh, proportion=1)
-        sizer.Add(hbox1, flag=wx.EXPAND|wx.ALL, border=10)
-        
-        # Skip Silence (Global)
-        self.chk_skip_silence = wx.CheckBox(p, label="Skip Silence (Global)")
-        self.chk_skip_silence.SetToolTip("Automatically skip detected silence in all podcasts")
-        self.chk_skip_silence.SetValue(self.config.get("skip_silence", False))
-        sizer.Add(self.chk_skip_silence, flag=wx.ALL, border=10)
-
-        # Close to tray
-        self.chk_close_tray = wx.CheckBox(p, label="Close button sends app to system tray")
-        self.chk_close_tray.SetValue(self.config.get("close_to_tray", False))
-        sizer.Add(self.chk_close_tray, flag=wx.ALL, border=10)
-
-        # Max concurrent downloads
-        hbox_dl = wx.BoxSizer(wx.HORIZONTAL)
-        hbox_dl.Add(wx.StaticText(p, label="Max concurrent downloads:"), flag=wx.RIGHT|wx.ALIGN_CENTER_VERTICAL, border=8)
-        self.sp_max_dl = wx.SpinCtrl(p, min=1, max=20, initial=int(self.config.get("max_downloads", 10)))
-        hbox_dl.Add(self.sp_max_dl, proportion=0)
-        sizer.Add(hbox_dl, flag=wx.EXPAND|wx.ALL, border=10)
-
-        # Auto Download
-        sb_auto = wx.StaticBoxSizer(wx.VERTICAL, p, "Automatic Downloads")
-        
-        self.chk_auto_dl = wx.CheckBox(p, label="Automatically download all podcasts")
-        self.chk_auto_dl.SetValue(self.config.get("auto_download_podcasts", False))
-        sb_auto.Add(self.chk_auto_dl, flag=wx.ALL, border=5)
-        
-        hbox_period = wx.BoxSizer(wx.HORIZONTAL)
-        hbox_period.Add(wx.StaticText(p, label="Download period:"), flag=wx.RIGHT|wx.ALIGN_CENTER_VERTICAL, border=5)
-        
-        self.period_map = [
-            ("1 Day", "1d"), ("5 Days", "5d"), ("1 Week", "1w"), ("2 Weeks", "2w"),
-            ("1 Month", "1m"), ("3 Months", "3m"), ("6 Months", "6m"),
-            ("1 Year", "1y"), ("2 Years", "2y"), ("5 Years", "5y"),
-            ("10 Years", "10y"), ("Unlimited", "unlimited")
-        ]
-        choices = [x[0] for x in self.period_map]
-        self.cb_period = wx.ComboBox(p, choices=choices, style=wx.CB_READONLY)
-        
-        # Set selection
-        current = self.config.get("auto_download_period", "1w")
-        sel_idx = 2
-        for i, (label, val) in enumerate(self.period_map):
-            if val == current:
-                sel_idx = i
-                break
-        self.cb_period.SetSelection(sel_idx)
-        
-        hbox_period.Add(self.cb_period, proportion=1)
-        sb_auto.Add(hbox_period, flag=wx.EXPAND|wx.ALL, border=5)
-        
-        sizer.Add(sb_auto, flag=wx.EXPAND|wx.ALL, border=10)
-        
-        p.SetSizer(sizer)
 
     def _init_miniflux_tab(self, p):
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -261,18 +199,9 @@ class SettingsDialog(wx.Dialog):
         self.config["providers"]["bazqux"]["email"] = self.tc_bz_email.GetValue()
         self.config["providers"]["bazqux"]["password"] = self.tc_bz_pass.GetValue()
         
-        # Find selected period value
-        sel = self.cb_period.GetSelection()
-        period_val = self.period_map[sel][1] if 0 <= sel < len(self.period_map) else "1w"
-
         return {
             "refresh_interval": self.sp_refresh.GetValue(),
             "active_provider": self.cb_provider.GetValue(),
-            "skip_silence": self.chk_skip_silence.GetValue(),
-            "close_to_tray": self.chk_close_tray.GetValue(),
-            "max_downloads": self.sp_max_dl.GetValue(),
-            "auto_download_podcasts": self.chk_auto_dl.GetValue(),
-            "auto_download_period": period_val,
             "providers": self.config["providers"]
         }
 
@@ -333,91 +262,3 @@ class PodcastSearchDialog(wx.Dialog):
         if idx == -1 or idx >= len(self.results):
             return None
         return self.results[idx].get("feedUrl")
-
-
-class DownloadManagerDialog(wx.Dialog):
-    def __init__(self, parent, downloader):
-        super().__init__(parent, title="Download Manager", size=(800, 400))
-        self.downloader = downloader
-        vbox = wx.BoxSizer(wx.VERTICAL)
-
-        self.list = wx.ListCtrl(self, style=wx.LC_REPORT|wx.BORDER_SUNKEN)
-        self.list.InsertColumn(0, "Title", width=320)
-        self.list.InsertColumn(1, "Status", width=100)
-        self.list.InsertColumn(2, "Progress", width=100)
-        self.list.InsertColumn(3, "Target / Error", width=240)
-        vbox.Add(self.list, 1, wx.EXPAND|wx.ALL, 8)
-
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_pause = wx.Button(self, label="Pause")
-        self.btn_resume = wx.Button(self, label="Resume")
-        self.btn_cancel = wx.Button(self, label="Cancel")
-        self.btn_cancel_all = wx.Button(self, label="Cancel All")
-        for b in [self.btn_pause, self.btn_resume, self.btn_cancel, self.btn_cancel_all]:
-            btn_sizer.Add(b, 0, wx.RIGHT, 5)
-        vbox.Add(btn_sizer, 0, wx.ALIGN_LEFT|wx.LEFT|wx.RIGHT|wx.BOTTOM, 8)
-
-        btns = self.CreateButtonSizer(wx.CLOSE)
-        vbox.Add(btns, 0, wx.ALIGN_RIGHT|wx.ALL, 8)
-
-        self.SetSizer(vbox)
-
-        self.timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self.on_timer, self.timer)
-        self.timer.Start(500)
-        self.Bind(wx.EVT_BUTTON, self.on_close, id=wx.ID_CLOSE)
-        self.btn_pause.Bind(wx.EVT_BUTTON, self.on_pause)
-        self.btn_resume.Bind(wx.EVT_BUTTON, self.on_resume)
-        self.btn_cancel.Bind(wx.EVT_BUTTON, self.on_cancel)
-        self.btn_cancel_all.Bind(wx.EVT_BUTTON, self.on_cancel_all)
-        self.Bind(wx.EVT_CLOSE, self.on_close)
-        self.refresh()
-
-    def on_close(self, event):
-        if self.timer.IsRunning():
-            self.timer.Stop()
-        self.Destroy()
-
-    def on_timer(self, event):
-        self.refresh()
-
-    def refresh(self):
-        jobs = self.downloader.get_jobs_snapshot() if self.downloader else []
-        self.list.Freeze()
-        self.list.DeleteAllItems()
-        for i, j in enumerate(jobs):
-            status = j.get("status", "")
-            prog = j.get("progress", 0.0)
-            prog_str = f"{int(math.floor(prog*100))}%"
-            msg = j.get("error") or j.get("target", "")
-            idx = self.list.InsertItem(i, j.get("title", ""))
-            self.list.SetItem(idx, 1, status)
-            self.list.SetItem(idx, 2, prog_str)
-            self.list.SetItem(idx, 3, msg)
-        self.list.Thaw()
-
-    def _selected_index(self):
-        idx = self.list.GetFirstSelected()
-        return idx if idx != -1 else None
-
-    def on_pause(self, event):
-        idx = self._selected_index()
-        if idx is not None:
-            self.downloader.pause_job(idx)
-            self.refresh()
-
-    def on_resume(self, event):
-        idx = self._selected_index()
-        if idx is not None:
-            self.downloader.resume_job(idx)
-            self.refresh()
-
-    def on_cancel(self, event):
-        idx = self._selected_index()
-        if idx is not None:
-            self.downloader.cancel_job(idx)
-            self.refresh()
-
-    def on_cancel_all(self, event):
-        self.downloader.cancel_all()
-        self.refresh()
