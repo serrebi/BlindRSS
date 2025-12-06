@@ -98,6 +98,14 @@ class SettingsDialog(wx.Dialog):
         self.cb_skip_silence.SetValue(bool(self.config.get("skip_silence", False)))
         gen_sizer.Add(self.cb_skip_silence, flag=wx.EXPAND|wx.ALL, border=10)
 
+        self.cb_close_to_tray = wx.CheckBox(p_general, label="Close button sends app to system tray")
+        self.cb_close_to_tray.SetValue(bool(self.config.get("close_to_tray", False)))
+        gen_sizer.Add(self.cb_close_to_tray, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.TOP, border=10)
+
+        self.cb_minimize_to_tray = wx.CheckBox(p_general, label="Minimize to system tray")
+        self.cb_minimize_to_tray.SetValue(bool(self.config.get("minimize_to_tray", True)))
+        gen_sizer.Add(self.cb_minimize_to_tray, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.TOP, border=10)
+
         hbox_speed = wx.BoxSizer(wx.HORIZONTAL)
         hbox_speed.Add(wx.StaticText(p_general, label="Playback speed:"), flag=wx.RIGHT|wx.ALIGN_CENTER_VERTICAL, border=8)
         self.cb_playback_speed = wx.ComboBox(
@@ -312,6 +320,8 @@ class SettingsDialog(wx.Dialog):
             "feed_retry_attempts": self.sp_feed_retries.GetValue(),
             "active_provider": self.cb_provider.GetValue(),
             "skip_silence": self.cb_skip_silence.GetValue(),
+            "close_to_tray": self.cb_close_to_tray.GetValue(),
+            "minimize_to_tray": self.cb_minimize_to_tray.GetValue(),
             "playback_speed": self._parse_speed(self.cb_playback_speed.GetValue()),
             "downloads_enabled": self.chk_enable_downloads.GetValue(),
             "download_path": self.tc_download_path.GetValue(),

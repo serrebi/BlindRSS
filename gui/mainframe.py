@@ -154,6 +154,12 @@ class MainFrame(wx.Frame):
             # wx.CallAfter(self.SetTitle, "RSS Reader")
 
     def on_close(self, event):
+        # If user prefers closing to tray and this is a real close event, just hide
+        if event and self.config_manager.get("close_to_tray", False):
+            event.Veto()
+            self.Hide()
+            return
+
         # Close player window cleanly
         if self.player_window:
             self.player_window.Destroy()
@@ -165,10 +171,9 @@ class MainFrame(wx.Frame):
         self.Destroy()
 
     def on_iconize(self, event):
-        if event.IsIconized():
+        if event.IsIconized() and self.config_manager.get("minimize_to_tray", True):
             self.Hide()
-        else:
-            self.Show()
+            return
         event.Skip()
 
     def on_tree_context_menu(self, event):

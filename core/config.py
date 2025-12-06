@@ -20,6 +20,8 @@ DEFAULT_CONFIG = {
     "feed_retry_attempts": 1,
     "active_provider": "local",
     "skip_silence": False,
+    "close_to_tray": False,
+    "minimize_to_tray": True,
     "playback_speed": 1.0,
     "downloads_enabled": False,
     "download_path": os.path.join(APP_DIR, "podcasts"),

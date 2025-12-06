@@ -1,11 +1,11 @@
 # BlindRSS
-
+A vibed rss reader for screen reader users.
 ## 1. What this app does
-- Blind-friendly RSS and podcast reader with keyboard-first controls.
+- A Blind-friendly RSS and podcast reader with keyboard-first controls.
 - Lets you subscribe, refresh, read, and play feeds without sighted UI tricks.
-- Plays podcasts with chapters and falls back to download if streaming fails.
+- Plays podcasts with chapters support, playback speed, and skip silence support.
 - Keeps feeds, articles, and settings locally so you control your data.
-
+- Supports a few different services, like TheOldReader, Miniflux, and more!
 ## 2. Main features
 - Works with screen readers; uses standard wxPython controls.
 - Fast startup; refreshes feeds in parallel and uses HTTP cache headers.
