@@ -6,3 +6,6 @@ yt-dlp
 python-dateutil
 mutagen
 python-vlc
+pychromecast
+async-upnp-client
+pyatv

@@ -1,5 +1,6 @@
 import abc
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+from core import utils
 
 class Article:
     def __init__(self, title: str, url: str, content: str, date: str, author: str, feed_id: str, is_read: bool = False, id: str = None, media_url: str = None, media_type: str = None, chapters: list = None):
@@ -50,9 +51,34 @@ class RSSProvider(abc.ABC):
     def get_articles(self, feed_id: str) -> List[Article]:
         pass
 
+
+
+    def get_articles_page(self, feed_id: str, offset: int = 0, limit: int = 200) -> Tuple[List[Article], int]:
+        """Optional pagination helper.
+
+        Providers that can do server-side paging should override this for speed.
+        Default implementation calls get_articles() and slices the result.
+        """
+        articles = self.get_articles(feed_id) or []
+        total = len(articles)
+        if offset < 0:
+            offset = 0
+        if limit is None or int(limit) <= 0:
+            return [], total
+        limit = int(limit)
+        return articles[offset:offset + limit], total
+
     @abc.abstractmethod
     def mark_read(self, article_id: str) -> bool:
         pass
+
+    def mark_read_batch(self, article_ids: List[str]) -> bool:
+        """Default implementation: loop over single mark_read."""
+        success = True
+        for aid in article_ids:
+            if not self.mark_read(aid):
+                success = False
+        return success
     
     @abc.abstractmethod
     def add_feed(self, url: str, category: str = None) -> bool:
@@ -62,13 +88,19 @@ class RSSProvider(abc.ABC):
     def remove_feed(self, feed_id: str) -> bool:
         pass
         
-    @abc.abstractmethod
     def import_opml(self, path: str, target_category: str = None) -> bool:
-        pass
+        """Default implementation using utils.parse_opml and add_feed."""
+        count = 0
+        for title, url, category in utils.parse_opml(path):
+            cat = target_category if target_category else category
+            if self.add_feed(url, cat):
+                count += 1
+        return count > 0
         
-    @abc.abstractmethod
     def export_opml(self, path: str) -> bool:
-        pass
+        """Default implementation using get_feeds and utils.write_opml."""
+        feeds = self.get_feeds()
+        return utils.write_opml(feeds, path)
 
     @abc.abstractmethod
     def get_categories(self) -> List[str]:

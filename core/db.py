@@ -4,6 +4,7 @@ from core.config import APP_DIR
 
 DB_FILE = os.path.join(APP_DIR, "rss.db")
 
+
 def init_db():
     conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
     c = conn.cursor()
@@ -59,7 +60,7 @@ def init_db():
     try:
         c.execute("ALTER TABLE articles ADD COLUMN media_url TEXT")
     except sqlite3.OperationalError:
-        pass 
+        pass
         
     try:
         c.execute("ALTER TABLE articles ADD COLUMN media_type TEXT")
@@ -78,12 +79,16 @@ def init_db():
     # Seed categories from existing feeds if empty
     c.execute("SELECT count(*) FROM categories")
     if c.fetchone()[0] == 0:
-        c.execute("INSERT OR IGNORE INTO categories (id, title) SELECT lower(hex(randomblob(16))), category FROM feeds WHERE category IS NOT NULL AND category != ''")
+        c.execute(
+            "INSERT OR IGNORE INTO categories (id, title) "
+            "SELECT lower(hex(randomblob(16))), category FROM feeds WHERE category IS NOT NULL AND category != ''"
+        )
         # Ensure Uncategorized exists
         c.execute("INSERT OR IGNORE INTO categories (id, title) VALUES (?, ?)", ("uncategorized", "Uncategorized"))
     
     conn.commit()
     conn.close()
+
 
 def get_connection():
     conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)

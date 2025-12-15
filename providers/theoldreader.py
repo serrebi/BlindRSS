@@ -250,20 +250,48 @@ class TheOldReaderProvider(RSSProvider):
         except:
             return False
 
-    def import_opml(self, path: str, target_category: str = None) -> bool:
-        return False
-
-    def export_opml(self, path: str) -> bool:
-        return False
-
     def get_categories(self) -> List[str]:
-        return []
+        if not self._login(): return []
+        try:
+            resp = requests.get(f"{self.base_url}/tag/list", headers=self._headers(), params={"output": "json"})
+            resp.raise_for_status()
+            data = resp.json()
+            cats = []
+            for tag in data.get("tags", []):
+                tag_id = tag.get("id", "")
+                if tag_id.startswith("user/") and "/label/" in tag_id:
+                    label = tag_id.split("/label/", 1)[1]
+                    cats.append(label)
+            return sorted(cats)
+        except Exception as e:
+            print(f"TheOldReader Get Categories Error: {e}")
+            return []
 
     def add_category(self, title: str) -> bool:
-        return False
+        return True
 
     def rename_category(self, old_title: str, new_title: str) -> bool:
-        return False
+        if not self._login(): return False
+        try:
+            source = f"user/-/label/{old_title}"
+            dest = f"user/-/label/{new_title}"
+            resp = requests.post(f"{self.base_url}/rename-tag", headers=self._headers(), data={
+                "s": source,
+                "dest": dest
+            })
+            return resp.ok
+        except Exception as e:
+            print(f"TheOldReader Rename Category Error: {e}")
+            return False
 
     def delete_category(self, title: str) -> bool:
-        return False
+        if not self._login(): return False
+        try:
+            tag = f"user/-/label/{title}"
+            requests.post(f"{self.base_url}/disable-tag", headers=self._headers(), data={
+                "s": tag
+            })
+            return True
+        except Exception as e:
+            print(f"TheOldReader Delete Category Error: {e}")
+            return False

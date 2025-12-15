@@ -1,56 +1,51 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-import re
+from core import utils
+
 
 def discover_feed(url: str) -> str:
     """
-    Attempts to find an RSS/Atom feed URL from a given website URL.
+    Given a URL, try to find the RSS/Atom feed URL.
+    Returns None if not found.
     """
-    if not url.startswith("http"):
-        url = "http://" + url
-
-    # YouTube Logic
-    if "youtube.com" in url or "youtu.be" in url:
-        # Channel
-        if "/channel/" in url:
-            channel_id = url.split("/channel/")[1].split("/")[0].split("?")[0]
-            return f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-        # User
-        if "/user/" in url:
-            user = url.split("/user/")[1].split("/")[0].split("?")[0]
-            return f"https://www.youtube.com/feeds/videos.xml?user={user}"
-        # Playlist
-        if "list=" in url:
-            match = re.search(r'list=([a-zA-Z0-9_-]+)', url)
-            if match:
-                return f"https://www.youtube.com/feeds/videos.xml?playlist_id={match.group(1)}"
-        # Handle (needs scraping usually, but let's try requests first as some handles redirect)
-        # Simpler: If it's a @handle or /c/ custom URL, we might need to fetch the page to find the channel_id
-        # Fallthrough to standard discovery which often works for YouTube channel pages if they contain the RSS link tag
+    if not url:
+        return None
+    
+    # If it looks like a feed already
+    if url.endswith(".xml") or url.endswith(".rss") or url.endswith(".atom") or "feed" in url:
+        return url
         
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+        resp = utils.safe_requests_get(url, timeout=10)
+        resp.raise_for_status()
         
-        # If the URL itself is an XML feed, feedparser might handle it, 
-        # but we can check content type or basic sniffing.
-        content_type = response.headers.get('content-type', '').lower()
-        if 'xml' in content_type or response.text.strip().startswith('<?xml'):
-            return url
-
-        soup = BeautifulSoup(response.text, 'html.parser')
+        soup = BeautifulSoup(resp.text, 'html.parser')
         
-        # Look for <link rel="alternate" type="application/rss+xml" ...>
-        links = soup.find_all('link', rel='alternate')
+        # 1. <link rel="alternate" type="application/rss+xml" href="...">
+        links = soup.find_all("link", rel="alternate")
         for link in links:
-            type_attr = link.get('type', '').lower()
-            if 'rss' in type_attr or 'atom' in type_attr:
-                href = link.get('href')
+            if link.get("type") in ["application/rss+xml", "application/atom+xml", "text/xml"]:
+                href = link.get("href")
                 if href:
                     return urljoin(url, href)
                     
-        return None
-    except Exception as e:
-        print(f"Discovery failed: {e}")
-        return None
+        # 2. Check for common patterns if no link tag
+        # e.g. /feed, /rss, /atom.xml
+        # This is a bit brute force but helpful
+        common_paths = ["/feed", "/rss", "/rss.xml", "/atom.xml", "/feed.xml"]
+        base = url.rstrip("/")
+        for path in common_paths:
+            # Avoid re-checking
+            candidate = base + path
+            try:
+                head = requests.head(candidate, headers=utils.HEADERS, timeout=5)
+                if head.status_code == 200 and "xml" in head.headers.get("Content-Type", ""):
+                    return candidate
+            except Exception:
+                pass
+                
+    except Exception:
+        pass
+        
+    return None

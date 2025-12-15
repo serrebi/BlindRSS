@@ -114,28 +114,88 @@ class InoreaderProvider(RSSProvider):
         return []
 
     def mark_read(self, article_id: str) -> bool:
-        return False 
+        if not self.token: return False
+        try:
+            requests.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
+                "i": article_id,
+                "a": "user/-/state/com.google/read"
+            })
+            return True
+        except Exception as e:
+            print(f"Inoreader Mark Read Error: {e}")
+            return False
 
     def add_feed(self, url: str, category: str = None) -> bool:
-        return False
+        if not self.token: return False
+        try:
+            data = {
+                "s": f"feed/{url}",
+                "ac": "subscribe"
+            }
+            if category:
+                data["t"] = category
+            
+            resp = requests.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data=data)
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            print(f"Inoreader Add Feed Error: {e}")
+            return False
 
     def remove_feed(self, feed_id: str) -> bool:
-        return False
-        
-    def import_opml(self, path: str, target_category: str = None) -> bool:
-        return False
-
-    def export_opml(self, path: str) -> bool:
-        return False
+        if not self.token: return False
+        try:
+            requests.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data={
+                "s": feed_id,
+                "ac": "unsubscribe"
+            })
+            return True
+        except Exception as e:
+            print(f"Inoreader Remove Feed Error: {e}")
+            return False
 
     def get_categories(self) -> List[str]:
-        return []
+        if not self.token: return []
+        try:
+            resp = requests.get(f"{self.base_url}/tag/list", headers=self._headers(), params={"output": "json"})
+            resp.raise_for_status()
+            data = resp.json()
+            cats = []
+            for tag in data.get("tags", []):
+                tag_id = tag.get("id", "")
+                if tag_id.startswith("user/") and "/label/" in tag_id:
+                    label = tag_id.split("/label/", 1)[1]
+                    cats.append(label)
+            return sorted(cats)
+        except Exception as e:
+            print(f"Inoreader Get Categories Error: {e}")
+            return []
 
     def add_category(self, title: str) -> bool:
-        return False
+        return True
 
     def rename_category(self, old_title: str, new_title: str) -> bool:
-        return False
+        if not self.token: return False
+        try:
+            source = f"user/-/label/{old_title}"
+            dest = f"user/-/label/{new_title}"
+            resp = requests.post(f"{self.base_url}/rename-tag", headers=self._headers(), data={
+                "s": source,
+                "dest": dest
+            })
+            return resp.ok
+        except Exception as e:
+            print(f"Inoreader Rename Category Error: {e}")
+            return False
 
     def delete_category(self, title: str) -> bool:
-        return False
+        if not self.token: return False
+        try:
+            tag = f"user/-/label/{title}"
+            requests.post(f"{self.base_url}/disable-tag", headers=self._headers(), data={
+                "s": tag
+            })
+            return True
+        except Exception as e:
+            print(f"Inoreader Delete Category Error: {e}")
+            return False

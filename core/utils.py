@@ -2,7 +2,8 @@ import requests
 import re
 import uuid
 import logging
-import sqlite3
+import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup as BS
 from datetime import datetime, timezone, timedelta
 from dateutil import parser as dateparser
 from dateutil.parser import UnknownTimezoneWarning
@@ -33,6 +34,7 @@ TZINFOS = {
     "PDT": -25200,
 }
 
+
 def build_playback_speeds(start: float = 0.5, stop: float = 4.0, step: float = 0.12):
     """
     Generate a list of playback speeds rounded to 2 decimals, inclusive of bounds.
@@ -57,6 +59,7 @@ def build_playback_speeds(start: float = 0.5, stop: float = 4.0, step: float = 0
         cleaned.append(v)
     return cleaned
 
+
 def safe_requests_get(url, **kwargs):
     """Wrapper for requests.get with default browser headers."""
     headers = kwargs.pop("headers", {})
@@ -67,11 +70,13 @@ def safe_requests_get(url, **kwargs):
 
 # --- Date Parsing ---
 
+
 def format_datetime(dt: datetime) -> str:
     """Return UTC-normalized string for consistent ordering."""
     if dt.tzinfo:
         dt = dt.astimezone(timezone.utc)
     return dt.strftime("%Y-%m-%d %H:%M:%S")
+
 
 def extract_date_from_text(text: str):
     """
@@ -126,6 +131,7 @@ def extract_date_from_text(text: str):
         pass
     return None
 
+
 def normalize_date(raw_date_str: str, title: str = "", content: str = "", url: str = "") -> str:
     """
     Robust date normalizer.
@@ -135,7 +141,8 @@ def normalize_date(raw_date_str: str, title: str = "", content: str = "", url: s
     now = datetime.now(timezone.utc)
     
     def valid(dt: datetime) -> bool:
-        if not dt: return False
+        if not dt:
+            return False
         if dt.tzinfo:
             dt_cmp = dt.astimezone(timezone.utc)
         else:
@@ -174,7 +181,73 @@ def normalize_date(raw_date_str: str, title: str = "", content: str = "", url: s
     return "0001-01-01 00:00:00"
 
 
+def parse_datetime_utc(value: str):
+    """Parse a date/time string into an aware UTC datetime.
+
+    BlindRSS stores normalized dates as UTC-formatted strings ("YYYY-MM-DD HH:MM:SS").
+    If a parsed datetime is naive, it is assumed to be UTC.
+
+    Returns:
+        datetime (tz-aware, UTC) or None if parsing fails or the value is a sentinel.
+    """
+    if not value:
+        return None
+    value = str(value).strip()
+    if not value or value.startswith("0001-01-01"):
+        return None
+
+    dt = None
+    try:
+        dt = dateparser.parse(value, tzinfos=TZINFOS)
+    except Exception:
+        dt = None
+
+    if not dt:
+        try:
+            dt = datetime.fromisoformat(value)
+        except Exception:
+            return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
+
+
+def humanize_article_date(date_str: str, now_utc: datetime = None) -> str:
+    """Human-friendly article date.
+
+    - For the first 24 hours: relative time (e.g., "5 minutes ago", "2 hours ago").
+    - After 24 hours: absolute local time using the system timezone.
+    """
+    dt_utc = parse_datetime_utc(date_str)
+    if not dt_utc:
+        return ""
+
+    now = now_utc or datetime.now(timezone.utc)
+    delta = now - dt_utc
+    if delta.total_seconds() < 0:
+        delta = timedelta(seconds=0)
+
+    if delta <= timedelta(hours=24):
+        secs = int(delta.total_seconds())
+        if secs < 60:
+            return "Just now"
+        mins = secs // 60
+        if mins < 60:
+            return f"{mins} minute{'s' if mins != 1 else ''} ago"
+        hours = mins // 60
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+
+    # Absolute local time
+    local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+    dt_local = dt_utc.astimezone(local_tz)
+    return dt_local.strftime("%Y-%m-%d %H:%M")
+
+
 # --- Chapters ---
+
 
 def get_chapters_from_db(article_id: str):
     conn = get_connection()
@@ -183,6 +256,7 @@ def get_chapters_from_db(article_id: str):
     rows = c.fetchall()
     conn.close()
     return [{"start": r[0], "title": r[1], "href": r[2]} for r in rows]
+
 
 def get_chapters_batch(article_ids: list) -> dict:
     """
@@ -204,11 +278,13 @@ def get_chapters_batch(article_ids: list) -> dict:
         c.execute(f"SELECT article_id, start, title, href FROM chapters WHERE article_id IN ({placeholders}) ORDER BY article_id, start", chunk)
         for row in c.fetchall():
             aid = row[0]
-            if aid not in chapters_map: chapters_map[aid] = []
+            if aid not in chapters_map:
+                chapters_map[aid] = []
             chapters_map[aid].append({"start": row[1], "title": row[2], "href": row[3]})
             
     conn.close()
     return chapters_map
+
 
 def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None):
     """
@@ -238,7 +314,7 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
                 title_ch = ch.get("title", "")
                 href = ch.get("url") or ch.get("link")
                 c.execute("INSERT OR REPLACE INTO chapters (id, article_id, start, title, href) VALUES (?, ?, ?, ?, ?)",
-                              (ch_id, article_id, float(start), title_ch, href))
+                          (ch_id, article_id, float(start), title_ch, href))
                 chapters_out.append({"start": float(start), "title": title_ch, "href": href})
             conn.commit()
             conn.close()
@@ -270,7 +346,7 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
                     # Extract URL from WXXX if needed? Usually just title.
                     
                     c.execute("INSERT OR REPLACE INTO chapters (id, article_id, start, title, href) VALUES (?, ?, ?, ?, ?)",
-                                  (ch_id, article_id, float(start), title_ch, href))
+                              (ch_id, article_id, float(start), title_ch, href))
                     chapters_out.append({"start": float(start), "title": title_ch, "href": href})
                 
                 conn.commit()
@@ -281,3 +357,110 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
             log.info(f"ID3 chapter parse failed for {media_url}: {e}")
 
     return chapters_out
+
+
+# --- OPML Helpers ---
+
+def parse_opml(path: str):
+    """
+    Parses an OPML file and yields (title, url, category) tuples.
+    """
+    try:
+        content = ""
+        # Try to read file with different encodings
+        for encoding in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']:
+            try:
+                with open(path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if not content:
+            log.error("OPML Parse: Could not read file with supported encodings")
+            return
+
+        # Try parsing with BS4
+        soup = None
+        try:
+            soup = BS(content, 'xml')
+        except Exception:
+            pass
+        
+        if not soup or not soup.find('opml'):
+            soup = BS(content, 'html.parser')
+
+        body = soup.find('body')
+        if not body:
+            return
+
+        def process_outline(outline, current_category="Uncategorized"):
+            # Case insensitive attribute lookup
+            def get_attr(name):
+                if name in outline.attrs:
+                    return outline.attrs[name]
+                for k, v in outline.attrs.items():
+                    if k.lower() == name.lower():
+                        return v
+                return None
+
+            text = get_attr('text') or get_attr('title')
+            xmlUrl = get_attr('xmlUrl')
+            
+            if xmlUrl:
+                yield (text, xmlUrl, current_category)
+            
+            # Recursion
+            children = outline.find_all('outline', recursive=False)
+            if children:
+                new_cat = current_category
+                if not xmlUrl:
+                    # It's a folder
+                    new_cat = text
+                for child in children:
+                    yield from process_outline(child, new_cat)
+
+        for outline in body.find_all('outline', recursive=False):
+            yield from process_outline(outline)
+
+    except Exception as e:
+        log.error(f"OPML Parse Error: {e}")
+
+
+def write_opml(feeds: list, path: str):
+    """
+    Writes a list of Feed objects (or dicts/tuples with title, url, category) to an OPML file.
+    """
+    try:
+        root = ET.Element("opml", version="1.0")
+        head = ET.SubElement(root, "head")
+        ET.SubElement(head, "title").text = "RSS Exports"
+        body = ET.SubElement(root, "body")
+        
+        # Group by category
+        categories = {}
+        for feed in feeds:
+            # Handle both objects and dicts/tuples if needed, assuming Feed objects primarily
+            title = getattr(feed, 'title', None)
+            url = getattr(feed, 'url', None)
+            cat = getattr(feed, 'category', "Uncategorized")
+            
+            if cat not in categories:
+                categories[cat] = []
+            categories[cat].append((title, url))
+            
+        for cat, items in categories.items():
+            if cat == "Uncategorized" or not cat:
+                for title, url in items:
+                    ET.SubElement(body, "outline", text=title or "", xmlUrl=url or "")
+            else:
+                cat_outline = ET.SubElement(body, "outline", text=cat)
+                for title, url in items:
+                    ET.SubElement(cat_outline, "outline", text=title or "", xmlUrl=url or "")
+                    
+        tree = ET.ElementTree(root)
+        tree.write(path, encoding='utf-8', xml_declaration=True)
+        return True
+    except Exception as e:
+        log.error(f"OPML Write Error: {e}")
+        return False

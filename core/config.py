@@ -22,25 +22,35 @@ DEFAULT_CONFIG = {
     "skip_silence": False,
     "close_to_tray": False,
     "minimize_to_tray": True,
+    "max_cached_views": 15,
     "playback_speed": 1.0,
+    "volume": 100,
+    "volume_step": 5,
+    "seek_back_ms": 10000,
+    "seek_forward_ms": 30000,
+    "show_player_on_play": True,
+    "vlc_network_caching_ms": 5000,
+    "range_cache_enabled": True,
+    "range_cache_prefetch_kb": 16384,  # per seek/read; larger reduces round-trips on high latency
+    "range_cache_inline_window_kb": 1024,  # max bytes served per VLC request; smaller = lower seek latency
+    "range_cache_hosts": ["promodj.com"],
+    "range_cache_dir": "",  # empty => use OS temp directory
+    "range_cache_background_download": True,  # download ahead in background to make later seeks faster
+    "range_cache_background_chunk_kb": 8192,  # chunk size for background download
     "downloads_enabled": False,
     "download_path": os.path.join(APP_DIR, "podcasts"),
     "download_retention": "Unlimited",
     "providers": {
         "local": {
-            "feeds": [] # List of feed URLs/data
+            "feeds": []  # List of feed URLs/data
         },
         "theoldreader": {
-            "username": "",
+            "email": "",
             "password": ""
         },
         "miniflux": {
             "url": "",
             "api_key": ""
-        },
-        "theoldreader": {
-            "email": "",
-            "password": ""
         },
         "inoreader": {
             "token": ""
@@ -51,6 +61,7 @@ DEFAULT_CONFIG = {
         }
     }
 }
+
 
 class ConfigManager:
     def __init__(self):

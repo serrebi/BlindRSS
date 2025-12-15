@@ -33,15 +33,20 @@ class BlindRSSTrayIcon(wx.adv.TaskBarIcon):
         menu = wx.Menu()
         
         restore_item = menu.Append(wx.ID_ANY, "Restore")
+        toggle_player_item = menu.Append(wx.ID_ANY, "Show/Hide Player")
         menu.AppendSeparator()
         
         refresh_item = menu.Append(wx.ID_ANY, "Refresh Feeds")
         menu.AppendSeparator()
         
         # Media Controls
-        play_item = menu.Append(wx.ID_ANY, "Play")
-        pause_item = menu.Append(wx.ID_ANY, "Pause")
+        play_pause_item = menu.Append(wx.ID_ANY, "Play/Pause")
         stop_item = menu.Append(wx.ID_ANY, "Stop")
+        rewind_item = menu.Append(wx.ID_ANY, "Rewind")
+        forward_item = menu.Append(wx.ID_ANY, "Fast Forward")
+
+        vol_up_item = menu.Append(wx.ID_ANY, "Volume Up")
+        vol_down_item = menu.Append(wx.ID_ANY, "Volume Down")
         
         # Volume Submenu
         vol_menu = wx.Menu()
@@ -54,10 +59,14 @@ class BlindRSSTrayIcon(wx.adv.TaskBarIcon):
         exit_item = menu.Append(wx.ID_EXIT, "Exit")
         
         self.Bind(wx.EVT_MENU, self.on_restore, restore_item)
+        self.Bind(wx.EVT_MENU, self.on_toggle_player, toggle_player_item)
         self.Bind(wx.EVT_MENU, self.on_refresh, refresh_item)
-        self.Bind(wx.EVT_MENU, self.on_play, play_item)
-        self.Bind(wx.EVT_MENU, self.on_pause, pause_item)
+        self.Bind(wx.EVT_MENU, self.on_play_pause, play_pause_item)
         self.Bind(wx.EVT_MENU, self.on_stop, stop_item)
+        self.Bind(wx.EVT_MENU, self.on_rewind, rewind_item)
+        self.Bind(wx.EVT_MENU, self.on_forward, forward_item)
+        self.Bind(wx.EVT_MENU, self.on_volume_up, vol_up_item)
+        self.Bind(wx.EVT_MENU, self.on_volume_down, vol_down_item)
         self.Bind(wx.EVT_MENU, self.on_exit, exit_item)
         
         return menu
@@ -75,23 +84,61 @@ class BlindRSSTrayIcon(wx.adv.TaskBarIcon):
     def on_refresh(self, event):
         self.frame.on_refresh_feeds(None)
 
-    def on_play(self, event):
-        if self.frame.player_window and self.frame.player_window.panel:
-            self.frame.player_window.panel.on_play(None)
+    def on_toggle_player(self, event):
+        try:
+            self.frame.toggle_player_visibility()
+        except Exception:
+            pass
 
-    def on_pause(self, event):
-        if self.frame.player_window and self.frame.player_window.panel:
-            self.frame.player_window.panel.on_pause(None)
+    def on_play_pause(self, event):
+        pw = getattr(self.frame, "player_window", None)
+        if pw:
+            try:
+                pw.toggle_play_pause()
+            except Exception:
+                pass
 
     def on_stop(self, event):
-        if self.frame.player_window and self.frame.player_window.panel:
-            self.frame.player_window.panel.on_stop(None)
+        pw = getattr(self.frame, "player_window", None)
+        if pw:
+            pw.stop()
+
+    def on_rewind(self, event):
+        pw = getattr(self.frame, "player_window", None)
+        if pw:
+            try:
+                pw.seek_relative_ms(-int(getattr(pw, "seek_back_ms", 10000)))
+            except Exception:
+                pass
+
+    def on_forward(self, event):
+        pw = getattr(self.frame, "player_window", None)
+        if pw:
+            try:
+                pw.seek_relative_ms(int(getattr(pw, "seek_forward_ms", 30000)))
+            except Exception:
+                pass
+
+    def on_volume_up(self, event):
+        pw = getattr(self.frame, "player_window", None)
+        if pw:
+            try:
+                pw.adjust_volume(int(getattr(pw, "volume_step", 5)))
+            except Exception:
+                pass
+
+    def on_volume_down(self, event):
+        pw = getattr(self.frame, "player_window", None)
+        if pw:
+            try:
+                pw.adjust_volume(-int(getattr(pw, "volume_step", 5)))
+            except Exception:
+                pass
 
     def on_volume(self, vol):
-        if self.frame.player_window and self.frame.player_window.panel:
-            panel = self.frame.player_window.panel
-            panel.volume_slider.SetValue(vol)
-            panel.on_volume_change(None)
+        pw = getattr(self.frame, "player_window", None)
+        if pw:
+            pw.set_volume_percent(vol, persist=True)
 
     def on_exit(self, event):
         self.RemoveIcon()

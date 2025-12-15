@@ -120,7 +120,7 @@ class LocalProvider(RSSProvider):
                 try:
                     soup = BS(xml_text, "xml")
                 except Exception as parser_exc:
-                    log.info(f"XML parser unavailable for chapter map on {feed_url}; falling back to html.parser ({parser_exc})")
+                    log.debug(f"XML parser unavailable for chapter map on {feed_url}; falling back to html.parser ({parser_exc})")
                     soup = BS(xml_text, "html.parser")
 
                 for item in soup.find_all("item"):
@@ -148,7 +148,8 @@ class LocalProvider(RSSProvider):
                       (final_title, new_etag, new_last_modified, feed_id))
             conn.commit()
             
-            for entry in d.entries:
+            total_entries = len(d.entries)
+            for i, entry in enumerate(d.entries):
                 content = ""
                 if 'content' in entry:
                     content = entry.content[0].value
@@ -186,7 +187,9 @@ class LocalProvider(RSSProvider):
                     existing_date = row[0] or ""
                     if existing_date != date:
                             c.execute("UPDATE articles SET date = ? WHERE id = ?", (date, article_id))
-                            conn.commit()
+                            # Commit updates occasionally too
+                            if i % 5 == 0 or i == total_entries - 1:
+                                conn.commit()
                     continue
 
                 media_url = None
@@ -208,7 +211,6 @@ class LocalProvider(RSSProvider):
 
                 c.execute("INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
                             (article_id, feed_id, title, url, content, date, author, media_url, media_type))
-                conn.commit()
                 new_items += 1
                 
                 chapter_url = None
@@ -225,8 +227,11 @@ class LocalProvider(RSSProvider):
                         chapter_url = chapter_map[key]
 
                 utils.fetch_and_store_chapters(article_id, media_url, media_type, chapter_url)
+
+                # Commit every 5 items to save progress incrementally
+                if i % 5 == 0 or i == total_entries - 1:
+                    conn.commit()
             
-            conn.commit()
             conn.close()
         except Exception as e:
             error_msg = str(e)
@@ -340,6 +345,92 @@ class LocalProvider(RSSProvider):
         conn.close()
         return articles
 
+
+    def get_articles_page(self, feed_id: str, offset: int = 0, limit: int = 200):
+        """Fetch a single page of articles from the local SQLite DB (fast-first loading)."""
+        offset = int(max(0, offset))
+        limit = int(limit)
+
+        conn = get_connection()
+        c = conn.cursor()
+
+        # total count
+        total = 0
+        if feed_id == "all":
+            c.execute("SELECT COUNT(*) FROM articles")
+            total = int(c.fetchone()[0] or 0)
+            c.execute(
+                "SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type "
+                "FROM articles ORDER BY date DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            )
+        elif feed_id.startswith("category:"):
+            cat_name = feed_id.split(":", 1)[1]
+            c.execute(
+                "SELECT COUNT(*) FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE f.category = ?",
+                (cat_name,),
+            )
+            total = int(c.fetchone()[0] or 0)
+            c.execute(
+                """
+                SELECT a.id, a.feed_id, a.title, a.url, a.content, a.date, a.author, a.is_read, a.media_url, a.media_type
+                FROM articles a
+                JOIN feeds f ON a.feed_id = f.id
+                WHERE f.category = ?
+                ORDER BY a.date DESC
+                LIMIT ? OFFSET ?
+                """,
+                (cat_name, limit, offset),
+            )
+        else:
+            c.execute("SELECT COUNT(*) FROM articles WHERE feed_id = ?", (feed_id,))
+            total = int(c.fetchone()[0] or 0)
+            c.execute(
+                "SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type "
+                "FROM articles WHERE feed_id = ? ORDER BY date DESC LIMIT ? OFFSET ?",
+                (feed_id, limit, offset),
+            )
+
+        rows = c.fetchall()
+
+        # Fetch chapters for just this page
+        article_ids = [r[0] for r in rows]
+        chapters_map = {}
+        if article_ids:
+            chunk_size = 900
+            for i in range(0, len(article_ids), chunk_size):
+                chunk = article_ids[i:i+chunk_size]
+                placeholders = ",".join(["?"] * len(chunk))
+                c.execute(
+                    f"SELECT article_id, start, title, href FROM chapters WHERE article_id IN ({placeholders}) ORDER BY article_id, start",
+                    chunk,
+                )
+                for row in c.fetchall():
+                    aid = row[0]
+                    if aid not in chapters_map:
+                        chapters_map[aid] = []
+                    chapters_map[aid].append({"start": row[1], "title": row[2], "href": row[3]})
+
+        conn.close()
+
+        articles: List[Article] = []
+        for r in rows:
+            chapters = chapters_map.get(r[0], [])
+            articles.append(Article(
+                id=r[0],
+                feed_id=r[1],
+                title=r[2],
+                url=r[3],
+                content=r[4],
+                date=r[5],
+                author=r[6],
+                is_read=bool(r[7]),
+                media_url=r[8],
+                media_type=r[9],
+                chapters=chapters
+            ))
+        return articles, total
+
     def mark_read(self, article_id: str) -> bool:
         conn = get_connection()
         c = conn.cursor()
@@ -435,9 +526,22 @@ class LocalProvider(RSSProvider):
 
                     conn = get_connection()
                     c = conn.cursor()
-                    
+
+                    def ensure_category(title: str):
+                        title = (title or "").strip()
+                        if not title:
+                            return
+                        try:
+                            c.execute(
+                                "INSERT OR IGNORE INTO categories (id, title) VALUES (?, ?)",
+                                (str(uuid.uuid4()), title),
+                            )
+                        except Exception:
+                            pass
+
+                    # Make sure target category exists if used.
                     if target_category and target_category != "Uncategorized":
-                         self.add_category(target_category)
+                        ensure_category(target_category)
 
                     def process_outline(outline, current_category="Uncategorized"):
                         # Case insensitive attribute lookup helper
@@ -463,6 +567,9 @@ class LocalProvider(RSSProvider):
                             if not c.fetchone():
                                 feed_id = str(uuid.uuid4())
                                 cat_to_use = target_category if target_category else current_category
+
+                                if cat_to_use and cat_to_use != "Uncategorized":
+                                    ensure_category(cat_to_use)
                                 
                                 c.execute("INSERT INTO feeds (id, url, title, category, icon_url) VALUES (?, ?, ?, ?, ?)",
                                           (feed_id, xmlUrl, text, cat_to_use, ""))
@@ -473,10 +580,12 @@ class LocalProvider(RSSProvider):
                         if children:
                             new_cat = current_category
                             if not target_category:
-                                 # If it's a folder (no xmlUrl), use its text as category
-                                 if not xmlUrl:
+                                # If it's a folder (no xmlUrl), use its text as category
+                                if not xmlUrl:
                                     new_cat = text
-                                 
+                                    if new_cat and new_cat != "Uncategorized":
+                                        ensure_category(new_cat)
+
                             for child in children:
                                 process_outline(child, new_cat)
 

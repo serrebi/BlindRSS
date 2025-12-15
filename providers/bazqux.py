@@ -125,28 +125,96 @@ class BazQuxProvider(RSSProvider):
         return utils.get_chapters_from_db(article_id)
 
     def mark_read(self, article_id: str) -> bool:
-        return False 
+        if not self._login(): return False
+        try:
+            requests.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
+                "i": article_id,
+                "a": "user/-/state/com.google/read"
+            })
+            return True
+        except Exception as e:
+            print(f"BazQux Mark Read Error: {e}")
+            return False
 
     def add_feed(self, url: str, category: str = None) -> bool:
-        return False
+        if not self._login(): return False
+        try:
+            data = {
+                "s": f"feed/{url}",
+                "ac": "subscribe"
+            }
+            if category:
+                data["t"] = category
+            
+            resp = requests.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data=data)
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            print(f"BazQux Add Feed Error: {e}")
+            return False
 
     def remove_feed(self, feed_id: str) -> bool:
-        return False
-        
-    def import_opml(self, path: str, target_category: str = None) -> bool:
-        return False
-
-    def export_opml(self, path: str) -> bool:
-        return False
+        if not self._login(): return False
+        try:
+            requests.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data={
+                "s": feed_id,
+                "ac": "unsubscribe"
+            })
+            return True
+        except Exception as e:
+            print(f"BazQux Remove Feed Error: {e}")
+            return False
 
     def get_categories(self) -> List[str]:
-        return []
+        if not self._login(): return []
+        try:
+            resp = requests.get(f"{self.base_url}/tag/list", headers=self._headers(), params={"output": "json"})
+            resp.raise_for_status()
+            data = resp.json()
+            cats = []
+            for tag in data.get("tags", []):
+                # Filter system tags
+                tag_id = tag.get("id", "")
+                if tag_id.startswith("user/") and "/label/" in tag_id:
+                    label = tag_id.split("/label/", 1)[1]
+                    cats.append(label)
+            return sorted(cats)
+        except Exception as e:
+            print(f"BazQux Get Categories Error: {e}")
+            return []
 
     def add_category(self, title: str) -> bool:
-        return False
+        # Google Reader API doesn't support empty categories.
+        # They are created when a feed is assigned to them.
+        return True
 
     def rename_category(self, old_title: str, new_title: str) -> bool:
-        return False
+        if not self._login(): return False
+        try:
+            # Try /rename-tag endpoint
+            user_id = "-" # usually works as wildcard for current user
+            # Find user ID prefix? usually user/0/label/... or user/-/label/...
+            # Let's try standard 'user/-/label/'
+            source = f"user/-/label/{old_title}"
+            dest = f"user/-/label/{new_title}"
+            
+            resp = requests.post(f"{self.base_url}/rename-tag", headers=self._headers(), data={
+                "s": source,
+                "dest": dest
+            })
+            return resp.ok
+        except Exception as e:
+            print(f"BazQux Rename Category Error: {e}")
+            return False
 
     def delete_category(self, title: str) -> bool:
-        return False
+        if not self._login(): return False
+        try:
+            tag = f"user/-/label/{title}"
+            requests.post(f"{self.base_url}/disable-tag", headers=self._headers(), data={
+                "s": tag
+            })
+            return True
+        except Exception as e:
+            print(f"BazQux Delete Category Error: {e}")
+            return False
