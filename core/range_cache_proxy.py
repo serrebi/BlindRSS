@@ -1301,6 +1301,12 @@ class RangeCacheProxy:
                     except Exception:
                         pass
 
+                    # Ensure length/range support is known before we emit headers.
+                    try:
+                        ent.probe()
+                    except Exception:
+                        pass
+
                     range_hdr = (self.headers.get("Range") or "").strip()
                     print(f"PROXY_DEBUG: GET /media id={sid} Range={range_hdr}")
 

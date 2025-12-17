@@ -23,6 +23,15 @@ DEFAULT_CONFIG = {
     "feed_retry_attempts": 5,
     "active_provider": "local",
     "skip_silence": True,
+    "silence_vad_aggressiveness": 2,  # 0-3 (3 = most aggressive)
+    "silence_vad_frame_ms": 30,  # 10, 20, or 30
+    "silence_skip_threshold_db": -38.0,  # used only as RMS fallback
+    "silence_skip_min_ms": 700,
+    "silence_skip_window_ms": 25,
+    "silence_skip_padding_ms": 60,
+    "silence_skip_merge_gap_ms": 260,
+    "silence_skip_resume_backoff_ms": 360,
+    "silence_skip_retrigger_backoff_ms": 1400,
     "close_to_tray": True,
     "minimize_to_tray": True,
     "max_cached_views": 15,

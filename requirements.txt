@@ -10,3 +10,4 @@ pychromecast>=14.0.0
 async-upnp-client
 pyatv
 trafilatura
+webrtcvad

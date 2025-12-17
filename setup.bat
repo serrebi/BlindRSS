@@ -56,6 +56,14 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+echo [*] Ensuring WebRTC VAD (webrtcvad) is installed...
+pip install --upgrade webrtcvad
+if %errorlevel% neq 0 (
+    echo [X] Failed to install webrtcvad (required for skip-silence).
+    pause
+    exit /b 1
+)
+
 echo [*] Ensuring yt-dlp is up to date...
 pip install --upgrade yt-dlp
 if %errorlevel% neq 0 (

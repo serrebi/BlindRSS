@@ -7,7 +7,19 @@ from core import utils
 from core.casting import CastingManager
 from urllib.parse import urlparse
 from core.range_cache_proxy import get_range_cache_proxy
+from core.audio_silence import merge_ranges, merge_ranges_with_gap, scan_audio_for_silence
 from .hotkeys import HoldRepeatHotkeys
+
+
+def _should_reapply_seek(target_ms: int, current_ms: int, tolerance_ms: int, remaining_retries: int) -> bool:
+    try:
+        if remaining_retries <= 0:
+            return False
+        if current_ms < 0:
+            return True
+        return abs(int(current_ms) - int(target_ms)) > int(tolerance_ms)
+    except Exception:
+        return False
 
 
 class CastDialog(wx.Dialog):
@@ -168,6 +180,7 @@ class PlayerFrame(wx.Frame):
         # Seek guard
         self._seek_guard_target_ms = None
         self._seek_guard_attempts_left = 0
+        self._seek_guard_reapply_left = 0
         self._seek_guard_calllater = None
 
         # Range-cache proxy recovery state
@@ -182,6 +195,17 @@ class PlayerFrame(wx.Frame):
         self._range_proxy_retry_count = 0
         self._last_load_chapters = None
         self._last_load_title = None
+
+        # Silence skip
+        self._silence_scan_thread = None
+        self._silence_scan_abort = None
+        self._silence_ranges = []
+        self._silence_scan_ready = False
+        self._silence_skip_active_target = None
+        self._silence_skip_last_idx = None
+        self._silence_skip_last_ts = 0.0
+        self._silence_skip_last_target_ms = None
+        self._silence_skip_last_seek_ts = 0.0
         
         # Playback speed handling
         self.playback_speed = float(self.config_manager.get("playback_speed", 1.0))
@@ -212,6 +236,49 @@ class PlayerFrame(wx.Frame):
     # ---------------------------------------------------------------------
     # Window helpers
     # ---------------------------------------------------------------------
+
+    def _current_position_ms(self) -> int:
+        """
+        Best-effort current position in ms, favoring recent seek targets and
+        UI-tracked position with elapsed time when playing.
+        """
+        now = time.monotonic()
+        try:
+            tgt = getattr(self, "_seek_target_ms", None)
+            tgt_ts = float(getattr(self, "_seek_target_ts", 0.0) or 0.0)
+        except Exception:
+            tgt = None
+            tgt_ts = 0.0
+
+        base = 0
+        if tgt is not None and (now - tgt_ts) < 2.5:
+            try:
+                base = int(tgt)
+            except Exception:
+                base = 0
+        else:
+            try:
+                base = int(getattr(self, "_pos_ms", 0) or 0)
+            except Exception:
+                base = 0
+
+        try:
+            if bool(getattr(self, "is_playing", False)):
+                pos_ts = float(getattr(self, "_pos_ts", 0.0) or 0.0)
+                if pos_ts > 0:
+                    base += int(max(0.0, now - pos_ts) * 1000.0)
+        except Exception:
+            pass
+
+        if base < 0:
+            base = 0
+        try:
+            dur = int(getattr(self, "duration", 0) or 0)
+            if dur > 0 and base > dur:
+                base = dur
+        except Exception:
+            pass
+        return int(base)
 
     def focus_play_pause(self) -> None:
         try:
@@ -353,6 +420,12 @@ class PlayerFrame(wx.Frame):
                     desired = 250
             except Exception:
                 desired = 2000
+            # Run the timer faster when skip-silence is enabled so jumps feel snappier.
+            try:
+                if bool(self.config_manager.get("skip_silence", False)):
+                    desired = min(desired, 280)
+            except Exception:
+                pass
             if (not self.timer.IsRunning()) or int(getattr(self, '_timer_interval_ms', 0) or 0) != int(desired):
                 self.timer.Start(int(desired))
                 self._timer_interval_ms = int(desired)
@@ -466,6 +539,11 @@ class PlayerFrame(wx.Frame):
                 self.title_lbl.SetLabel(f"{self.current_title} (Local)")
             except Exception:
                 pass
+            try:
+                # Stop remote playback so audio does not continue on the cast device.
+                self.casting_manager.stop_playback()
+            except Exception:
+                pass
 
             if self.current_url:
                 same_media = False
@@ -494,7 +572,7 @@ class PlayerFrame(wx.Frame):
             if getattr(self, '_seek_target_ms', None) is not None:
                 local_pos_ms = int(self._seek_target_ms or 0)
             else:
-                local_pos_ms = int(self.player.get_time() or 0)
+                local_pos_ms = int(self._current_position_ms())
             if local_pos_ms < 0:
                 local_pos_ms = 0
         except Exception:
@@ -629,6 +707,175 @@ class PlayerFrame(wx.Frame):
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # Silence skipping
+    # ------------------------------------------------------------------
+
+    def _cancel_silence_scan(self):
+        try:
+            if self._silence_scan_abort is not None:
+                self._silence_scan_abort.set()
+        except Exception:
+            pass
+        self._silence_scan_abort = None
+        self._silence_scan_thread = None
+        self._silence_ranges = []
+        self._silence_scan_ready = False
+        self._silence_skip_active_target = None
+        self._silence_skip_last_idx = None
+        self._silence_skip_last_target_ms = None
+        self._silence_skip_last_seek_ts = 0.0
+
+    def _start_silence_scan(self, url: str, load_seq: int) -> None:
+        if not self.config_manager.get("skip_silence", False):
+            return
+        if not url or self.is_casting:
+            return
+        try:
+            self._silence_scan_ready = False
+        except Exception:
+            pass
+        self._silence_scan_ready = False
+        self._silence_ranges = []
+        abort_evt = threading.Event()
+        self._silence_scan_abort = abort_evt
+
+        def _worker() -> None:
+            try:
+                window_ms = int(self.config_manager.get("silence_skip_window_ms", 30) or 30)
+                min_ms = int(self.config_manager.get("silence_skip_min_ms", 600) or 600)
+                threshold_db = float(self.config_manager.get("silence_skip_threshold_db", -42.0) or -42.0)
+                pad_ms = int(self.config_manager.get("silence_skip_padding_ms", 120) or 120)
+                merge_gap = int(self.config_manager.get("silence_skip_merge_gap_ms", 200) or 200)
+                vad_aggr = int(self.config_manager.get("silence_vad_aggressiveness", 2) or 2)
+                vad_frame_ms = int(self.config_manager.get("silence_vad_frame_ms", 30) or 30)
+                ranges = scan_audio_for_silence(
+                    url,
+                    window_ms=window_ms,
+                    min_silence_ms=min_ms,
+                    threshold_db=threshold_db,
+                    detection_mode="vad",
+                    vad_aggressiveness=vad_aggr,
+                    vad_frame_ms=vad_frame_ms,
+                    merge_gap_ms=merge_gap,
+                    abort_event=abort_evt,
+                )
+                if abort_evt.is_set():
+                    return
+                padded = []
+                for s, e in ranges:
+                    start = max(0, int(s) - pad_ms)
+                    end = int(e) + pad_ms
+                    padded.append((start, end))
+                merged = merge_ranges_with_gap(padded, gap_ms=merge_gap)
+                if abort_evt.is_set() or int(getattr(self, "_active_load_seq", 0)) != int(load_seq):
+                    return
+                self._silence_ranges = merged
+                self._silence_scan_ready = True
+                try:
+                    print(f"DEBUG: silence scan ready ({len(merged)} ranges)")
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"DEBUG: silence scan failed: {e}")
+                self._silence_scan_ready = False
+
+        try:
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            self._silence_scan_thread = t
+        except Exception:
+            pass
+
+    def _maybe_skip_silence(self, pos_ms: int) -> None:
+        if not self.config_manager.get("skip_silence", False):
+            return
+        if self.is_casting:
+            return
+        if not bool(getattr(self, "_silence_scan_ready", False)):
+            return
+        if not getattr(self, "_silence_ranges", None):
+            return
+        now = time.monotonic()
+        if getattr(self, "_is_dragging_slider", False):
+            return
+        try:
+            last_jump = float(getattr(self, "_silence_skip_last_ts", 0.0) or 0.0)
+            if now - last_jump < 0.35:
+                return
+        except Exception:
+            pass
+        try:
+            current_target = getattr(self, "_silence_skip_active_target", None)
+        except Exception:
+            current_target = None
+
+        resume_backoff = 0
+        try:
+            resume_backoff = max(0, int(self.config_manager.get("silence_skip_resume_backoff_ms", 180) or 0))
+        except Exception:
+            resume_backoff = 0
+        try:
+            retrigger_backoff = max(600, int(self.config_manager.get("silence_skip_retrigger_backoff_ms", 1200) or 0))
+        except Exception:
+            retrigger_backoff = 1200
+
+        for idx, (start, end) in enumerate(self._silence_ranges):
+            if pos_ms < start - 200:
+                # Ranges are sorted; no need to continue.
+                break
+            if start - 120 <= pos_ms <= end - 50:
+                # Seek to slightly before the end to avoid clipping the first word.
+                target_ms = max(start, int(end) - int(resume_backoff))
+                # Deduplicate repeated seeks to the same target in quick succession.
+                try:
+                    last_target = getattr(self, "_silence_skip_last_target_ms", None)
+                    last_ts = float(getattr(self, "_silence_skip_last_seek_ts", 0.0) or 0.0)
+                    if last_target is not None and abs(int(last_target) - int(target_ms)) <= 200:
+                        if now - last_ts < 1.4:
+                            return
+                        if abs(pos_ms - int(target_ms)) <= 200:
+                            return
+                except Exception:
+                    pass
+                try:
+                    if self._silence_skip_last_idx is not None and int(self._silence_skip_last_idx) == int(idx):
+                        # Allow re-seek if we are still clearly inside the same silent span.
+                        if pos_ms <= end - max(200, resume_backoff // 2):
+                            pass
+                        elif pos_ms <= end + retrigger_backoff:
+                            return
+                except Exception:
+                    pass
+                if current_target is not None and abs(int(current_target) - int(target_ms)) <= 150:
+                    return
+                try:
+                    self._silence_skip_active_target = int(target_ms)
+                    self._silence_skip_last_ts = float(now)
+                    self._silence_skip_last_idx = int(idx)
+                    self._silence_skip_last_target_ms = int(target_ms)
+                    self._silence_skip_last_seek_ts = float(now)
+                    print(f"DEBUG: skipping silence -> {target_ms}ms (range {start}-{end})")
+                except Exception:
+                    pass
+                self._apply_seek_time_ms(int(target_ms), force=True)
+                return
+
+        try:
+            if current_target is not None and pos_ms > int(current_target) + 500:
+                self._silence_skip_active_target = None
+            if self._silence_skip_last_idx is not None:
+                last_idx = int(self._silence_skip_last_idx)
+                if last_idx < len(self._silence_ranges):
+                    _, last_end = self._silence_ranges[last_idx]
+                    if pos_ms > last_end + retrigger_backoff + 300:
+                        self._silence_skip_last_idx = None
+            if self._silence_skip_last_target_ms is not None and (now - float(getattr(self, "_silence_skip_last_seek_ts", 0.0) or 0.0)) > 2.0:
+                if abs(pos_ms - int(self._silence_skip_last_target_ms)) > retrigger_backoff:
+                    self._silence_skip_last_target_ms = None
+        except Exception:
+            pass
+
     def _maybe_range_cache_url(self, url: str) -> str:
         try:
             if not url:
@@ -750,6 +997,7 @@ class PlayerFrame(wx.Frame):
             self._active_load_seq = self._load_seq
         except Exception:
             pass
+        self._cancel_silence_scan()
 
         try:
             self._pos_ms = 0
@@ -764,6 +1012,7 @@ class PlayerFrame(wx.Frame):
         try:
             self._seek_guard_target_ms = None
             self._seek_guard_attempts_left = 0
+            self._seek_guard_reapply_left = 0
             if getattr(self, '_seek_guard_calllater', None) is not None:
                 try:
                     self._seek_guard_calllater.Stop()
@@ -809,6 +1058,7 @@ class PlayerFrame(wx.Frame):
             final_url = self._maybe_range_cache_url(final_url)
             self._last_load_chapters = chapters
             self._last_load_title = self.current_title
+            self._start_silence_scan(final_url, int(getattr(self, '_active_load_seq', 0)))
             self._load_vlc_url(final_url, load_seq=int(getattr(self,'_active_load_seq',0)))
         
         if chapters:
@@ -977,6 +1227,11 @@ class PlayerFrame(wx.Frame):
                     self._pending_resume_seek_ms = None
             except Exception:
                 pass
+
+        try:
+            self._maybe_skip_silence(int(ui_cur))
+        except Exception:
+            pass
 
         try:
             if not getattr(self, '_is_dragging_slider', False):
@@ -1181,6 +1436,7 @@ class PlayerFrame(wx.Frame):
             t = 0
         self._seek_guard_target_ms = int(t)
         self._seek_guard_attempts_left = 10
+        self._seek_guard_reapply_left = 3
         try:
             if self._seek_guard_calllater is not None:
                 try:
@@ -1217,11 +1473,19 @@ class PlayerFrame(wx.Frame):
             if cur >= 0 and abs(int(cur) - int(target_i)) <= 2000:
                 self._seek_guard_attempts_left = 0
                 return
+            # Limited re-apply: only retry a few times to help stubborn local seeks.
+            try:
+                retries = int(getattr(self, "_seek_guard_reapply_left", 0) or 0)
+            except Exception:
+                retries = 0
+            if _should_reapply_seek(target_i, cur, 2000, retries):
+                try:
+                    self.player.set_time(int(target_i))
+                except Exception:
+                    pass
+                retries -= 1
+                self._seek_guard_reapply_left = retries
 
-            # CRITICAL FIX: Removed self.player.set_time(int(target_i)) here.
-            # Repeatedly calling set_time while VLC is already trying to seek
-            # causes buffers to flush and seek logic to restart, leading to cpu spikes.
-            # We just update UI state to match target and wait for VLC to catch up.
             try:
                 self._pos_ms = int(target_i)
                 self._pos_ts = time.monotonic()
@@ -1566,7 +1830,13 @@ class PlayerFrame(wx.Frame):
                     pass
                 self.player.play()
                 if not self.timer.IsRunning():
-                    self.timer.Start(500)
+                    interval = 500
+                    try:
+                        if bool(self.config_manager.get("skip_silence", False)):
+                            interval = 250
+                    except Exception:
+                        interval = 500
+                    self.timer.Start(int(interval))
             except Exception:
                 pass
 
@@ -1608,6 +1878,7 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pass
 
+        self._cancel_silence_scan()
         self.is_playing = False
 
         try:
@@ -1655,6 +1926,10 @@ class PlayerFrame(wx.Frame):
                 except Exception:
                     pass
                 self._seek_guard_calllater = None
+        except Exception:
+            pass
+        try:
+            self._cancel_silence_scan()
         except Exception:
             pass
         self.player.stop()

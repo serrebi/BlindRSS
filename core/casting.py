@@ -1135,6 +1135,10 @@ class CastingManager:
 
     async def _disconnect_async(self) -> None:
         if self.active_caster:
+            try:
+                await self.active_caster.stop()
+            except Exception:
+                pass
             await self.active_caster.disconnect()
             self.active_caster = None
             self.active_device = None
@@ -1145,5 +1149,4 @@ class CastingManager:
         # but for UI checks it's okay to read the local prop if updated correctly.
         # However, 'active_caster' is set on the loop.
         return self.active_caster is not None and self.active_caster.is_connected()
-
 
