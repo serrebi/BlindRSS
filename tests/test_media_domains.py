@@ -10,10 +10,10 @@ from core.discovery import is_ytdlp_supported, get_ytdlp_feed_url
 import yt_dlp
 
 test_urls = [
+    "https://www.youtube.com/watch?v=kKE9OHPN09o",
     "https://soundcloud.com/bennicky/ben-nicky-2025-trance-mix?in=jesse-zomer/sets/w17-2025",
     "https://www.mixcloud.com/wilderkeks/a-state-of-trance-1248-special-ade-2025/",
     "https://rumble.com/c/ClownfishTV",
-    "https://rumble.com/c/ClownfishTV/videos",
     "https://rumble.com/v1qyv1e-worlds-first-ever-commercial-hydrogen-flight.html",
     "https://www.twitch.tv/asot",
     "https://www.instagram.com/asotlive/"

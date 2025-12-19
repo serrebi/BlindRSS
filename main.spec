@@ -25,6 +25,7 @@ hiddenimports = [
 # Specifically exclude modules that cause noise or aren't needed on Windows
 excludes = [
     "urllib3.contrib.emscripten",
+    "js",
     "tkinter",
     "tcl",
     "tk",

@@ -3,6 +3,7 @@ import vlc
 import threading
 import socket
 import time
+import platform
 from core import utils
 from core.casting import CastingManager
 from urllib.parse import urlparse
@@ -850,68 +851,61 @@ class PlayerFrame(wx.Frame):
             return
         if not getattr(self, "_silence_ranges", None):
             return
+        
         now = time.monotonic()
         if getattr(self, "_is_dragging_slider", False):
             return
+
+        # 1. Much longer cooldown for remote streams (YouTube DASH is jittery)
+        url = getattr(self, "current_url", "") or ""
+        is_remote = url.startswith("http") and not ("127.0.0.1" in url or "localhost" in url)
+        
+        cooldown = 5.0 if is_remote else 2.5
+        
         try:
-            last_jump = float(getattr(self, "_silence_skip_last_ts", 0.0) or 0.0)
-            if now - last_jump < 0.35:
+            last_jump_ts = float(getattr(self, "_silence_skip_last_ts", 0.0) or 0.0)
+            if now - last_jump_ts < cooldown:
                 return
         except Exception:
             pass
+
         try:
             current_target = getattr(self, "_silence_skip_active_target", None)
         except Exception:
             current_target = None
 
-        resume_backoff = 0
-        try:
-            resume_backoff = max(0, int(self.config_manager.get("silence_skip_resume_backoff_ms", 180) or 0))
-        except Exception:
-            resume_backoff = 0
-        try:
-            retrigger_backoff = max(600, int(self.config_manager.get("silence_skip_retrigger_backoff_ms", 1200) or 0))
-        except Exception:
-            retrigger_backoff = 1200
-
+        # 2. Increase cushion past silence (2000ms for remote)
+        resume_backoff = 2000 if is_remote else 800
+        
         for idx, (start, end) in enumerate(self._silence_ranges):
-            if pos_ms < start - 200:
+            if pos_ms < start - 1000:
                 # Ranges are sorted; no need to continue.
                 break
-            if start - 120 <= pos_ms <= end - 50:
-                # Seek to slightly before the end to avoid clipping the first word.
-                target_ms = max(start, int(end) - int(resume_backoff))
-                # Deduplicate repeated seeks to the same target in quick succession.
+            
+            # If we are currently inside a silent span...
+            if start - 100 <= pos_ms <= end - 100:
+                target_ms = int(end) + resume_backoff
+                
+                # 3. Robust landing verification:
+                # If we just tried to jump to this exact target, don't loop!
                 try:
                     last_target = getattr(self, "_silence_skip_last_target_ms", None)
-                    last_ts = float(getattr(self, "_silence_skip_last_seek_ts", 0.0) or 0.0)
-                    if last_target is not None and abs(int(last_target) - int(target_ms)) <= 200:
-                        if now - last_ts < 1.4:
-                            return
-                        if abs(pos_ms - int(target_ms)) <= 200:
-                            return
+                    if last_target is not None and abs(int(last_target) - int(target_ms)) <= 1000:
+                        return
                 except Exception:
                     pass
-                try:
-                    if self._silence_skip_last_idx is not None and int(self._silence_skip_last_idx) == int(idx):
-                        # Allow re-seek if we are still clearly inside the same silent span.
-                        if pos_ms <= end - max(200, resume_backoff // 2):
-                            pass
-                        elif pos_ms <= end + retrigger_backoff:
-                            return
-                except Exception:
-                    pass
-                if current_target is not None and abs(int(current_target) - int(target_ms)) <= 150:
-                    return
+
                 try:
                     self._silence_skip_active_target = int(target_ms)
                     self._silence_skip_last_ts = float(now)
                     self._silence_skip_last_idx = int(idx)
                     self._silence_skip_last_target_ms = int(target_ms)
                     self._silence_skip_last_seek_ts = float(now)
-                    print(f"DEBUG: skipping silence -> {target_ms}ms (range {start}-{end})")
+                    _log(f"Skipping silence: {pos_ms}ms -> {target_ms}ms")
                 except Exception:
                     pass
+                
+                # Seek immediately
                 self._apply_seek_time_ms(int(target_ms), force=True)
                 return
 
@@ -1099,14 +1093,20 @@ class PlayerFrame(wx.Frame):
         if use_ytdlp:
             try:
                 import yt_dlp
+                from core.dependency_check import _get_startup_info
                 # Use browser cookies if possible to avoid bot detection
                 ydl_opts = {
                     'format': 'bestaudio/best',
                     'quiet': True,
                     'no_warnings': True,
                     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                    'referer': url, # Some sites like Rumble require referer
+                    'referer': url,
+                    'noprogress': True,
                 }
+                if platform.system().lower() == "windows":
+                    # Hide internal yt-dlp subprocess windows (ffmpeg/ffprobe)
+                    ydl_opts['subprocess_startupinfo'] = _get_startup_info()
+
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     final_url = info['url']
@@ -1535,6 +1535,17 @@ class PlayerFrame(wx.Frame):
             left = int(getattr(self, "_seek_guard_attempts_left", 0) or 0)
             if left <= 0:
                 return
+            
+            # 1. Check player state. If Opening (1) or Buffering (2), wait.
+            # This prevents the Seek Guard from re-seeking while VLC is still filling its buffer.
+            try:
+                state = self.player.get_state()
+                if state in (1, 2):
+                    self._seek_guard_calllater = wx.CallLater(500, self._seek_guard_tick)
+                    return
+            except Exception:
+                pass
+
             target = getattr(self, "_seek_guard_target_ms", None)
             if target is None:
                 return
@@ -1546,16 +1557,29 @@ class PlayerFrame(wx.Frame):
             except Exception:
                 cur = -1
             
-            # Increased tolerance slightly to 2000ms
-            if cur >= 0 and abs(int(cur) - int(target_i)) <= 2000:
+            # 2. Remote streams (YouTube etc) have very unreliable seeking.
+            url = getattr(self, "current_url", "") or ""
+            is_remote = url.startswith("http") and not ("127.0.0.1" in url or "localhost" in url)
+            
+            tolerance = 5000 if is_remote else 3000
+            
+            if cur >= 0 and abs(int(cur) - int(target_i)) <= tolerance:
                 self._seek_guard_attempts_left = 0
                 return
-            # Limited re-apply: only retry a few times to help stubborn local seeks.
+
+            # 3. Be extremely lenient with remote: stop trying much faster
+            # to avoid the 'repeating' audio loop caused by constant re-seeks.
+            if is_remote and left < 7:
+                self._seek_guard_attempts_left = 0
+                return
+
+            # Limited re-apply: be very conservative with re-seeking.
             try:
                 retries = int(getattr(self, "_seek_guard_reapply_left", 0) or 0)
             except Exception:
                 retries = 0
-            if _should_reapply_seek(target_i, cur, 2000, retries):
+            
+            if _should_reapply_seek(target_i, cur, tolerance, retries):
                 try:
                     self.player.set_time(int(target_i))
                 except Exception:
