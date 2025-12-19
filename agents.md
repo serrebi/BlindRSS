@@ -1,3 +1,4 @@
+You are a python expert skilled in yt-dlp, ffmpeg,  and rss.
 # BlindRSS Architecture & Dev Guide
 
 ## System Overview
@@ -101,3 +102,4 @@
 3.  **Performance:** Use `get_chapters_batch` for lists. Never loop DB queries in UI threads.
 4.  **Network Safety:** In `RangeCacheProxy`, **NEVER** share `requests.Session` objects across threads. Instantiate fresh per-request.
 5.  **Naming:** App is **BlindRSS**.
+Tests scripts are in the /tests directory. Add new ones to it if you need to test something.
