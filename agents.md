@@ -6,9 +6,12 @@ You are a python expert skilled in yt-dlp, ffmpeg,  and rss.
 **Entry:** `main.py` -> `core.factory` -> `gui.mainframe`.
 **Build:** PyInstaller (`main.spec` -> `dist/BlindRSS.exe`).
 **Build Notes (2025-12-19):**
-* `main.spec` now auto-collects datas/binaries/hiddenimports for casting stacks (`pyatv`, `pychromecast`, `zeroconf`, `async_upnp_client`), full-text (`trafilatura`), downloader (`yt_dlp`), and CA bundle (`certifi`); keeps `webrtcvad` available.
-* Uses yt-dlp’s bundled hook dir to retain extractor plugins.
-* Rebuild command: `pyinstaller --clean --noconfirm main.spec` (outputs to `dist/BlindRSS.exe`).
+*   **Meticulous Submodule Analysis:** `main.spec` now performs an exhaustive collection of all transient and direct dependencies using `collect_all`.
+*   **Expanded Collection:** `packages_to_collect` expanded to include `pyatv`, `pychromecast`, `async_upnp_client`, `trafilatura`, `yt_dlp`, `aiohttp`, `zeroconf`, `pydantic`, `lxml`, `readability`, `sgmllib`, `six`, `soupsieve`, `xmltodict`, `defusedxml`, `didl_lite`, `ifaddr`, `langcodes`, and `language_data`.
+*   **Metadata & TLS:** Preserves metadata for `metadata_packages` (discovery support) and explicitly bundles `certifi` CA bundles for secure requests.
+*   **Specialized Hooks:** Utilizes `yt-dlp`'s internal PyInstaller hook system to maintain extractor functionality.
+*   **Portable Executable:** Optimized for Windows with `build.bat` handling venv setup and artifact staging (`config.json`, `README.md`).
+*   **Rebuild:** Run `.\build.bat` to generate `BlindRSS.exe` in root and `dist/`.
 
 ## File Structure & Responsibilities
 *   **`main.py`**: Bootstrap. Initializes `ConfigManager`, `RSSProvider`, `MainFrame`. **Async Startup:** Uses `threading` to load GUI while feeds fetch.

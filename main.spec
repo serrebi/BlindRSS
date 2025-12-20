@@ -67,6 +67,34 @@ packages_to_collect = [
     "courlan",
     "htmldate",
     "justext",
+    "aiohttp",
+    "aiosignal",
+    "frozenlist",
+    "multidict",
+    "yarl",
+    "async_timeout",
+    "idna",
+    "certifi",
+    "urllib3",
+    "charset_normalizer",
+    "brotli",
+    "html5lib",
+    "dateutil",
+    "webrtcvad",
+    "vlc",
+    "packaging",
+    "cryptography",
+    "soupsieve",
+    "xmltodict",
+    "defusedxml",
+    "didl_lite",
+    "ifaddr",
+    "langcodes",
+    "language_data",
+    "pydantic",
+    "readability",
+    "sgmllib",
+    "six",
 ]
 
 for pkg in packages_to_collect:
@@ -83,7 +111,10 @@ metadata_packages = [
     "vlc",
     "setuptools",
     "cryptography",
-    "pydantic"
+    "pydantic",
+    "async_upnp_client",
+    "zeroconf",
+    "aiohttp"
 ]
 
 for pkg in metadata_packages:
