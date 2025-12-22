@@ -5,13 +5,15 @@ You are a python expert skilled in yt-dlp, ffmpeg,  and rss.
 **Stack:** Python 3.13, wxPython (GUI), SQLite (Storage), Feedparser/Requests.
 **Entry:** `main.py` -> `core.factory` -> `gui.mainframe`.
 **Build:** PyInstaller (`main.spec` -> `dist/BlindRSS.exe`).
-**Build Notes (2025-12-19):**
+**Build Notes (2025-12-22):**
+*   **VLC Bundling Fix:** Explicitly bundled `libvlc.dll`, `libvlccore.dll`, and `plugins/` from `C:\ Program Files\VideoLAN\VLC` into the distribution directory. This resolves the "Failed to load dynlib/dll" error when running the frozen executable.
+*   **Directory Distribution:** Switched to a directory-based build (not onefile) to ensure reliable DLL loading and better performance.
 *   **Meticulous Submodule Analysis:** `main.spec` now performs an exhaustive collection of all transient and direct dependencies using `collect_all`.
 *   **Expanded Collection:** `packages_to_collect` expanded to include `pyatv`, `pychromecast`, `async_upnp_client`, `trafilatura`, `yt_dlp`, `aiohttp`, `zeroconf`, `pydantic`, `lxml`, `readability`, `sgmllib`, `six`, `soupsieve`, `xmltodict`, `defusedxml`, `didl_lite`, `ifaddr`, `langcodes`, and `language_data`.
 *   **Metadata & TLS:** Preserves metadata for `metadata_packages` (discovery support) and explicitly bundles `certifi` CA bundles for secure requests.
 *   **Specialized Hooks:** Utilizes `yt-dlp`'s internal PyInstaller hook system to maintain extractor functionality.
-*   **Portable Executable:** Optimized for Windows with `build.bat` handling venv setup and artifact staging (`config.json`, `README.md`).
-*   **Rebuild:** Run `.\build.bat` to generate `BlindRSS.exe` in root and `dist/`.
+*   **Portable Executable:** Optimized for Windows with `build.bat` handling venv setup and artifact staging.
+*   **Rebuild:** Run `.\build.bat` to generate `BlindRSS.exe` in `dist/BlindRSS/`.
 
 ## File Structure & Responsibilities
 *   **`main.py`**: Bootstrap. Initializes `ConfigManager`, `RSSProvider`, `MainFrame`. **Async Startup:** Uses `threading` to load GUI while feeds fetch.
@@ -46,7 +48,7 @@ You are a python expert skilled in yt-dlp, ffmpeg,  and rss.
     *   `mainframe.py`: Main window.
         *   **Threads:** `_refresh_feeds_worker` (startup), `_manual_refresh_thread` (F5).
         *   **Tray:** Minimizes to tray via `EVT_ICONIZE`.
-*   `player.py`: `python-vlc`-based player (VLC backend).
+    *   `player.py`: `python-vlc`-based player (VLC backend).
         *   **Proxy Integration:** Routes URLs through `127.0.0.1` proxy for aggressive caching.
         *   **Seeking:** Custom debounce logic (`_apply_seek_time_ms`) prevents UI stutter.
         *   **Async Load:** Opens window immediately, loads chapters in background.
@@ -106,3 +108,21 @@ You are a python expert skilled in yt-dlp, ffmpeg,  and rss.
 4.  **Network Safety:** In `RangeCacheProxy`, **NEVER** share `requests.Session` objects across threads. Instantiate fresh per-request.
 5.  **Naming:** App is **BlindRSS**.
 Tests scripts are in the /tests directory. Add new ones to it if you need to test something.
+
+## Build Agent
+
+The Build Agent is responsible for creating redistributable packages for Windows.
+
+### Build Instructions
+
+1.  **Environment Setup**: Ensure Python 3.12+ is installed.
+2.  **VLC Requirement**: Install VLC Media Player (64-bit). The build process explicitly looks for it at `C:\ Program Files\VideoLAN\VLC\`.
+3.  **Dependency Installation**: Run `.\setup.bat` to install all Python dependencies and verify system tools.
+4.  **Compilation**: Run `.\build.bat`. This script uses PyInstaller with `main.spec` to create a directory-based distribution.
+5.  **Output**: The final build will be in `dist\BlindRSS/`. The main executable is `BlindRSS.exe`.
+
+### Key Build Features
+-   **No Onefile**: Uses directory mode for reliable DLL loading (especially `libvlc.dll`).
+-   **Bundled Binaries**: Includes `libvlc.dll`, `libvlccore.dll`, VLC `plugins/`, and `bin/yt-dlp.exe`.
+-   **Package Collection**: Uses `collect_all` for complex dependencies like `pychromecast`, `pyatv`, and `trafilatura`.
+-   **No .conf Files**: Explicitly avoids bundling any `.conf` files.

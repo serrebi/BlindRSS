@@ -9,9 +9,10 @@ Screen-reader friendly vibed RSS & Podcast player. Local, fast, and keyboard-fir
 2. Run `BlindRSS.exe`.
 
 ### Build it yourself (PyInstaller)
-1. Install Python 3.12 and the requirements: `pip install -r requirements.txt`
-2. From repo root run: `pyinstaller --clean --noconfirm main.spec`
-3. Launch the generated `dist/BlindRSS.exe` (bundles casting stacks, full-text extraction, yt-dlp, certifi, and webrtcvad).
+1. Install Python 3.12+ and requirements: `pip install -r requirements.txt`.
+2. Ensure **VLC Media Player (64-bit)** is installed at `C:\Program Files\VideoLAN\VLC`.
+3. Run the build script: `.\build.bat`.
+4. The application will be generated in `dist/BlindRSS/`. Run `dist/BlindRSS/BlindRSS.exe`.
 
 ### Python (All OS)
 1. Install Python 3.12.
