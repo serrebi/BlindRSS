@@ -89,6 +89,7 @@ class MainFrame(wx.Frame):
         self.list_ctrl.InsertColumn(0, "Title", width=400)
         self.list_ctrl.InsertColumn(1, "Date", width=150)
         self.list_ctrl.InsertColumn(2, "Author", width=150)
+        self.list_ctrl.InsertColumn(3, "Status", width=80)
         
         # Bottom Right: Content (No embedded player anymore)
         self.content_ctrl = wx.TextCtrl(right_splitter, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2)
@@ -287,12 +288,7 @@ class MainFrame(wx.Frame):
                     break
 
                 # Sort newest-first defensively.
-                page.sort(
-                    key=lambda a: (
-                        utils.parse_datetime_utc(a.date).timestamp() if utils.parse_datetime_utc(a.date) else 0
-                    ),
-                    reverse=True,
-                )
+                page.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
 
                 wx.CallAfter(self._append_articles, page, request_id, total, page_size)
 
@@ -774,8 +770,15 @@ class MainFrame(wx.Frame):
         self.feed_map = {f.id: f for f in feeds}
         self.feed_nodes = {}
         
+        # Special Views
         self.all_feeds_node = self.tree.AppendItem(self.root, "All Feeds")
         self.tree.SetItemData(self.all_feeds_node, {"type": "all", "id": "all"})
+
+        self.unread_node = self.tree.AppendItem(self.root, "Unread Articles")
+        self.tree.SetItemData(self.unread_node, {"type": "all", "id": "unread:all"})
+        
+        self.read_node = self.tree.AppendItem(self.root, "Read Articles")
+        self.tree.SetItemData(self.read_node, {"type": "all", "id": "read:all"})
         
         # Group by category
         categories = {c: [] for c in all_cats} # Initialize with all known categories
@@ -820,7 +823,12 @@ class MainFrame(wx.Frame):
         # Restore selection (default to All Feeds on first load so the list populates)
         selection_target = None
         if selected_data and selected_data["type"] == "all":
-            selection_target = self.all_feeds_node
+            if selected_data.get("id") == "unread:all":
+                selection_target = self.unread_node
+            elif selected_data.get("id") == "read:all":
+                selection_target = self.read_node
+            else:
+                selection_target = self.all_feeds_node
         elif item_to_select and item_to_select.IsOk():
             selection_target = item_to_select
         else:
@@ -849,7 +857,7 @@ class MainFrame(wx.Frame):
             return None
         typ = data.get("type")
         if typ == "all":
-            return "all"
+            return data.get("id")
         if typ == "feed":
             return data.get("id")
         if typ == "category":
@@ -913,9 +921,9 @@ class MainFrame(wx.Frame):
         try:
             # Fast-first page
             page, total = self.provider.get_articles_page(feed_id, offset=0, limit=page_size)
-            # Ensure stable order (newest first) even if provider returns inconsistent ordering
+            # Ensure stable order (newest first)
             page = page or []
-            page.sort(key=lambda a: (utils.parse_datetime_utc(a.date).timestamp() if utils.parse_datetime_utc(a.date) else 0), reverse=True)
+            page.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
 
             if not full_load:
                 wx.CallAfter(self._quick_merge_articles, page, request_id, feed_id)
@@ -962,6 +970,7 @@ class MainFrame(wx.Frame):
             idx = self.list_ctrl.InsertItem(i, article.title)
             self.list_ctrl.SetItem(idx, 1, utils.humanize_article_date(article.date))
             self.list_ctrl.SetItem(idx, 2, article.author or '')
+            self.list_ctrl.SetItem(idx, 3, "Read" if article.is_read else "Unread")
         self.list_ctrl.Thaw()
 
         # Add a placeholder row if we know/strongly suspect there is more history coming.
@@ -1033,15 +1042,18 @@ class MainFrame(wx.Frame):
 
         self._remove_loading_more_placeholder()
 
-        start_index = len(getattr(self, 'current_articles', []))
-        self.current_articles.extend(new_articles)
+        # Combine and sort to ensure chronological order even if paging overlapped/shifted
+        combined = getattr(self, 'current_articles', []) + new_articles
+        combined.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
+        self.current_articles = combined
 
         self.list_ctrl.Freeze()
-        for i, article in enumerate(new_articles):
-            row = start_index + i
-            idx = self.list_ctrl.InsertItem(row, article.title)
+        self.list_ctrl.DeleteAllItems()
+        for i, article in enumerate(self.current_articles):
+            idx = self.list_ctrl.InsertItem(i, article.title)
             self.list_ctrl.SetItem(idx, 1, utils.humanize_article_date(article.date))
             self.list_ctrl.SetItem(idx, 2, article.author or '')
+            self.list_ctrl.SetItem(idx, 3, "Read" if article.is_read else "Unread")
         self.list_ctrl.Thaw()
 
         # Update cache for this view
@@ -1101,6 +1113,7 @@ class MainFrame(wx.Frame):
         idx = self.list_ctrl.InsertItem(self.list_ctrl.GetItemCount(), label)
         self.list_ctrl.SetItem(idx, 1, "")
         self.list_ctrl.SetItem(idx, 2, "")
+        self.list_ctrl.SetItem(idx, 3, "")
         self._loading_more_placeholder = True
 
     def _remove_loading_more_placeholder(self):
@@ -1122,6 +1135,7 @@ class MainFrame(wx.Frame):
             self.list_ctrl.SetItem(count - 1, 0, label)
             self.list_ctrl.SetItem(count - 1, 1, "")
             self.list_ctrl.SetItem(count - 1, 2, "")
+            self.list_ctrl.SetItem(count - 1, 3, "")
         except Exception:
             pass
 
@@ -1168,12 +1182,7 @@ class MainFrame(wx.Frame):
         try:
             page, total = self.provider.get_articles_page(feed_id, offset=offset, limit=page_size)
             page = page or []
-            page.sort(
-                key=lambda a: (
-                    utils.parse_datetime_utc(a.date).timestamp() if utils.parse_datetime_utc(a.date) else 0
-                ),
-                reverse=True,
-            )
+            page.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
             wx.CallAfter(self._after_load_more, page, total, request_id, page_size)
         except Exception as e:
             wx.CallAfter(self._load_more_failed, request_id, str(e))
@@ -1226,15 +1235,23 @@ class MainFrame(wx.Frame):
 
         self._updating_list = True
         try:
-            self.current_articles = new_entries + self.current_articles
+            # Combine, deduplicate, and sort
+            combined = new_entries + self.current_articles
+            combined.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
+            
+            # If no change in order or content (unlikely if new_entries was non-empty), skip
+            if [a.id for a in combined] == [a.id for a in self.current_articles]:
+                return
+
+            self.current_articles = combined
 
             self.list_ctrl.Freeze()
-            for i, article in enumerate(new_entries):
-                # InsertItem at top pushes existing selection down, but fires events.
-                # Our _updating_list flag will silence on_article_select.
+            self.list_ctrl.DeleteAllItems()
+            for i, article in enumerate(self.current_articles):
                 idx = self.list_ctrl.InsertItem(i, article.title)
                 self.list_ctrl.SetItem(idx, 1, utils.humanize_article_date(article.date))
                 self.list_ctrl.SetItem(idx, 2, article.author or "")
+                self.list_ctrl.SetItem(idx, 3, "Read" if article.is_read else "Unread")
             
             # Restore selection state without stealing focus
             if selected_id:

@@ -324,19 +324,52 @@ class LocalProvider(RSSProvider):
         try:
             c = conn.cursor()
             
-            if feed_id == "all":
-                c.execute("SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type FROM articles ORDER BY date DESC")
-            elif feed_id.startswith("category:"):
-                cat_name = feed_id.split(":", 1)[1]
-                c.execute("""
+            # Determine read/unread filter
+            filter_read = None # None=all, 0=unread, 1=read
+            real_feed_id = feed_id
+            if feed_id.startswith("unread:"):
+                filter_read = 0
+                real_feed_id = feed_id[7:]
+            elif feed_id.startswith("read:"):
+                filter_read = 1
+                real_feed_id = feed_id[5:]
+
+            sql_parts = ["SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type FROM articles"]
+            where_clauses = []
+            params = []
+            
+            # For category queries we alias articles as 'a' (because of JOIN). 
+            # For simple queries we don't alias or can assume table is articles.
+            # To be consistent, let's handle the join case specifically.
+            
+            is_category = real_feed_id.startswith("category:")
+            if is_category:
+                cat_name = real_feed_id.split(":", 1)[1]
+                sql_parts = ["""
                     SELECT a.id, a.feed_id, a.title, a.url, a.content, a.date, a.author, a.is_read, a.media_url, a.media_type
                     FROM articles a
                     JOIN feeds f ON a.feed_id = f.id
-                    WHERE f.category = ?
-                    ORDER BY a.date DESC
-                """, (cat_name,))
-            else:
-                c.execute("SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type FROM articles WHERE feed_id = ? ORDER BY date DESC", (feed_id,))
+                """]
+                where_clauses.append("f.category = ?")
+                params.append(cat_name)
+            elif real_feed_id != "all":
+                where_clauses.append("feed_id = ?")
+                params.append(real_feed_id)
+            
+            if filter_read is not None:
+                # If we are in category mode, we use 'a.is_read', otherwise just 'is_read'
+                col = "a.is_read" if is_category else "is_read"
+                where_clauses.append(f"{col} = ?")
+                params.append(filter_read)
+
+            if where_clauses:
+                sql_parts.append("WHERE " + " AND ".join(where_clauses))
+            
+            sort_col = "a.date" if is_category else "date"
+            sort_id = "a.id" if is_category else "id"
+            sql_parts.append(f"ORDER BY {sort_col} DESC, {sort_id} DESC")
+            
+            c.execute(" ".join(sql_parts), tuple(params))
                 
             rows = c.fetchall()
             
@@ -379,43 +412,83 @@ class LocalProvider(RSSProvider):
         try:
             c = conn.cursor()
 
-            # total count
-            total = 0
-            if feed_id == "all":
-                c.execute("SELECT COUNT(*) FROM articles")
-                total = int(c.fetchone()[0] or 0)
-                c.execute(
-                    "SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type "
-                    "FROM articles ORDER BY date DESC LIMIT ? OFFSET ?",
-                    (limit, offset),
-                )
-            elif feed_id.startswith("category:"):
-                cat_name = feed_id.split(":", 1)[1]
-                c.execute(
-                    "SELECT COUNT(*) FROM articles a JOIN feeds f ON a.feed_id = f.id WHERE f.category = ?",
-                    (cat_name,),
-                )
-                total = int(c.fetchone()[0] or 0)
-                c.execute(
-                    """
+            # Determine read/unread filter
+            filter_read = None # None=all, 0=unread, 1=read
+            real_feed_id = feed_id
+            if feed_id.startswith("unread:"):
+                filter_read = 0
+                real_feed_id = feed_id[7:]
+            elif feed_id.startswith("read:"):
+                filter_read = 1
+                real_feed_id = feed_id[5:]
+
+            # 1. Calculate Total
+            count_sql_parts = []
+            count_where = []
+            count_params = []
+            
+            is_category = real_feed_id.startswith("category:")
+            
+            if is_category:
+                cat_name = real_feed_id.split(":", 1)[1]
+                count_sql_parts = ["SELECT COUNT(*) FROM articles a JOIN feeds f ON a.feed_id = f.id"]
+                count_where.append("f.category = ?")
+                count_params.append(cat_name)
+            elif real_feed_id == "all":
+                count_sql_parts = ["SELECT COUNT(*) FROM articles"]
+            else:
+                count_sql_parts = ["SELECT COUNT(*) FROM articles"]
+                count_where.append("feed_id = ?")
+                count_params.append(real_feed_id)
+            
+            if filter_read is not None:
+                # If we are in category mode (or generally aliased), check prefix
+                # But for simple "SELECT COUNT(*) FROM articles", no alias 'a' is defined unless we added it or joined.
+                # 'is_category' uses JOIN so 'a' is defined.
+                # 'all' and 'feed_id' do not use JOIN in count query above.
+                col = "a.is_read" if is_category else "is_read"
+                count_where.append(f"{col} = ?")
+                count_params.append(filter_read)
+            
+            if count_where:
+                count_sql_parts.append("WHERE " + " AND ".join(count_where))
+                
+            c.execute(" ".join(count_sql_parts), tuple(count_params))
+            total = int(c.fetchone()[0] or 0)
+
+            # 2. Fetch Page
+            sql_parts = ["SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type FROM articles"]
+            where_clauses = []
+            params = []
+            
+            if is_category:
+                cat_name = real_feed_id.split(":", 1)[1]
+                sql_parts = ["""
                     SELECT a.id, a.feed_id, a.title, a.url, a.content, a.date, a.author, a.is_read, a.media_url, a.media_type
                     FROM articles a
                     JOIN feeds f ON a.feed_id = f.id
-                    WHERE f.category = ?
-                    ORDER BY a.date DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (cat_name, limit, offset),
-                )
-            else:
-                c.execute("SELECT COUNT(*) FROM articles WHERE feed_id = ?", (feed_id,))
-                total = int(c.fetchone()[0] or 0)
-                c.execute(
-                    "SELECT id, feed_id, title, url, content, date, author, is_read, media_url, media_type "
-                    "FROM articles WHERE feed_id = ? ORDER BY date DESC LIMIT ? OFFSET ?",
-                    (feed_id, limit, offset),
-                )
-
+                """]
+                where_clauses.append("f.category = ?")
+                params.append(cat_name)
+            elif real_feed_id != "all":
+                where_clauses.append("feed_id = ?")
+                params.append(real_feed_id)
+                
+            if filter_read is not None:
+                col = "a.is_read" if is_category else "is_read"
+                where_clauses.append(f"{col} = ?")
+                params.append(filter_read)
+            
+            if where_clauses:
+                sql_parts.append("WHERE " + " AND ".join(where_clauses))
+                
+            sort_col = "a.date" if is_category else "date"
+            sort_id = "a.id" if is_category else "id"
+            sql_parts.append(f"ORDER BY {sort_col} DESC, {sort_id} DESC LIMIT ? OFFSET ?")
+            params.append(limit)
+            params.append(offset)
+            
+            c.execute(" ".join(sql_parts), tuple(params))
             rows = c.fetchall()
 
             # Fetch chapters for just this page

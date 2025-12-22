@@ -69,12 +69,24 @@ def safe_requests_get(url, **kwargs):
     final_headers.update(headers)
     return requests.get(url, headers=final_headers, **kwargs)
 
+
+def safe_requests_head(url, **kwargs):
+    """Wrapper for requests.head with default browser headers."""
+    headers = kwargs.pop("headers", {})
+    final_headers = HEADERS.copy()
+    final_headers.update(headers)
+    return requests.head(url, headers=final_headers, **kwargs)
+
 # --- Date Parsing ---
 
 
 def format_datetime(dt: datetime) -> str:
-    """Return UTC-normalized string for consistent ordering."""
-    if dt.tzinfo:
+    """Return UTC-normalized string for consistent ordering.
+    Assumes naive datetimes are already in UTC.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
         dt = dt.astimezone(timezone.utc)
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -86,8 +98,20 @@ def extract_date_from_text(text: str, fuzzy: bool = True):
     """
     if not text:
         return None
-    # 1) numeric with / or -
-    m = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", text)
+    
+    # 1) ISO-like yyyy-mm-dd (Check FIRST to avoid greedy matching by other patterns)
+    m_iso = re.search(r"\b(\d{4})[/-](\d{1,2})[/-](\d{1,2})\b", text)
+    if m_iso:
+        try:
+            y, mth, d = map(int, m_iso.groups())
+            if 1 <= mth <= 12 and 1 <= d <= 31:
+                return datetime(y, mth, d, tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    # 2) numeric with / or - (e.g. 12/25/2023 or 25-12-23)
+    # Require word boundaries to avoid matching inside other numbers
+    m = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b", text)
     if m:
         a, b, year = m.groups()
         try:
@@ -95,22 +119,15 @@ def extract_date_from_text(text: str, fuzzy: bool = True):
             if year_int < 100:
                 year_int += 2000 if year_int < 70 else 1900
             a_int, b_int = int(a), int(b)
-            # heuristic: if both <=12, prefer US mm/dd
+            # heuristic: if both <=12, prefer US mm/dd for consistency with dateparser defaults
             if a_int > 12 and b_int <= 12:
                 day, month = a_int, b_int
             elif b_int > 12 and a_int <= 12:
                 day, month = b_int, a_int
             else:
                 month, day = a_int, b_int
-            return datetime(year_int, month, day)
-        except Exception:
-            pass
-    # 2) ISO-like yyyy-mm-dd
-    m_iso = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
-    if m_iso:
-        try:
-            y, mth, d = map(int, m_iso.groups())
-            return datetime(y, mth, d)
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                return datetime(year_int, month, day, tzinfo=timezone.utc)
         except Exception:
             pass
             
@@ -122,7 +139,11 @@ def extract_date_from_text(text: str, fuzzy: bool = True):
         
     if m_text:
         try:
-            return dateparser.parse(m_text.group(0), tzinfos=TZINFOS)
+            dt = dateparser.parse(m_text.group(0), tzinfos=TZINFOS)
+            if dt:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
         except Exception:
             pass
 
@@ -131,7 +152,7 @@ def extract_date_from_text(text: str, fuzzy: bool = True):
 
     # 4) Month name forms (fuzzy fallback)
     try:
-        dt = dateparser.parse(text, fuzzy=True, default=datetime(1900, 1, 1), tzinfos=TZINFOS)
+        dt = dateparser.parse(text, fuzzy=True, default=datetime(1900, 1, 1, tzinfo=timezone.utc), tzinfos=TZINFOS)
         if dt and dt.year > 1900:
             # If parser only saw a bare year (fills month/day with defaults), skip it;
             # we don't want to override feed dates with year-only hints like "2025".
@@ -143,6 +164,8 @@ def extract_date_from_text(text: str, fuzzy: bool = True):
             )
             only_year = (dt.month == 1 and dt.day == 1 and not has_month_day_hint)
             if not only_year:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
                 return dt
     except Exception:
         pass
@@ -152,8 +175,8 @@ def extract_date_from_text(text: str, fuzzy: bool = True):
 def normalize_date(raw_date_str: str, title: str = "", content: str = "", url: str = "") -> str:
     """
     Robust date normalizer.
-    Prioritizes dates found explicitly in the Title or URL, as some feeds (e.g. archives) 
-    put the original air date there while using a recent timestamp for pubDate.
+    Prioritizes the Raw Feed Date to ensure correct sorting of new articles.
+    Fallbacks to Title/URL/Content only if the feed date is missing or invalid.
     """
     now = datetime.now(timezone.utc)
     
@@ -164,29 +187,46 @@ def normalize_date(raw_date_str: str, title: str = "", content: str = "", url: s
             dt_cmp = dt.astimezone(timezone.utc)
         else:
             dt_cmp = dt.replace(tzinfo=timezone.utc)
-        # discard if more than 2 days in future (some timezones are ahead)
-        return (dt_cmp - now) <= timedelta(days=2)
+        # discard if more than 2 days in future (some timezones are ahead, but not by years)
+        if (dt_cmp - now) > timedelta(days=2):
+            return False
+        # Discard if ridiculously old (before RSS existed) unless it's explicitly parsed
+        if dt_cmp.year < 1990:
+            return False
+        return True
 
-    # 1) Check Title first (STRICT ONLY to avoid false positives on numbers in titles)
-    if title:
-        dt = extract_date_from_text(title, fuzzy=False)
-        if dt and valid(dt):
-            return format_datetime(dt)
-
-    # 2) Check URL (STRICT ONLY)
-    if url:
-        dt = extract_date_from_text(url, fuzzy=False)
-        if dt and valid(dt):
-            return format_datetime(dt)
-
-    # 3) Check raw feed date
+    # 1) Check raw feed date (Priority)
     if raw_date_str:
+        # Check for Unix Timestamp (numeric string)
+        if raw_date_str.replace('.', '', 1).isdigit():
+            try:
+                ts = float(raw_date_str)
+                # Reasonable bounds for timestamp (e.g. > 1980 and < 2100)
+                if 315532800 < ts < 4102444800:
+                    dt = datetime.fromtimestamp(ts, timezone.utc)
+                    if valid(dt):
+                        return format_datetime(dt)
+            except Exception:
+                pass
+
         try:
             dt = dateparser.parse(raw_date_str, tzinfos=TZINFOS)
             if valid(dt):
                 return format_datetime(dt)
         except Exception:
             pass
+
+    # 2) Check Title (Fallback)
+    if title:
+        dt = extract_date_from_text(title, fuzzy=False)
+        if dt and valid(dt):
+            return format_datetime(dt)
+
+    # 3) Check URL (Fallback)
+    if url:
+        dt = extract_date_from_text(url, fuzzy=False)
+        if dt and valid(dt):
+            return format_datetime(dt)
 
     # 4) Check content (Allow fuzzy here as content often contains "Published on..." blocks)
     if content:
@@ -196,6 +236,7 @@ def normalize_date(raw_date_str: str, title: str = "", content: str = "", url: s
 
     # 5) Fallback sentinel
     return "0001-01-01 00:00:00"
+
 
 
 def parse_datetime_utc(value: str):

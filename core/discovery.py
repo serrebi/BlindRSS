@@ -206,7 +206,7 @@ def discover_feed(url: str) -> str:
             # Avoid re-checking
             candidate = base + path
             try:
-                head = requests.head(candidate, headers=utils.HEADERS, timeout=5)
+                head = utils.safe_requests_head(candidate, timeout=5, allow_redirects=True)
                 if head.status_code == 200 and "xml" in head.headers.get("Content-Type", ""):
                     return candidate
             except Exception:

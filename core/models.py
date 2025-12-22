@@ -1,4 +1,6 @@
 from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime, timezone
+from core.utils import parse_datetime_utc
 
 class Article:
     def __init__(self, title: str, url: str, content: str, date: str, author: str, feed_id: str, is_read: bool = False, id: str = None, media_url: str = None, media_type: str = None, chapters: list = None):
@@ -13,6 +15,12 @@ class Article:
         self.media_url = media_url
         self.media_type = media_type
         self.chapters = chapters or []
+        
+        self.timestamp = 0.0
+        if self.date:
+            dt = parse_datetime_utc(self.date)
+            if dt:
+                self.timestamp = dt.timestamp()
 
 class Feed:
     def __init__(self, id: str, title: str, url: str, category: str = "Uncategorized", icon_url: str = None):

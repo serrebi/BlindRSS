@@ -282,11 +282,19 @@ class MinifluxProvider(RSSProvider):
             "order": "published_at",
             "status": ["unread", "read"],
         }
+        
+        real_feed_id = feed_id
+        if feed_id.startswith("unread:"):
+            base_params["status"] = ["unread"]
+            real_feed_id = feed_id[7:]
+        elif feed_id.startswith("read:"):
+            base_params["status"] = ["read"]
+            real_feed_id = feed_id[5:]
 
         entries: List[Dict[str, Any]] = []
 
-        if feed_id.startswith("category:"):
-            cat_title = feed_id.split(":", 1)[1]
+        if real_feed_id.startswith("category:"):
+            cat_title = real_feed_id.split(":", 1)[1]
             category_id = None
             cats = self._req("GET", "/v1/categories") or []
             for c in cats:
@@ -296,11 +304,11 @@ class MinifluxProvider(RSSProvider):
             if category_id is not None:
                 base_params["category_id"] = category_id
             entries = self._get_entries_paged("/v1/entries", base_params, limit=200)
-        elif feed_id == "all":
+        elif real_feed_id == "all":
             entries = self._get_entries_paged("/v1/entries", base_params, limit=200)
         else:
             # This is the guarantee path for complete retrieval.
-            entries = self._get_entries_paged(f"/v1/feeds/{feed_id}/entries", base_params, limit=200)
+            entries = self._get_entries_paged(f"/v1/feeds/{real_feed_id}/entries", base_params, limit=200)
 
         if not entries:
             return []
@@ -384,7 +392,15 @@ class MinifluxProvider(RSSProvider):
             "limit": int(limit),
         }
 
-        endpoint, params = self._resolve_entries_endpoint(feed_id, base_params)
+        real_feed_id = feed_id
+        if feed_id.startswith("unread:"):
+            base_params["status"] = ["unread"]
+            real_feed_id = feed_id[7:]
+        elif feed_id.startswith("read:"):
+            base_params["status"] = ["read"]
+            real_feed_id = feed_id[5:]
+
+        endpoint, params = self._resolve_entries_endpoint(real_feed_id, base_params)
         data = self._req("GET", endpoint, params=params) or {}
         entries = data.get("entries") or []
         total = data.get("total")

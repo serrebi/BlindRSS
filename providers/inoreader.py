@@ -54,8 +54,18 @@ class InoreaderProvider(RSSProvider):
     def get_articles(self, feed_id: str) -> List[Article]:
         if not self.token: return []
         try:
-            url = f"{self.base_url}/stream/contents/{feed_id}"
-            resp = requests.get(url, headers=self._headers(), params={"output": "json", "n": 50})
+            real_feed_id = feed_id
+            params = {"output": "json", "n": 50}
+
+            if feed_id.startswith("unread:"):
+                real_feed_id = feed_id[7:]
+                params["xt"] = "user/-/state/com.google/read"
+            elif feed_id.startswith("read:"):
+                real_feed_id = feed_id[5:]
+                params["it"] = "user/-/state/com.google/read"
+
+            url = f"{self.base_url}/stream/contents/{real_feed_id}"
+            resp = requests.get(url, headers=self._headers(), params=params)
             resp.raise_for_status()
             data = resp.json()
             

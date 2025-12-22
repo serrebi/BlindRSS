@@ -117,17 +117,27 @@ class TheOldReaderProvider(RSSProvider):
             return []
         
         try:
-            if feed_id == "all":
+            real_feed_id = feed_id
+            params = {"output": "json", "n": 50}
+
+            if feed_id.startswith("unread:"):
+                real_feed_id = feed_id[7:]
+                params["xt"] = "user/-/state/com.google/read"
+            elif feed_id.startswith("read:"):
+                real_feed_id = feed_id[5:]
+                params["it"] = "user/-/state/com.google/read"
+
+            if real_feed_id == "all":
                 stream_id = "user/-/state/com.google/reading-list"
-            elif feed_id.startswith("category:"):
-                label = feed_id.split(":", 1)[1]
+            elif real_feed_id.startswith("category:"):
+                label = real_feed_id.split(":", 1)[1]
                 stream_id = f"user/-/label/{label}"
             else:
-                stream_id = feed_id
+                stream_id = real_feed_id
             
             # Use 's' parameter for stream ID to avoid path encoding issues with TheOldReader
             url = f"{self.base_url}/stream/contents"
-            params = {"output": "json", "n": 50, "s": stream_id}
+            params["s"] = stream_id
             
             log.debug(f"TheOldReader: Fetching articles for {stream_id} -> {url} params={params}")
             resp = requests.get(url, headers=self._headers(), params=params)
