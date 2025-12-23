@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Database
+rss.db
+rss.db-wal
+rss.db-shm
+
+# Downloads
+podcasts/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# App logs
+*.log

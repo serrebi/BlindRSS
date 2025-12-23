@@ -124,26 +124,36 @@ class MinifluxProvider(RSSProvider):
 
 
     def _get_category_id_by_title(self, title: str):
-        if not title:
+        norm_title = (title or "").strip()
+        if not norm_title:
             return None
-        if title in self._category_cache:
-            return self._category_cache[title]
+        cached = self._category_cache.get(norm_title)
+        if cached is not None:
+            return cached
         cats = self._req("GET", "/v1/categories") or []
+        cid = None
         for c in cats:
-            if c.get("title") == title:
+            if (c.get("title") or "").strip() == norm_title:
                 cid = c.get("id")
-                self._category_cache[title] = cid
-                return cid
-        self._category_cache[title] = None
-        return None
+                break
+        if cid is None:
+            norm_lower = norm_title.lower()
+            for c in cats:
+                if (c.get("title") or "").strip().lower() == norm_lower:
+                    cid = c.get("id")
+                    break
+        if cid is not None:
+            self._category_cache[norm_title] = cid
+        return cid
 
     def _resolve_entries_endpoint(self, feed_id: str, base_params: Dict[str, Any]):
         # category:<title> uses /v1/entries with category_id filter
         if feed_id.startswith("category:"):
             cat_title = feed_id.split(":", 1)[1]
             cid = self._get_category_id_by_title(cat_title)
-            if cid is not None:
-                base_params["category_id"] = cid
+            if cid is None:
+                return None, None
+            base_params["category_id"] = cid
             return "/v1/entries", base_params
         if feed_id == "all":
             return "/v1/entries", base_params
@@ -295,14 +305,10 @@ class MinifluxProvider(RSSProvider):
 
         if real_feed_id.startswith("category:"):
             cat_title = real_feed_id.split(":", 1)[1]
-            category_id = None
-            cats = self._req("GET", "/v1/categories") or []
-            for c in cats:
-                if c.get("title") == cat_title:
-                    category_id = c.get("id")
-                    break
-            if category_id is not None:
-                base_params["category_id"] = category_id
+            category_id = self._get_category_id_by_title(cat_title)
+            if category_id is None:
+                return []
+            base_params["category_id"] = category_id
             entries = self._get_entries_paged("/v1/entries", base_params, limit=200)
         elif real_feed_id == "all":
             entries = self._get_entries_paged("/v1/entries", base_params, limit=200)
@@ -401,6 +407,8 @@ class MinifluxProvider(RSSProvider):
             real_feed_id = feed_id[5:]
 
         endpoint, params = self._resolve_entries_endpoint(real_feed_id, base_params)
+        if not endpoint:
+            return [], 0
         data = self._req("GET", endpoint, params=params) or {}
         entries = data.get("entries") or []
         total = data.get("total")
