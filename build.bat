@@ -194,7 +194,7 @@ set "SIGNING_THUMBPRINT="
 if defined SIGN_CERT_THUMBPRINT (
     set "SIGNING_THUMBPRINT=%SIGN_CERT_THUMBPRINT%"
 ) else (
-    for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "$sig = Get-AuthenticodeSignature -LiteralPath '%EXE_PATH%'; if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint }"`) do set "SIGNING_THUMBPRINT=%%A"
+    for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "Import-Module Microsoft.PowerShell.Security; $sig = Get-AuthenticodeSignature -LiteralPath '%EXE_PATH%'; if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint }"`) do set "SIGNING_THUMBPRINT=%%A"
 )
 exit /b 0
 
