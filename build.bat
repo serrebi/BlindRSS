@@ -190,6 +190,12 @@ if not exist "%EXE_PATH%" (
 echo [BlindRSS Build] Signing "%EXE_PATH%"...
 "%SIGNTOOL_EXE%" sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a "%EXE_PATH%"
 if errorlevel 1 exit /b 1
+set "SIGNING_THUMBPRINT="
+if defined SIGN_CERT_THUMBPRINT (
+    set "SIGNING_THUMBPRINT=%SIGN_CERT_THUMBPRINT%"
+) else (
+    for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "$sig = Get-AuthenticodeSignature -LiteralPath '%EXE_PATH%'; if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint }"`) do set "SIGNING_THUMBPRINT=%%A"
+)
 exit /b 0
 
 :zip_release
@@ -215,7 +221,11 @@ exit /b 0
 :write_manifest
 set "MANIFEST_PATH=%SCRIPT_DIR%dist\BlindRSS-update.json"
 echo [BlindRSS Build] Writing update manifest...
-"%TOOL_PY%" tools\release.py write-manifest --version-tag "%VERSION_TAG%" --asset-name "%ZIP_NAME%" --sha256 "%ZIP_SHA%" --output "%MANIFEST_PATH%" --notes-summary-file "%SUMMARY_FILE%"
+if defined SIGNING_THUMBPRINT (
+    "%TOOL_PY%" tools\release.py write-manifest --version-tag "%VERSION_TAG%" --asset-name "%ZIP_NAME%" --sha256 "%ZIP_SHA%" --output "%MANIFEST_PATH%" --notes-summary-file "%SUMMARY_FILE%" --signing-thumbprint "!SIGNING_THUMBPRINT!"
+) else (
+    "%TOOL_PY%" tools\release.py write-manifest --version-tag "%VERSION_TAG%" --asset-name "%ZIP_NAME%" --sha256 "%ZIP_SHA%" --output "%MANIFEST_PATH%" --notes-summary-file "%SUMMARY_FILE%"
+)
 if errorlevel 1 exit /b 1
 exit /b 0
 

@@ -232,7 +232,7 @@ def build_summary(breaking, features, fixes):
     return summary
 
 
-def write_manifest(version_tag, asset_name, sha256, notes_summary, output_path):
+def write_manifest(version_tag, asset_name, sha256, notes_summary, output_path, signing_thumbprint=None):
     download_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{version_tag}/{asset_name}"
     manifest = {
         "version": version_tag,
@@ -243,6 +243,8 @@ def write_manifest(version_tag, asset_name, sha256, notes_summary, output_path):
     }
     if notes_summary:
         manifest["notes_summary"] = notes_summary
+    if signing_thumbprint:
+        manifest["signing_thumbprint"] = signing_thumbprint
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
@@ -285,7 +287,14 @@ def cmd_write_manifest(args):
         if os.path.isfile(args.notes_summary_file):
             with open(args.notes_summary_file, "r", encoding="utf-8") as f:
                 notes_summary = f.read().strip()
-    write_manifest(args.version_tag, args.asset_name, args.sha256, notes_summary, args.output)
+    write_manifest(
+        args.version_tag,
+        args.asset_name,
+        args.sha256,
+        notes_summary,
+        args.output,
+        signing_thumbprint=args.signing_thumbprint,
+    )
     print(f"MANIFEST_FILE={args.output}")
 
 
@@ -311,6 +320,7 @@ def main():
     manifest.add_argument("--sha256", required=True)
     manifest.add_argument("--output", required=True)
     manifest.add_argument("--notes-summary-file")
+    manifest.add_argument("--signing-thumbprint")
 
     args = parser.parse_args()
 

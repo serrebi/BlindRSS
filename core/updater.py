@@ -9,7 +9,7 @@ import tempfile
 import zipfile
 import hashlib
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 from packaging.version import Version, InvalidVersion
 
@@ -29,6 +29,34 @@ log = logging.getLogger(__name__)
 _SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?$")
 
 
+def _normalize_thumbprint(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return value.replace(" ", "").strip().upper()
+
+
+def _normalize_thumbprints(values: Iterable[str]) -> Tuple[str, ...]:
+    normalized = {_normalize_thumbprint(value) for value in values if value}
+    normalized.discard("")
+    return tuple(sorted(normalized))
+
+
+def _env_thumbprints() -> Tuple[str, ...]:
+    raw = os.environ.get("BLINDRSS_TRUSTED_SIGNING_THUMBPRINTS", "")
+    if not raw:
+        return ()
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _extract_manifest_thumbprints(payload: dict) -> Tuple[str, ...]:
+    raw = payload.get("signing_thumbprints") or payload.get("signing_thumbprint")
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, list):
+        return tuple(str(item).strip() for item in raw if item)
+    return ()
+
+
 @dataclass
 class UpdateInfo:
     version: Version
@@ -38,6 +66,7 @@ class UpdateInfo:
     asset_name: str
     download_url: str
     sha256: str
+    signing_thumbprints: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -162,6 +191,8 @@ def check_for_updates() -> UpdateCheckResult:
 
     notes_summary = str(manifest.get("notes_summary") or "").strip()
     published_at = str(release.get("published_at") or manifest.get("published_at") or "")
+    manifest_thumbprints = _extract_manifest_thumbprints(manifest)
+    allowed_thumbprints = _normalize_thumbprints(list(manifest_thumbprints) + list(_env_thumbprints()))
 
     info = UpdateInfo(
         version=latest,
@@ -171,6 +202,7 @@ def check_for_updates() -> UpdateCheckResult:
         asset_name=asset_name,
         download_url=download_url,
         sha256=sha256,
+        signing_thumbprints=allowed_thumbprints,
     )
     return UpdateCheckResult("update_available", "Update available.", info)
 
@@ -204,12 +236,14 @@ def _find_staging_root(extract_dir: str) -> str:
     return extract_dir
 
 
-def _verify_authenticode_signature(exe_path: str) -> Tuple[bool, str]:
+def _verify_authenticode_signature(exe_path: str, allowed_thumbprints: Iterable[str]) -> Tuple[bool, str]:
+    allowed = set(_normalize_thumbprints(allowed_thumbprints))
     ps_script = (
         "$ErrorActionPreference = 'Stop';"
         f"$sig = Get-AuthenticodeSignature -FilePath '{exe_path}';"
         "$subject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '' };"
-        "$out = @{Status=$sig.Status.ToString(); StatusMessage=$sig.StatusMessage; Subject=$subject};"
+        "$thumb = if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { '' };"
+        "$out = @{Status=$sig.Status.ToString(); StatusMessage=$sig.StatusMessage; Subject=$subject; Thumbprint=$thumb};"
         "$out | ConvertTo-Json -Compress"
     )
     try:
@@ -231,10 +265,16 @@ def _verify_authenticode_signature(exe_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Authenticode verification returned invalid data: {e}"
 
-    status = str(data.get("Status") or "")
-    status_msg = str(data.get("StatusMessage") or "")
-    if status != "Valid":
-        return False, f"Signature check failed: {status} {status_msg}".strip()
+    status = str(data.get("Status") or "").strip()
+    status_msg = str(data.get("StatusMessage") or "").strip()
+    thumbprint = _normalize_thumbprint(data.get("Thumbprint"))
+    if status.lower() != "valid":
+        if thumbprint and thumbprint in allowed:
+            return True, ""
+        message = f"Signature check failed: {status} {status_msg}".strip()
+        if thumbprint:
+            message = f"{message} (thumbprint {thumbprint})"
+        return False, message
     return True, ""
 
 
@@ -295,7 +335,7 @@ def download_and_apply_update(info: UpdateInfo) -> Tuple[bool, str]:
     if not os.path.isfile(exe_path):
         return False, f"Update package is missing {EXE_NAME}."
 
-    ok, msg = _verify_authenticode_signature(exe_path)
+    ok, msg = _verify_authenticode_signature(exe_path, info.signing_thumbprints)
     if not ok:
         return False, msg
 
