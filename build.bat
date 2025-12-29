@@ -194,12 +194,9 @@ set "SIGNING_THUMBPRINT="
 if defined SIGN_CERT_THUMBPRINT (
     set "SIGNING_THUMBPRINT=%SIGN_CERT_THUMBPRINT%"
 ) else (
-    set "SIGNTOOL_LOG=%TEMP%\\BlindRSS_signtool_verify.txt"
-    "%SIGNTOOL_EXE%" verify /pa /v "%EXE_PATH%" > "%SIGNTOOL_LOG%" 2>&1
-    for /f "tokens=2 delims=:" %%A in ('findstr /i /c:"SHA1 hash" "%SIGNTOOL_LOG%"') do (
+    for /f "tokens=2 delims=:" %%A in ('cmd /c ""%SIGNTOOL_EXE%" verify /pa /v "%EXE_PATH%" ^| findstr /i /c:"SHA1 hash""') do (
         if not defined SIGNING_THUMBPRINT set "SIGNING_THUMBPRINT=%%A"
     )
-    if exist "%SIGNTOOL_LOG%" del /f /q "%SIGNTOOL_LOG%" >nul 2>&1
     if defined SIGNING_THUMBPRINT set "SIGNING_THUMBPRINT=!SIGNING_THUMBPRINT: =!"
 )
 exit /b 0
