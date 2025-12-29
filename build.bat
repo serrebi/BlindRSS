@@ -195,7 +195,7 @@ if defined SIGN_CERT_THUMBPRINT (
     set "SIGNING_THUMBPRINT=%SIGN_CERT_THUMBPRINT%"
 ) else (
     set "SIGNING_THUMBPRINT_FILE=%TEMP%\\BlindRSS_thumbprint.txt"
-    "%TOOL_PY%" -c "import re, subprocess, pathlib; exe=r'%EXE_PATH%'; tool=r'%SIGNTOOL_EXE%'; result=subprocess.run([tool,'verify','/pa','/v',exe], capture_output=True, text=True); data=(result.stdout or '') + (result.stderr or ''); m=re.search(r'SHA1 hash:\\s*([0-9A-Fa-f]{40})', data); pathlib.Path(r'!SIGNING_THUMBPRINT_FILE!').write_text(m.group(1) if m else '')"
+    "%TOOL_PY%" -c "import re, subprocess, pathlib; exe=r'%EXE_PATH%'; tool=r'%SIGNTOOL_EXE%'; result=subprocess.run([tool,'verify','/pa','/v',exe], capture_output=True, text=True); data=(result.stdout or '') + (result.stderr or ''); m=re.search(r'SHA1 hash:\s*([0-9A-Fa-f]{40})', data); pathlib.Path(r'!SIGNING_THUMBPRINT_FILE!').write_text(m.group(1) if m else '')"
     if exist "!SIGNING_THUMBPRINT_FILE!" set /p SIGNING_THUMBPRINT=<"!SIGNING_THUMBPRINT_FILE!"
     if exist "!SIGNING_THUMBPRINT_FILE!" del /f /q "!SIGNING_THUMBPRINT_FILE!" >nul 2>&1
     if defined SIGNING_THUMBPRINT set "SIGNING_THUMBPRINT=!SIGNING_THUMBPRINT: =!"
