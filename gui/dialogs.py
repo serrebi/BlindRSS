@@ -1,6 +1,7 @@
 import wx
 import copy
 import threading
+import webbrowser
 from urllib.parse import urlparse
 from core.discovery import discover_feed, is_ytdlp_supported
 from core import utils
@@ -401,32 +402,81 @@ class FeedPropertiesDialog(wx.Dialog):
         return self.cat_ctrl.GetValue()
 
 
-class PodcastSearchDialog(wx.Dialog):
+class FeedSearchDialog(wx.Dialog):
     def __init__(self, parent):
-        super().__init__(parent, title="Search Podcast (iTunes)", size=(500, 400))
+        super().__init__(parent, title="Find a Podcast or RSS Feed", size=(650, 480))
         
         self.selected_url = None
         
         sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Provider choice
+        provider_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        provider_sizer.Add(wx.StaticText(self, label="Search using:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        self.provider_choice = wx.Choice(
+            self,
+            choices=[
+                "Apple Podcasts (iTunes) - keyword search",
+                "Feedsearch.dev - find feeds for a website URL",
+                "BlindRSS - discover feeds from a website URL",
+            ],
+        )
+        self.provider_choice.SetSelection(0)
+        provider_sizer.Add(self.provider_choice, 1, wx.EXPAND | wx.ALL, 5)
+        sizer.Add(provider_sizer, 0, wx.EXPAND)
         
         # Search Box
+        self.input_lbl = wx.StaticText(self, label="Search term:")
+        sizer.Add(self.input_lbl, 0, wx.LEFT | wx.RIGHT | wx.TOP, 5)
+
         search_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.search_ctrl = wx.SearchCtrl(self, style=wx.TE_PROCESS_ENTER)
         self.search_ctrl.ShowCancelButton(True)
         search_sizer.Add(self.search_ctrl, 1, wx.ALL, 5)
         
-        search_btn = wx.Button(self, label="Search")
-        search_sizer.Add(search_btn, 0, wx.ALL, 5)
+        self.search_btn = wx.Button(self, label="Search")
+        search_sizer.Add(self.search_btn, 0, wx.ALL, 5)
         
         sizer.Add(search_sizer, 0, wx.EXPAND)
+
+        # External tools (opens browser)
+        tools_box = wx.StaticBoxSizer(wx.StaticBox(self, label="External feed finders (opens browser)"), wx.VERTICAL)
+        tools_wrap = wx.WrapSizer(wx.HORIZONTAL)
+
+        self.btn_rssfinder = wx.Button(self, label="RSSFinder.app")
+        self.btn_getrssfeed = wx.Button(self, label="GetRSSFeed.com")
+        self.btn_feedsearch_site = wx.Button(self, label="Feedsearch.dev")
+        self.btn_castos = wx.Button(self, label="Castos")
+        self.btn_awesome = wx.Button(self, label="Awesome RSS Feeds (GitHub)")
+
+        for b in (self.btn_rssfinder, self.btn_getrssfeed, self.btn_feedsearch_site, self.btn_castos, self.btn_awesome):
+            tools_wrap.Add(b, 0, wx.ALL, 3)
+
+        tools_box.Add(tools_wrap, 0, wx.EXPAND | wx.ALL, 2)
+        sizer.Add(tools_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         
         # Results List
         self.results_list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        self.results_list.InsertColumn(0, "Podcast", width=250)
-        self.results_list.InsertColumn(1, "Author", width=150)
+        self.results_list.InsertColumn(0, "Feed", width=320)
+        self.results_list.InsertColumn(1, "Details", width=220)
         self.results_list.InsertColumn(2, "URL", width=0) # Hidden
         
         sizer.Add(self.results_list, 1, wx.EXPAND | wx.ALL, 5)
+
+        # Feedsearch attribution (required when showing Feedsearch-powered results)
+        self._feedsearch_attrib = None
+        try:
+            import wx.adv as wxadv
+
+            self._feedsearch_attrib = wxadv.HyperlinkCtrl(self, label="powered by Feedsearch", url="https://feedsearch.dev")
+        except Exception:
+            self._feedsearch_attrib = wx.Button(self, label="powered by Feedsearch")
+            self._feedsearch_attrib.Bind(wx.EVT_BUTTON, lambda _e: webbrowser.open("https://feedsearch.dev"))
+        try:
+            self._feedsearch_attrib.Hide()
+        except Exception:
+            pass
+        sizer.Add(self._feedsearch_attrib, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         
         # Buttons
         btn_sizer = self.CreateButtonSizer(wx.OK | wx.CANCEL)
@@ -436,15 +486,81 @@ class PodcastSearchDialog(wx.Dialog):
         self.Centre()
         
         # Bindings
-        search_btn.Bind(wx.EVT_BUTTON, self.on_search)
+        self.search_btn.Bind(wx.EVT_BUTTON, self.on_search)
         self.search_ctrl.Bind(wx.EVT_TEXT_ENTER, self.on_search)
         self.search_ctrl.Bind(wx.EVT_SEARCHCTRL_SEARCH_BTN, self.on_search)
         self.results_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_item_activated)
+        self.provider_choice.Bind(wx.EVT_CHOICE, self.on_provider_changed)
+
+        self.btn_rssfinder.Bind(wx.EVT_BUTTON, self.on_open_rssfinder)
+        self.btn_getrssfeed.Bind(wx.EVT_BUTTON, self.on_open_getrssfeed)
+        self.btn_feedsearch_site.Bind(wx.EVT_BUTTON, self.on_open_feedsearch_site)
+        self.btn_castos.Bind(wx.EVT_BUTTON, self.on_open_castos)
+        self.btn_awesome.Bind(wx.EVT_BUTTON, self.on_open_awesome)
         
         self.results_data = [] # List of dicts
+        self.on_provider_changed(None)
+
+    def _provider_key(self) -> str:
+        try:
+            idx = int(self.provider_choice.GetSelection())
+        except Exception:
+            idx = 0
+        if idx == 1:
+            return "feedsearch"
+        if idx == 2:
+            return "builtin"
+        return "itunes"
+
+    def on_provider_changed(self, event):
+        key = self._provider_key()
+        if key == "itunes":
+            self.input_lbl.SetLabel("Search term:")
+        else:
+            self.input_lbl.SetLabel("Website URL:")
+        try:
+            if self._feedsearch_attrib:
+                self._feedsearch_attrib.Show(key == "feedsearch")
+                self.Layout()
+        except Exception:
+            pass
+
+    def _open_url(self, url: str) -> None:
+        try:
+            if url:
+                webbrowser.open(url)
+        except Exception:
+            pass
+
+    def on_open_rssfinder(self, event) -> None:
+        term = (self.search_ctrl.GetValue() or "").strip()
+        if term:
+            import urllib.parse
+
+            self._open_url(f"https://rssfinder.app/?q={urllib.parse.quote(term)}")
+        else:
+            self._open_url("https://rssfinder.app/")
+
+    def on_open_getrssfeed(self, event) -> None:
+        self._open_url("https://getrssfeed.com/")
+
+    def on_open_feedsearch_site(self, event) -> None:
+        term = (self.search_ctrl.GetValue() or "").strip()
+        if term:
+            import urllib.parse
+
+            self._open_url(f"https://feedsearch.dev/api/v1/search?url={urllib.parse.quote(term)}&result=true")
+        else:
+            self._open_url("https://feedsearch.dev/")
+
+    def on_open_castos(self, event) -> None:
+        self._open_url("https://castos.com/tools/find-podcast-rss-feed/")
+
+    def on_open_awesome(self, event) -> None:
+        self._open_url("https://github.com/plenaryapp/awesome-rss-feeds")
 
     def on_search(self, event):
-        term = self.search_ctrl.GetValue()
+        term = (self.search_ctrl.GetValue() or "").strip()
         if not term:
             return
             
@@ -453,23 +569,62 @@ class PodcastSearchDialog(wx.Dialog):
         
         # Disable UI
         self.search_ctrl.Disable()
-        self.FindWindowByLabel("Search").Disable()
+        try:
+            self.search_btn.Disable()
+        except Exception:
+            pass
         wx.BeginBusyCursor()
         
         import threading
-        threading.Thread(target=self._search_thread, args=(term,), daemon=True).start()
+        provider = self._provider_key()
+        threading.Thread(target=self._search_thread, args=(term, provider), daemon=True).start()
 
-    def _search_thread(self, term):
+    def _search_thread(self, term, provider):
         import urllib.parse
 
         data = None
         error = None
 
         try:
-            url = f"https://itunes.apple.com/search?media=podcast&term={urllib.parse.quote(term)}"
-            resp = utils.safe_requests_get(url, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
+            if provider == "itunes":
+                url = f"https://itunes.apple.com/search?media=podcast&term={urllib.parse.quote(term)}"
+                resp = utils.safe_requests_get(url, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+            elif provider == "feedsearch":
+                url = f"https://feedsearch.dev/api/v1/search?url={urllib.parse.quote(term)}"
+                resp = utils.safe_requests_get(url, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+            else:
+                # builtin discovery
+                data = {"feeds": []}
+                try:
+                    from core.discovery import discover_feeds
+
+                    candidates = discover_feeds(term)
+                except Exception:
+                    candidates = []
+
+                if not candidates:
+                    # Best-effort: try with https:// prefix when missing scheme.
+                    if "://" not in term and not term.lower().startswith("lbry:"):
+                        try:
+                            from core.discovery import discover_feeds
+
+                            candidates = discover_feeds("https://" + term)
+                        except Exception:
+                            candidates = []
+
+                if not candidates:
+                    try:
+                        f = discover_feed(term)
+                        if f:
+                            candidates = [f]
+                    except Exception:
+                        candidates = []
+
+                data["feeds"] = candidates
         except Exception as e:
             error = str(e)
             
@@ -478,7 +633,10 @@ class PodcastSearchDialog(wx.Dialog):
     def _on_search_complete(self, data, error):
         wx.EndBusyCursor()
         self.search_ctrl.Enable()
-        self.FindWindowByLabel("Search").Enable()
+        try:
+            self.search_btn.Enable()
+        except Exception:
+            pass
         self.search_ctrl.SetFocus()
         
         if error:
@@ -488,17 +646,57 @@ class PodcastSearchDialog(wx.Dialog):
         if not data:
             return
 
-        for item in data.get("results", []):
-            title = item.get("collectionName", "Unknown")
-            author = item.get("artistName", "Unknown")
-            feed_url = item.get("feedUrl")
-            
-            if feed_url:
-                self.results_data.append({"title": title, "author": author, "url": feed_url})
+        provider = self._provider_key()
+        if provider == "itunes":
+            for item in data.get("results", []):
+                title = item.get("collectionName", "Unknown")
+                author = item.get("artistName", "Unknown")
+                feed_url = item.get("feedUrl")
+                
+                if feed_url:
+                    self.results_data.append({"title": title, "detail": author, "url": feed_url})
+        elif provider == "feedsearch":
+            items = data if isinstance(data, list) else []
+
+            def _rank(it):
+                try:
+                    score = float(it.get("score") or 0.0) if isinstance(it, dict) else 0.0
+                except Exception:
+                    score = 0.0
+                is_podcast = bool(it.get("is_podcast")) if isinstance(it, dict) else False
+                try:
+                    item_count = int(it.get("item_count") or 0) if isinstance(it, dict) else 0
+                except Exception:
+                    item_count = 0
+                return (is_podcast, score, item_count)
+
+            items = sorted(items, key=_rank, reverse=True)
+
+            for it in items[:250]:
+                if not isinstance(it, dict):
+                    continue
+                feed_url = it.get("url")
+                if not isinstance(feed_url, str) or not feed_url.strip():
+                    continue
+                feed_url = feed_url.strip()
+                title = it.get("title") if isinstance(it.get("title"), str) and it.get("title").strip() else feed_url
+                site = it.get("site_name") or it.get("site_url") or "Feedsearch"
+                if not isinstance(site, str):
+                    site = "Feedsearch"
+                if bool(it.get("is_podcast")):
+                    site = f"{site} (podcast)"
+                self.results_data.append({"title": title, "detail": site, "url": feed_url})
+        else:
+            feeds = data.get("feeds") if isinstance(data, dict) else []
+            if isinstance(feeds, list):
+                for feed_url in feeds[:250]:
+                    if not isinstance(feed_url, str) or not feed_url.strip():
+                        continue
+                    self.results_data.append({"title": feed_url.strip(), "detail": "Discovered", "url": feed_url.strip()})
                 
         for i, item in enumerate(self.results_data):
             idx = self.results_list.InsertItem(i, item["title"])
-            self.results_list.SetItem(idx, 1, item["author"])
+            self.results_list.SetItem(idx, 1, item.get("detail", ""))
 
     def on_item_activated(self, event):
         # Select item and close
@@ -510,3 +708,7 @@ class PodcastSearchDialog(wx.Dialog):
         if idx != -1:
             return self.results_data[idx]["url"]
         return None
+
+
+# Backwards-compatible name (menu item was historically called "Search Podcast").
+PodcastSearchDialog = FeedSearchDialog

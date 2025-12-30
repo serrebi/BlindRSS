@@ -359,7 +359,7 @@ class MainFrame(wx.Frame):
         settings_item = tools_menu.Append(wx.ID_PREFERENCES, "&Settings...", "Configure application")
         check_updates_item = tools_menu.Append(wx.ID_ANY, "Check for &Updates...", "Check for new versions")
         tools_menu.AppendSeparator()
-        search_podcast_item = tools_menu.Append(wx.ID_ANY, "Search &Podcast...", "Search and add a podcast feed")
+        find_feed_item = tools_menu.Append(wx.ID_ANY, "Find a &Podcast or RSS Feed...", "Find and add a podcast or RSS feed")
         
         menubar.Append(file_menu, "&File")
         menubar.Append(view_menu, "&View")
@@ -385,7 +385,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_settings, settings_item)
         self.Bind(wx.EVT_MENU, self.on_check_updates, check_updates_item)
         self.Bind(wx.EVT_MENU, self.on_exit, exit_item)
-        self.Bind(wx.EVT_MENU, self.on_search_podcast, search_podcast_item)
+        self.Bind(wx.EVT_MENU, self.on_find_feed, find_feed_item)
 
     def init_shortcuts(self):
         # Add accelerator for Ctrl+R (F5 is handled by menu item text usually, but being explicit helps)
@@ -2201,9 +2201,9 @@ class MainFrame(wx.Frame):
     def on_exit(self, event):
         self.real_close()
 
-    def on_search_podcast(self, event):
-        from gui.dialogs import PodcastSearchDialog
-        dlg = PodcastSearchDialog(self)
+    def on_find_feed(self, event):
+        from gui.dialogs import FeedSearchDialog
+        dlg = FeedSearchDialog(self)
         url = None
         try:
             if dlg.ShowModal() == wx.ID_OK:
@@ -2214,13 +2214,13 @@ class MainFrame(wx.Frame):
         if url:
             cats = self.provider.get_categories()
             if not cats: cats = ["Uncategorized"]
-            cat_dlg = wx.SingleChoiceDialog(self, "Choose category:", "Add Podcast", cats)
+            cat_dlg = wx.SingleChoiceDialog(self, "Choose category:", "Add Feed", cats)
             cat = "Uncategorized"
             if cat_dlg.ShowModal() == wx.ID_OK:
                 cat = cat_dlg.GetStringSelection()
             cat_dlg.Destroy()
 
-            self.SetTitle(f"BlindRSS - Adding podcast {url}...")
+            self.SetTitle(f"BlindRSS - Adding feed {url}...")
             threading.Thread(target=self._add_feed_thread, args=(url, cat), daemon=True).start()
 
     def real_close(self):

@@ -217,3 +217,107 @@ def discover_feed(url: str) -> str:
         pass
         
     return None
+
+
+def discover_feeds(url: str) -> list[str]:
+    """Return a list of discovered RSS/Atom/JSON feeds for a webpage/site URL.
+
+    This is a more general form of `discover_feed()` intended for UI helpers
+    (e.g. "Find a podcast or RSS feed"). It tries to enumerate multiple
+    candidates rather than returning the first match.
+    """
+    if not url:
+        return []
+
+    # If it already looks like a feed, return it as-is.
+    low = str(url).lower()
+    if low.endswith(".xml") or low.endswith(".rss") or low.endswith(".atom") or "feed" in low:
+        return [url]
+
+    feeds: list[str] = []
+
+    def _add(candidate: str) -> None:
+        if not candidate:
+            return
+        if candidate not in feeds:
+            feeds.append(candidate)
+
+    try:
+        resp = utils.safe_requests_get(url, timeout=10)
+        resp.raise_for_status()
+        html = resp.text or ""
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        # 1) <link rel="alternate" ...>
+        for link in soup.find_all("link", href=True):
+            try:
+                rel = link.get("rel")
+                rel_vals: list[str] = []
+                if isinstance(rel, str):
+                    rel_vals = [rel]
+                elif isinstance(rel, list):
+                    rel_vals = [str(r) for r in rel]
+                rel_vals = [r.lower().strip() for r in rel_vals if r]
+                if "alternate" not in rel_vals:
+                    continue
+
+                ctype = (link.get("type") or "").lower().strip()
+                if ctype not in (
+                    "application/rss+xml",
+                    "application/atom+xml",
+                    "application/xml",
+                    "text/xml",
+                    "application/feed+json",
+                    "application/json",
+                ):
+                    continue
+
+                href = link.get("href")
+                if href:
+                    _add(urljoin(url, href))
+            except Exception:
+                continue
+
+        # 2) Obvious <a href> candidates (best-effort)
+        for a in soup.find_all("a", href=True):
+            try:
+                href = a.get("href")
+                if not isinstance(href, str) or not href:
+                    continue
+                h = href.lower()
+                if any(h.endswith(ext) for ext in (".rss", ".atom", ".xml", ".json")) or "/feed" in h or "rss" in h:
+                    _add(urljoin(url, href))
+            except Exception:
+                continue
+
+        # 3) Common paths (HEAD check)
+        common_paths = ["/feed", "/rss", "/rss.xml", "/atom.xml", "/feed.xml", "/index.xml"]
+        base = url.rstrip("/")
+        for path in common_paths:
+            candidate = base + path
+            try:
+                head = utils.safe_requests_head(candidate, timeout=5, allow_redirects=True)
+                if head.status_code == 200:
+                    ct = (head.headers.get("Content-Type", "") or "").lower()
+                    if any(x in ct for x in ("xml", "rss", "atom", "json")):
+                        _add(candidate)
+            except Exception:
+                continue
+
+    except Exception:
+        pass
+
+    # Normalize/uniq while preserving order.
+    out: list[str] = []
+    seen: set[str] = set()
+    for f in feeds:
+        try:
+            fu = str(f).strip()
+        except Exception:
+            continue
+        if not fu or fu in seen:
+            continue
+        seen.add(fu)
+        out.append(fu)
+    return out
