@@ -126,3 +126,20 @@ The Build Agent is responsible for creating redistributable packages for Windows
 -   **Bundled Binaries**: Includes `libvlc.dll`, `libvlccore.dll`, VLC `plugins/`, and `bin/yt-dlp.exe`.
 -   **Package Collection**: Uses `collect_all` for complex dependencies like `pychromecast`, `pyatv`, and `trafilatura`.
 -   **No .conf Files**: Explicitly avoids bundling any `.conf` files.
+
+## Feed Discovery Services
+**Unified Search Strategy:**
+The "Find a Podcast or RSS Feed" dialog aggregates results from multiple public APIs in parallel threads.
+*   **Active Providers (Unified Search):**
+    *   **Apple Podcasts (iTunes):** Keyword search.
+    *   **gPodder.net:** Keyword search.
+    *   **Feedly:** Keyword/URL search (`/v3/search/feeds`).
+    *   **Feedsearch.dev:** URL -> Feed discovery.
+    *   **NewsBlur:** Feed autocomplete/lookup.
+    *   **BlindRSS Discovery:** Local URL probing and HTML scraping (for `xml` links).
+*   **Reference / External Tools (Not in Unified Search):**
+    *   **PodcastIndex.org:** Requires API Key.
+    *   **Feedbin:** Requires Auth/API Key.
+    *   **RSS.app:** Generator service.
+    *   **RSSFinder.app:** Web tool (scraping required).
+    *   **Feedspot:** Directory (scraping required).

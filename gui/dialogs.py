@@ -404,80 +404,44 @@ class FeedPropertiesDialog(wx.Dialog):
 
 class FeedSearchDialog(wx.Dialog):
     def __init__(self, parent):
-        super().__init__(parent, title="Find a Podcast or RSS Feed", size=(650, 480))
+        super().__init__(parent, title="Find a Podcast or RSS Feed", size=(800, 600))
         
         self.selected_url = None
+        self._threads = []
+        self._stop_event = threading.Event()
         
         sizer = wx.BoxSizer(wx.VERTICAL)
-
-        # Provider choice
-        provider_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        provider_sizer.Add(wx.StaticText(self, label="Search using:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
-        self.provider_choice = wx.Choice(
-            self,
-            choices=[
-                "Apple Podcasts (iTunes) - keyword search",
-                "gPodder.net - keyword search",
-                "Feedsearch.dev - find feeds for a website URL",
-                "BlindRSS - discover feeds from a website URL",
-            ],
-        )
-        self.provider_choice.SetSelection(0)
-        provider_sizer.Add(self.provider_choice, 1, wx.EXPAND | wx.ALL, 5)
-        sizer.Add(provider_sizer, 0, wx.EXPAND)
         
         # Search Box
-        self.input_lbl = wx.StaticText(self, label="Search term:")
-        sizer.Add(self.input_lbl, 0, wx.LEFT | wx.RIGHT | wx.TOP, 5)
-
-        search_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        input_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        input_sizer.Add(wx.StaticText(self, label="Search term or URL:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        
         self.search_ctrl = wx.SearchCtrl(self, style=wx.TE_PROCESS_ENTER)
         self.search_ctrl.ShowCancelButton(True)
-        search_sizer.Add(self.search_ctrl, 1, wx.ALL, 5)
+        input_sizer.Add(self.search_ctrl, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
         
         self.search_btn = wx.Button(self, label="Search")
-        search_sizer.Add(self.search_btn, 0, wx.ALL, 5)
+        input_sizer.Add(self.search_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
         
-        sizer.Add(search_sizer, 0, wx.EXPAND)
+        sizer.Add(input_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
-        # External tools (opens browser)
-        tools_box = wx.StaticBoxSizer(wx.StaticBox(self, label="External feed finders (opens browser)"), wx.VERTICAL)
-        tools_wrap = wx.WrapSizer(wx.HORIZONTAL)
-
-        self.btn_rssfinder = wx.Button(self, label="RSSFinder.app")
-        self.btn_getrssfeed = wx.Button(self, label="GetRSSFeed.com")
-        self.btn_feedsearch_site = wx.Button(self, label="Feedsearch.dev")
-        self.btn_castos = wx.Button(self, label="Castos")
-        self.btn_awesome = wx.Button(self, label="Awesome RSS Feeds (GitHub)")
-
-        for b in (self.btn_rssfinder, self.btn_getrssfeed, self.btn_feedsearch_site, self.btn_castos, self.btn_awesome):
-            tools_wrap.Add(b, 0, wx.ALL, 3)
-
-        tools_box.Add(tools_wrap, 0, wx.EXPAND | wx.ALL, 2)
-        sizer.Add(tools_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        # Provider Status (optional, to show what's happening)
+        self.status_lbl = wx.StaticText(self, label="Ready. Enter a keyword or URL.")
+        sizer.Add(self.status_lbl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         
         # Results List
         self.results_list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        self.results_list.InsertColumn(0, "Feed", width=320)
-        self.results_list.InsertColumn(1, "Details", width=220)
-        self.results_list.InsertColumn(2, "URL", width=0) # Hidden
+        self.results_list.InsertColumn(0, "Title", width=350)
+        self.results_list.InsertColumn(1, "Provider", width=120)
+        self.results_list.InsertColumn(2, "Details", width=250)
+        self.results_list.InsertColumn(3, "URL", width=0) # Hidden
         
         sizer.Add(self.results_list, 1, wx.EXPAND | wx.ALL, 5)
 
-        # Feedsearch attribution (required when showing Feedsearch-powered results)
-        self._feedsearch_attrib = None
-        try:
-            import wx.adv as wxadv
-
-            self._feedsearch_attrib = wxadv.HyperlinkCtrl(self, label="powered by Feedsearch", url="https://feedsearch.dev")
-        except Exception:
-            self._feedsearch_attrib = wx.Button(self, label="powered by Feedsearch")
-            self._feedsearch_attrib.Bind(wx.EVT_BUTTON, lambda _e: webbrowser.open("https://feedsearch.dev"))
-        try:
-            self._feedsearch_attrib.Hide()
-        except Exception:
-            pass
-        sizer.Add(self._feedsearch_attrib, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        # Attribution / Help
+        help_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        help_sizer.Add(wx.StaticText(self, label="Aggregates results from: iTunes, gPodder, Feedly, Feedsearch.dev, NewsBlur, BlindRSS"), 0, wx.ALL, 5)
+        sizer.Add(help_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 5)
         
         # Buttons
         btn_sizer = self.CreateButtonSizer(wx.OK | wx.CANCEL)
@@ -491,76 +455,13 @@ class FeedSearchDialog(wx.Dialog):
         self.search_ctrl.Bind(wx.EVT_TEXT_ENTER, self.on_search)
         self.search_ctrl.Bind(wx.EVT_SEARCHCTRL_SEARCH_BTN, self.on_search)
         self.results_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_item_activated)
-        self.provider_choice.Bind(wx.EVT_CHOICE, self.on_provider_changed)
+        self.Bind(wx.EVT_CLOSE, self.on_close)
 
-        self.btn_rssfinder.Bind(wx.EVT_BUTTON, self.on_open_rssfinder)
-        self.btn_getrssfeed.Bind(wx.EVT_BUTTON, self.on_open_getrssfeed)
-        self.btn_feedsearch_site.Bind(wx.EVT_BUTTON, self.on_open_feedsearch_site)
-        self.btn_castos.Bind(wx.EVT_BUTTON, self.on_open_castos)
-        self.btn_awesome.Bind(wx.EVT_BUTTON, self.on_open_awesome)
-        
-        self.results_data = [] # List of dicts
-        self.on_provider_changed(None)
+        self.results_data = [] # List of dicts: title, provider, detail, url
 
-    def _provider_key(self) -> str:
-        try:
-            idx = int(self.provider_choice.GetSelection())
-        except Exception:
-            idx = 0
-        if idx == 1:
-            return "gpodder"
-        if idx == 2:
-            return "feedsearch"
-        if idx == 3:
-            return "builtin"
-        return "itunes"
-
-    def on_provider_changed(self, event):
-        key = self._provider_key()
-        if key in ("itunes", "gpodder"):
-            self.input_lbl.SetLabel("Search term:")
-        else:
-            self.input_lbl.SetLabel("Website URL:")
-        try:
-            if self._feedsearch_attrib:
-                self._feedsearch_attrib.Show(key == "feedsearch")
-                self.Layout()
-        except Exception:
-            pass
-
-    def _open_url(self, url: str) -> None:
-        try:
-            if url:
-                webbrowser.open(url)
-        except Exception:
-            pass
-
-    def on_open_rssfinder(self, event) -> None:
-        term = (self.search_ctrl.GetValue() or "").strip()
-        if term:
-            import urllib.parse
-
-            self._open_url(f"https://rssfinder.app/?q={urllib.parse.quote(term)}")
-        else:
-            self._open_url("https://rssfinder.app/")
-
-    def on_open_getrssfeed(self, event) -> None:
-        self._open_url("https://getrssfeed.com/")
-
-    def on_open_feedsearch_site(self, event) -> None:
-        term = (self.search_ctrl.GetValue() or "").strip()
-        if term:
-            import urllib.parse
-
-            self._open_url(f"https://feedsearch.dev/api/v1/search?url={urllib.parse.quote(term)}&result=true")
-        else:
-            self._open_url("https://feedsearch.dev/")
-
-    def on_open_castos(self, event) -> None:
-        self._open_url("https://castos.com/tools/find-podcast-rss-feed/")
-
-    def on_open_awesome(self, event) -> None:
-        self._open_url("https://github.com/plenaryapp/awesome-rss-feeds")
+    def on_close(self, event):
+        self._stop_event.set()
+        event.Skip()
 
     def on_search(self, event):
         term = (self.search_ctrl.GetValue() or "").strip()
@@ -569,156 +470,249 @@ class FeedSearchDialog(wx.Dialog):
             
         self.results_list.DeleteAllItems()
         self.results_data = []
+        self._stop_event.clear()
         
-        # Disable UI
+        # Update UI
         self.search_ctrl.Disable()
-        try:
-            self.search_btn.Disable()
-        except Exception:
-            pass
-        wx.BeginBusyCursor()
+        self.search_btn.Disable()
+        self.status_lbl.SetLabel("Searching...")
         
-        import threading
-        provider = self._provider_key()
-        threading.Thread(target=self._search_thread, args=(term, provider), daemon=True).start()
+        # Start unified search thread
+        threading.Thread(target=self._unified_search_manager, args=(term,), daemon=True).start()
 
-    def _search_thread(self, term, provider):
+    def _unified_search_manager(self, term):
         import urllib.parse
+        from queue import Queue
 
-        data = None
-        error = None
+        results_queue = Queue()
+        active_threads = []
 
+        # Helper to launch a provider thread
+        def launch(target, name):
+            t = threading.Thread(target=target, args=(term, results_queue), name=name, daemon=True)
+            t.start()
+            active_threads.append(t)
+
+        # 1. iTunes (Podcasts)
+        launch(self._search_itunes, "iTunes")
+        
+        # 2. gPodder (Podcasts)
+        launch(self._search_gpodder, "gPodder")
+        
+        # 3. Feedly (RSS/General)
+        launch(self._search_feedly, "Feedly")
+        
+        # 4. NewsBlur (Autocomplete)
+        launch(self._search_newsblur, "NewsBlur")
+
+        # 5. Feedsearch.dev + BlindRSS (URL based)
+        # Only run these if it looks like a URL or domain, OR if user wants broad search
+        # Feedsearch.dev claims to search by URL. If we pass a keyword, it might fail, but let's try.
+        # BlindRSS discovery is strictly URL based.
+        if "." in term or "://" in term or term.lower().startswith("lbry:"):
+            launch(self._search_feedsearch, "Feedsearch")
+            launch(self._search_blindrss, "BlindRSS")
+        
+        # Wait for threads
+        for t in active_threads:
+            t.join(timeout=15) # Global timeout per provider
+
+        # Process results
+        all_results = []
+        seen_urls = set()
+
+        while not results_queue.empty():
+            try:
+                provider, items = results_queue.get_nowait()
+                for item in items:
+                    url = item.get("url", "").strip()
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    all_results.append({
+                        "title": item.get("title", url),
+                        "provider": provider,
+                        "detail": item.get("detail", ""),
+                        "url": url
+                    })
+            except Exception:
+                pass
+
+        wx.CallAfter(self._on_search_complete, all_results)
+
+    # --- Provider Implementations ---
+
+    def _search_itunes(self, term, queue):
         try:
-            if provider == "itunes":
-                url = f"https://itunes.apple.com/search?media=podcast&term={urllib.parse.quote(term)}"
-                resp = utils.safe_requests_get(url, timeout=10)
-                resp.raise_for_status()
+            import urllib.parse
+            url = f"https://itunes.apple.com/search?media=podcast&term={urllib.parse.quote(term)}"
+            resp = utils.safe_requests_get(url, timeout=10)
+            if resp.status_code == 200:
                 data = resp.json()
-            elif provider == "gpodder":
-                url = f"https://gpodder.net/search.json?q={urllib.parse.quote(term)}"
-                resp = utils.safe_requests_get(url, timeout=15)
-                resp.raise_for_status()
-                data = resp.json()
-            elif provider == "feedsearch":
-                url = f"https://feedsearch.dev/api/v1/search?url={urllib.parse.quote(term)}"
-                resp = utils.safe_requests_get(url, timeout=15)
-                resp.raise_for_status()
-                data = resp.json()
-            else:
-                # builtin discovery
-                data = {"feeds": []}
-                try:
-                    from core.discovery import discover_feeds
-
-                    candidates = discover_feeds(term)
-                except Exception:
-                    candidates = []
-
-                if not candidates:
-                    # Best-effort: try with https:// prefix when missing scheme.
-                    if "://" not in term and not term.lower().startswith("lbry:"):
-                        try:
-                            from core.discovery import discover_feeds
-
-                            candidates = discover_feeds("https://" + term)
-                        except Exception:
-                            candidates = []
-
-                if not candidates:
-                    try:
-                        f = discover_feed(term)
-                        if f:
-                            candidates = [f]
-                    except Exception:
-                        candidates = []
-
-                data["feeds"] = candidates
-        except Exception as e:
-            error = str(e)
-            
-        wx.CallAfter(self._on_search_complete, data, error)
-
-    def _on_search_complete(self, data, error):
-        wx.EndBusyCursor()
-        self.search_ctrl.Enable()
-        try:
-            self.search_btn.Enable()
+                results = []
+                for item in data.get("results", []):
+                    results.append({
+                        "title": item.get("collectionName", "Unknown"),
+                        "detail": item.get("artistName", "Unknown"),
+                        "url": item.get("feedUrl")
+                    })
+                queue.put(("iTunes", results))
         except Exception:
             pass
+
+    def _search_gpodder(self, term, queue):
+        try:
+            import urllib.parse
+            url = f"https://gpodder.net/search.json?q={urllib.parse.quote(term)}"
+            resp = utils.safe_requests_get(url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = []
+                for it in data:
+                    if not isinstance(it, dict): continue
+                    results.append({
+                        "title": it.get("title") or it.get("url"),
+                        "detail": it.get("author") or "",
+                        "url": it.get("url")
+                    })
+                queue.put(("gPodder", results))
+        except Exception:
+            pass
+
+    def _search_feedly(self, term, queue):
+        try:
+            import urllib.parse
+            url = f"https://cloud.feedly.com/v3/search/feeds?q={urllib.parse.quote(term)}"
+            resp = utils.safe_requests_get(url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = []
+                items = data.get("results", [])
+                for it in items:
+                    feed_id = it.get("feedId")
+                    if feed_id and feed_id.startswith("feed/"):
+                        results.append({
+                            "title": it.get("title") or feed_id[5:],
+                            "detail": it.get("description") or "Feedly",
+                            "url": feed_id[5:]
+                        })
+                queue.put(("Feedly", results))
+        except Exception:
+            pass
+
+    def _search_newsblur(self, term, queue):
+        try:
+            import urllib.parse
+            # Try autocomplete first
+            url = f"https://newsblur.com/rss_feeds/feed_autocomplete?term={urllib.parse.quote(term)}"
+            resp = utils.safe_requests_get(url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json() # usually a list of dicts
+                results = []
+                for it in data:
+                    if not isinstance(it, dict): continue
+                    # NewsBlur structure: {'value': 'url', 'label': 'Title', ...} or similar
+                    # Check actual response structure. 
+                    # Assuming standard list of dicts with 'value' (ID/URL) and 'label' (Title) 
+                    # OR {'feeds': [...]}
+                    # Actually standard NewsBlur autocomplete returns list of dicts: {value, label, tagline, num_subscribers}
+                    
+                    # Also checking /search_feed endpoint if autocomplete is sparse?
+                    # sticking to autocomplete for now.
+                    
+                    feed_url = it.get("value")
+                    if not feed_url: continue
+                    
+                    # Sometimes value is integer ID, sometimes URL.
+                    # If it's an integer, we might not get the URL easily without auth.
+                    # But for 'feed_autocomplete', it often returns the feed URL in 'address' or 'value' if looking up by address.
+                    # Let's check keys carefully.
+                    u = it.get("address") or it.get("value")
+                    if str(u).isdigit(): continue # Skip internal IDs
+                    
+                    results.append({
+                        "title": it.get("label") or u,
+                        "detail": f"{it.get('tagline', '')} ({it.get('num_subscribers', 0)} subs)",
+                        "url": u
+                    })
+                queue.put(("NewsBlur", results))
+        except Exception:
+            pass
+
+    def _search_feedsearch(self, term, queue):
+        try:
+            import urllib.parse
+            url = f"https://feedsearch.dev/api/v1/search?url={urllib.parse.quote(term)}"
+            resp = utils.safe_requests_get(url, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = []
+                for it in data:
+                    results.append({
+                        "title": it.get("title") or it.get("url"),
+                        "detail": it.get("site_name", "Feedsearch"),
+                        "url": it.get("url")
+                    })
+                queue.put(("Feedsearch", results))
+        except Exception:
+            pass
+
+    def _search_blindrss(self, term, queue):
+        # Local discovery
+        try:
+            from core.discovery import discover_feeds, discover_feed
+            
+            candidates = []
+            
+            # 1. discover_feeds (list)
+            try:
+                c1 = discover_feeds(term)
+                candidates.extend(c1)
+            except: pass
+            
+            # 2. discover_feed (single, maybe different logic)
+            if not candidates:
+                 try:
+                    c2 = discover_feed(term)
+                    if c2: candidates.append(c2)
+                 except: pass
+                 
+            # 3. Try with https:// if missing
+            if not candidates and "://" not in term:
+                 try:
+                    c3 = discover_feeds("https://" + term)
+                    candidates.extend(c3)
+                 except: pass
+
+            results = []
+            seen = set()
+            for c in candidates:
+                if c not in seen:
+                    seen.add(c)
+                    results.append({
+                        "title": c,
+                        "detail": "Local Discovery",
+                        "url": c
+                    })
+            if results:
+                queue.put(("BlindRSS", results))
+
+        except Exception:
+            pass
+
+
+    def _on_search_complete(self, results):
+        self.search_ctrl.Enable()
+        self.search_btn.Enable()
+        self.status_lbl.SetLabel(f"Found {len(results)} results.")
         self.search_ctrl.SetFocus()
         
-        if error:
-            wx.MessageBox(f"Search failed: {error}", "Error", wx.ICON_ERROR)
-            return
-
-        if not data:
-            return
-
-        provider = self._provider_key()
-        if provider == "itunes":
-            for item in data.get("results", []):
-                title = item.get("collectionName", "Unknown")
-                author = item.get("artistName", "Unknown")
-                feed_url = item.get("feedUrl")
-                
-                if feed_url:
-                    self.results_data.append({"title": title, "detail": author, "url": feed_url})
-        elif provider == "gpodder":
-            items = data if isinstance(data, list) else []
-            for it in items[:250]:
-                if not isinstance(it, dict):
-                    continue
-                feed_url = it.get("url")
-                if not isinstance(feed_url, str) or not feed_url.strip():
-                    continue
-                title = it.get("title") if isinstance(it.get("title"), str) and it.get("title").strip() else feed_url.strip()
-                author = it.get("author") if isinstance(it.get("author"), str) else ""
-                subs = it.get("subscribers")
-                if subs is not None:
-                    author = (author + "  " if author else "") + f"Subscribers: {subs}"
-                self.results_data.append({"title": title, "detail": author, "url": feed_url.strip()})
-        elif provider == "feedsearch":
-            items = data if isinstance(data, list) else []
-
-            def _rank(it):
-                try:
-                    score = float(it.get("score") or 0.0) if isinstance(it, dict) else 0.0
-                except Exception:
-                    score = 0.0
-                is_podcast = bool(it.get("is_podcast")) if isinstance(it, dict) else False
-                try:
-                    item_count = int(it.get("item_count") or 0) if isinstance(it, dict) else 0
-                except Exception:
-                    item_count = 0
-                return (is_podcast, score, item_count)
-
-            items = sorted(items, key=_rank, reverse=True)
-
-            for it in items[:250]:
-                if not isinstance(it, dict):
-                    continue
-                feed_url = it.get("url")
-                if not isinstance(feed_url, str) or not feed_url.strip():
-                    continue
-                feed_url = feed_url.strip()
-                title = it.get("title") if isinstance(it.get("title"), str) and it.get("title").strip() else feed_url
-                site = it.get("site_name") or it.get("site_url") or "Feedsearch"
-                if not isinstance(site, str):
-                    site = "Feedsearch"
-                if bool(it.get("is_podcast")):
-                    site = f"{site} (podcast)"
-                self.results_data.append({"title": title, "detail": site, "url": feed_url})
-        else:
-            feeds = data.get("feeds") if isinstance(data, dict) else []
-            if isinstance(feeds, list):
-                for feed_url in feeds[:250]:
-                    if not isinstance(feed_url, str) or not feed_url.strip():
-                        continue
-                    self.results_data.append({"title": feed_url.strip(), "detail": "Discovered", "url": feed_url.strip()})
-                
+        self.results_data = results
+        
         for i, item in enumerate(self.results_data):
             idx = self.results_list.InsertItem(i, item["title"])
-            self.results_list.SetItem(idx, 1, item.get("detail", ""))
+            self.results_list.SetItem(idx, 1, item["provider"])
+            self.results_list.SetItem(idx, 2, item["detail"])
 
     def on_item_activated(self, event):
         # Select item and close
