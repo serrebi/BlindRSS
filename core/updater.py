@@ -291,7 +291,17 @@ def _launch_update_helper(helper_path: str, parent_pid: int, install_dir: str, s
             staging_root,
             EXE_NAME,
         ]
-        subprocess.Popen(cmd, cwd=install_dir)
+        helper_cwd = None
+        try:
+            helper_cwd = os.path.dirname(helper_path)
+        except Exception:
+            helper_cwd = None
+
+        # Never set the working directory to the install folder, otherwise Windows can
+        # refuse to move/rename it during the swap (current-directory handle lock).
+        if not helper_cwd or not os.path.isdir(helper_cwd):
+            helper_cwd = tempfile.gettempdir()
+        subprocess.Popen(cmd, cwd=helper_cwd)
         return True, ""
     except Exception as e:
         return False, f"Failed to start update helper: {e}"
