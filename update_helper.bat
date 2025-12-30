@@ -55,12 +55,18 @@ set BACKUP_DIR=%INSTALL_DIR%_backup_%STAMP%
 if exist "%BACKUP_DIR%" rd /s /q "%BACKUP_DIR%"
 
 echo [BlindRSS Update] Backing up current install...
-call :move_with_retry "%INSTALL_DIR%" "%BACKUP_DIR%" 30
-if errorlevel 1 goto :rollback
+call :move_with_retry "%INSTALL_DIR%" "%BACKUP_DIR%" 60
+if errorlevel 1 (
+    echo [X] Failed to backup install directory.
+    goto :rollback
+)
 
 echo [BlindRSS Update] Applying update...
-call :move_with_retry "%STAGING_DIR%" "%INSTALL_DIR%" 30
-if errorlevel 1 goto :rollback
+call :move_with_retry "%STAGING_DIR%" "%INSTALL_DIR%" 60
+if errorlevel 1 (
+    echo [X] Failed to move staging directory to install directory.
+    goto :rollback
+)
 
 echo [BlindRSS Update] Restoring user data...
 call :restore_user_data "%BACKUP_DIR%" "%INSTALL_DIR%"
