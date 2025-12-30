@@ -83,6 +83,259 @@ class LocalProvider(RSSProvider):
         new_last_modified = None
 
         try:
+            from core import rumble as rumble_mod
+            from core import odysee as odysee_mod
+
+            is_odysee_listing = (
+                odysee_mod.is_odysee_url(feed_url)
+                and not str(feed_url).lower().endswith((".xml", ".rss", ".atom"))
+            )
+            if is_odysee_listing:
+                normalized_feed_url = odysee_mod.normalize_odysee_feed_url(feed_url)
+                if normalized_feed_url and normalized_feed_url != feed_url:
+                    try:
+                        connu = get_connection()
+                        try:
+                            cu = connu.cursor()
+                            cu.execute("UPDATE feeds SET url = ? WHERE id = ?", (normalized_feed_url, feed_id))
+                            connu.commit()
+                            feed_url = normalized_feed_url
+                        finally:
+                            connu.close()
+                    except Exception:
+                        feed_url = normalized_feed_url
+
+                existing_count = 0
+                try:
+                    conn0 = get_connection()
+                    try:
+                        c0 = conn0.cursor()
+                        c0.execute("SELECT COUNT(*) FROM articles WHERE feed_id = ?", (feed_id,))
+                        existing_count = int(c0.fetchone()[0] or 0)
+                    finally:
+                        conn0.close()
+                except Exception:
+                    existing_count = 0
+
+                try:
+                    max_items = int(
+                        self.config.get("odysee_max_items_initial", 150)
+                        if existing_count == 0
+                        else self.config.get("odysee_max_items_refresh", 60)
+                    )
+                except Exception:
+                    max_items = 150 if existing_count == 0 else 60
+                max_items = max(1, min(500, max_items))
+
+                page_title = None
+                all_items = []
+
+                with limiter:
+                    last_exc = None
+                    attempts = retries + 1
+                    for attempt in range(1, attempts + 1):
+                        try:
+                            page_title, all_items = odysee_mod.fetch_listing_items(
+                                feed_url,
+                                max_items=int(max_items),
+                                timeout_s=float(feed_timeout),
+                            )
+                            break
+                        except Exception as e:
+                            last_exc = e
+                            status = "error"
+                            error_msg = str(e)
+                            if attempt <= retries:
+                                backoff = min(4, attempt)
+                                time.sleep(backoff)
+                                continue
+                            raise last_exc
+
+                if page_title:
+                    final_title = page_title
+
+                conn = get_connection()
+                try:
+                    c = conn.cursor()
+                    c.execute(
+                        "UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?",
+                        (final_title, None, None, feed_id),
+                    )
+                    conn.commit()
+
+                    total_entries = len(all_items)
+                    for i, item in enumerate(all_items):
+                        try:
+                            article_id = item.id
+                            title = item.title or "No Title"
+                            url = item.url or ""
+                            author = item.author or final_title or "Odysee"
+                            raw_date = item.published or ""
+                            date = utils.normalize_date(raw_date, title, "", url)
+
+                            c.execute("SELECT date FROM articles WHERE id = ?", (article_id,))
+                            row = c.fetchone()
+                            if row:
+                                existing_date = row[0] or ""
+                                if existing_date != date:
+                                    c.execute("UPDATE articles SET date = ? WHERE id = ?", (date, article_id))
+                                    if i % 5 == 0 or i == total_entries - 1:
+                                        conn.commit()
+                                continue
+
+                            c.execute(
+                                "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                                (article_id, feed_id, title, url, "", date, author, None, None),
+                            )
+                            new_items += 1
+
+                            if i % 5 == 0 or i == total_entries - 1:
+                                conn.commit()
+                        except Exception as e:
+                            log.debug(f"Odysee entry parse/insert failed for {feed_url}: {e}")
+                            continue
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+                return
+
+            is_rumble_listing = (
+                rumble_mod.is_rumble_url(feed_url)
+                and not str(feed_url).lower().endswith((".xml", ".rss", ".atom"))
+            )
+
+            if is_rumble_listing:
+                # Rumble listing pages (channels/playlists/subscriptions) are HTML, not RSS.
+                # Fetch via curl and scrape the video list into synthetic entries.
+                normalized_feed_url = rumble_mod.normalize_rumble_feed_url(feed_url)
+                if normalized_feed_url and normalized_feed_url != feed_url:
+                    try:
+                        connu = get_connection()
+                        try:
+                            cu = connu.cursor()
+                            cu.execute("UPDATE feeds SET url = ? WHERE id = ?", (normalized_feed_url, feed_id))
+                            connu.commit()
+                            feed_url = normalized_feed_url
+                        finally:
+                            connu.close()
+                    except Exception:
+                        feed_url = normalized_feed_url
+
+                existing_count = 0
+                try:
+                    conn0 = get_connection()
+                    try:
+                        c0 = conn0.cursor()
+                        c0.execute("SELECT COUNT(*) FROM articles WHERE feed_id = ?", (feed_id,))
+                        existing_count = int(c0.fetchone()[0] or 0)
+                    finally:
+                        conn0.close()
+                except Exception:
+                    existing_count = 0
+
+                try:
+                    max_pages = int(self.config.get("rumble_max_pages_initial", 3) if existing_count == 0 else self.config.get("rumble_max_pages_refresh", 1))
+                except Exception:
+                    max_pages = 3 if existing_count == 0 else 1
+                max_pages = max(1, min(10, max_pages))
+
+                from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qs
+
+                def _with_page(u: str, page: int) -> str:
+                    try:
+                        parts = urlsplit(u)
+                        qs = parse_qs(parts.query)
+                        qs["page"] = [str(int(page))]
+                        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(qs, doseq=True), ""))
+                    except Exception:
+                        return u
+
+                page_title = None
+                all_items = []
+
+                with limiter:
+                    last_exc = None
+                    attempts = retries + 1
+                    for attempt in range(1, attempts + 1):
+                        try:
+                            all_items.clear()
+                            page_title = None
+                            for page in range(1, max_pages + 1):
+                                page_url = feed_url if page == 1 else _with_page(feed_url, page)
+                                t, items = rumble_mod.fetch_listing_items(page_url, timeout_s=float(feed_timeout))
+                                if t and not page_title:
+                                    page_title = t
+                                if not items:
+                                    break
+                                all_items.extend(items)
+                            break
+                        except Exception as e:
+                            last_exc = e
+                            status = "error"
+                            error_msg = str(e)
+                            if attempt <= retries:
+                                backoff = min(4, attempt)
+                                time.sleep(backoff)
+                                continue
+                            raise last_exc
+
+                if page_title:
+                    final_title = page_title
+
+                conn = get_connection()
+                try:
+                    c = conn.cursor()
+                    # Clear conditional-cache metadata (HTML listing refresh does not use ETag/Last-Modified)
+                    c.execute(
+                        "UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?",
+                        (final_title, None, None, feed_id),
+                    )
+                    conn.commit()
+
+                    total_entries = len(all_items)
+                    for i, item in enumerate(all_items):
+                        try:
+                            article_id = item.id
+                            title = item.title or "No Title"
+                            url = item.url or ""
+                            author = item.author or final_title or "Rumble"
+                            raw_date = item.published or ""
+                            date = utils.normalize_date(raw_date, title, "", url)
+
+                            c.execute("SELECT date FROM articles WHERE id = ?", (article_id,))
+                            row = c.fetchone()
+                            if row:
+                                existing_date = row[0] or ""
+                                if existing_date != date:
+                                    c.execute("UPDATE articles SET date = ? WHERE id = ?", (date, article_id))
+                                    if i % 5 == 0 or i == total_entries - 1:
+                                        conn.commit()
+                                continue
+
+                            c.execute(
+                                "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                                (article_id, feed_id, title, url, "", date, author, None, None),
+                            )
+                            new_items += 1
+
+                            if i % 5 == 0 or i == total_entries - 1:
+                                conn.commit()
+                        except Exception as e:
+                            log.debug(f"Rumble entry parse/insert failed for {feed_url}: {e}")
+                            continue
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+                return
+
             with limiter:
                 last_exc = None
                 attempts = retries + 1
@@ -541,16 +794,28 @@ class LocalProvider(RSSProvider):
 
     def add_feed(self, url: str, category: str = "Uncategorized") -> bool:
         from core.discovery import get_ytdlp_feed_url
+        from core import rumble as rumble_mod
+        from core import odysee as odysee_mod
         
         # Try to get native feed URL for media sites (e.g. YouTube)
         real_url = get_ytdlp_feed_url(url) or discover_feed(url) or url
+        real_url = rumble_mod.normalize_rumble_feed_url(real_url)
+        real_url = odysee_mod.normalize_odysee_feed_url(real_url)
         
+        title = real_url
         try:
-            resp = utils.safe_requests_get(real_url, timeout=10)
-            d = feedparser.parse(resp.text)
-            title = d.feed.get('title', real_url)
-        except:
-            title = real_url
+            if rumble_mod.is_rumble_url(real_url) and not real_url.lower().endswith((".xml", ".rss", ".atom")):
+                page_title, _items = rumble_mod.fetch_listing_items(real_url, timeout_s=10.0)
+                title = page_title or real_url
+            elif odysee_mod.is_odysee_url(real_url) and not real_url.lower().endswith((".xml", ".rss", ".atom")):
+                page_title, _items = odysee_mod.fetch_listing_items(real_url, max_items=1, timeout_s=10.0)
+                title = page_title or real_url
+            else:
+                resp = utils.safe_requests_get(real_url, timeout=10)
+                d = feedparser.parse(resp.text)
+                title = d.feed.get('title', real_url)
+        except Exception:
+            title = title or real_url
             
         conn = get_connection()
         try:

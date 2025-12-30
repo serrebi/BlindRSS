@@ -1,54 +1,63 @@
 import os
-import requests
 import subprocess
 import json
 import platform
+from functools import lru_cache
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qs
 from core import utils
 
 
+@lru_cache(maxsize=2048)
 def is_ytdlp_supported(url: str) -> bool:
-    """Check if yt-dlp supports this URL without doing a full extract."""
+    """Return True only when yt-dlp has a non-generic extractor for this URL.
+
+    IMPORTANT:
+    We intentionally use yt-dlp's URL-pattern matching (no network) rather than a
+    "does extraction succeed" check. Many normal article pages contain embedded
+    players (HTML5 audio/video, YouTube iframes, etc.) and yt-dlp can often
+    extract *something* from them, which would incorrectly classify articles as
+    playable media.
+    """
     if not url:
         return False
-    
-    # Quick check for known domains to avoid spawning process for every character
+
     parsed = urlparse(url)
-    domain = parsed.netloc.lower()
-    if not domain:
+    scheme = (parsed.scheme or "").lower()
+    if scheme and scheme not in ("http", "https", "lbry"):
         return False
-        
+
+    domain = (parsed.netloc or "").lower()
+    if scheme in ("http", "https") and not domain:
+        return False
+
+    # Fast allowlist for common media domains (keeps UI snappy).
     known_domains = [
         "youtube.com", "youtu.be", "vimeo.com", "twitch.tv", "dailymotion.com",
         "soundcloud.com", "facebook.com", "twitter.com", "x.com", "tiktok.com",
-        "instagram.com", "rumble.com", "bilibili.com", "mixcloud.com"
+        "instagram.com", "rumble.com", "bilibili.com", "mixcloud.com",
+        "odysee.com", "lbry.tv",
     ]
-    
     if any(kd in domain for kd in known_domains):
         return True
 
-    # Fallback to asking yt-dlp (throttled/debounced by caller)
+    # Use yt-dlp's extractor regexes (offline) and ignore Generic.
     try:
-        from core.dependency_check import _get_startup_info
-        creationflags = 0
-        if platform.system().lower() == "windows":
-            creationflags = 0x08000000
-            
-        # --simulate ensures no download, --get-id is a fast way to verify support
-        cmd = ["yt-dlp", "--simulate", "--get-id", "--quiet", "--no-warnings", url]
-        res = subprocess.run(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            creationflags=creationflags,
-            startupinfo=_get_startup_info(),
-            timeout=10
-        )
-        return res.returncode == 0
-    except:
+        from yt_dlp.extractor import gen_extractor_classes
+
+        for extractor_cls in gen_extractor_classes():
+            try:
+                if not extractor_cls.suitable(url):
+                    continue
+                if extractor_cls.ie_key() == "Generic":
+                    continue
+                return True
+            except Exception:
+                continue
+    except Exception:
         return False
+
+    return False
 
 
 def is_rumble_url(url: str) -> bool:
@@ -155,18 +164,10 @@ def get_ytdlp_feed_url(url: str) -> str:
         except:
             pass
 
-    # 2. Rumble specific logic
-    if "rumble.com" in domain:
-        # Rumble RSS: https://rumble.com/feeds/rss/channel/ClownfishTV.xml
-        # Paths: /c/NAME, /user/NAME, /channel/NAME
-        path_parts = parsed.path.strip("/").split("/")
-        if len(path_parts) >= 2:
-            kind = path_parts[0].lower()
-            name = path_parts[1]
-            if kind in ("c", "channel"):
-                return f"https://rumble.com/feeds/rss/channel/{name}.xml"
-            if kind == "user":
-                return f"https://rumble.com/feeds/rss/user/{name}.xml"
+    # 2. Rumble note:
+    # Rumble previously exposed /feeds/rss/... endpoints, but these are unreliable
+    # (often 404/410). BlindRSS supports Rumble via HTML listing parsing + a
+    # custom media resolver, so we intentionally do NOT return an RSS URL here.
             
     return None
 

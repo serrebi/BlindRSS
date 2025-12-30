@@ -941,6 +941,10 @@ class PlayerFrame(wx.Frame):
             low = url.lower()
             if not (low.startswith('http://') or low.startswith('https://')):
                 return url
+            # HLS playlists often contain relative segment URLs; proxying them through
+            # the range cache breaks resolution and also isn't helpful for caching.
+            if ".m3u8" in low:
+                return url
             if not bool(self.config_manager.get('range_cache_enabled', True)):
                 return url
             apply_all = bool(self.config_manager.get('range_cache_apply_all_hosts', True))
@@ -1092,74 +1096,91 @@ class PlayerFrame(wx.Frame):
         final_url = url
         ytdlp_headers = {}
         if use_ytdlp:
+            rumble_handled = False
             try:
-                import yt_dlp
-                from core.dependency_check import _get_startup_info
-                # Use browser cookies if possible to avoid bot detection
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'quiet': True,
-                    'no_warnings': True,
-                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                    'referer': url,
-                    'noprogress': True,
-                }
-                if platform.system().lower() == "windows":
-                    # Hide internal yt-dlp subprocess windows (ffmpeg/ffprobe)
-                    ydl_opts['subprocess_startupinfo'] = _get_startup_info()
+                from core import rumble as rumble_mod
 
-                info = None
-                last_err = None
-                tried_cookie_sources = []
+                if rumble_mod.is_rumble_url(url):
+                    resolved = rumble_mod.resolve_rumble_media(url)
+                    final_url = resolved.media_url
+                    ytdlp_headers = resolved.headers or {}
+                    self.current_title = resolved.title or title or 'Media Stream'
+                    rumble_handled = True
+            except Exception as e:
+                try:
+                    _log(f"Rumble resolve failed: {e}")
+                except Exception:
+                    pass
 
-                def _extract_with_opts(opts):
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        return ydl.extract_info(url, download=False)
+            if not rumble_handled:
+                try:
+                    import yt_dlp
+                    from core.dependency_check import _get_startup_info
+                    # Use browser cookies if possible to avoid bot detection
+                    ydl_opts = {
+                        'format': 'bestaudio/best',
+                        'quiet': True,
+                        'no_warnings': True,
+                        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                        'referer': url,
+                        'noprogress': True,
+                    }
+                    if platform.system().lower() == "windows":
+                        # Hide internal yt-dlp subprocess windows (ffmpeg/ffprobe)
+                        ydl_opts['subprocess_startupinfo'] = _get_startup_info()
 
-                def _try_cookie_sources(sources):
-                    nonlocal info, last_err
-                    for source in sources:
-                        if source in tried_cookie_sources:
-                            continue
-                        tried_cookie_sources.append(source)
-                        ydl_opts["cookiesfrombrowser"] = source
+                    info = None
+                    last_err = None
+                    tried_cookie_sources = []
+
+                    def _extract_with_opts(opts):
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            return ydl.extract_info(url, download=False)
+
+                    def _try_cookie_sources(sources):
+                        nonlocal info, last_err
+                        for source in sources:
+                            if source in tried_cookie_sources:
+                                continue
+                            tried_cookie_sources.append(source)
+                            ydl_opts["cookiesfrombrowser"] = source
+                            try:
+                                info = _extract_with_opts(ydl_opts)
+                                _log(f"yt-dlp cookies OK ({source[0]})")
+                                return True
+                            except Exception as e:
+                                last_err = e
+                                _log(f"yt-dlp cookies failed ({source[0]}): {e}")
+                        return False
+
+                    cookie_sources = discovery.get_rumble_cookie_sources(url)
+                    if cookie_sources:
+                        _try_cookie_sources(cookie_sources)
+
+                    if info is None:
+                        ydl_opts.pop("cookiesfrombrowser", None)
                         try:
                             info = _extract_with_opts(ydl_opts)
-                            _log(f"yt-dlp cookies OK ({source[0]})")
-                            return True
                         except Exception as e:
                             last_err = e
-                            _log(f"yt-dlp cookies failed ({source[0]}): {e}")
-                    return False
 
-                cookie_sources = discovery.get_rumble_cookie_sources(url)
-                if cookie_sources:
-                    _try_cookie_sources(cookie_sources)
+                    if info is None:
+                        fallback_sources = discovery.get_ytdlp_cookie_sources(url)
+                        if fallback_sources:
+                            _try_cookie_sources(fallback_sources)
 
-                if info is None:
-                    ydl_opts.pop("cookiesfrombrowser", None)
-                    try:
-                        info = _extract_with_opts(ydl_opts)
-                    except Exception as e:
-                        last_err = e
+                    if info is None:
+                        raise last_err if last_err else RuntimeError("yt-dlp extraction failed")
 
-                if info is None:
-                    fallback_sources = discovery.get_ytdlp_cookie_sources(url)
-                    if fallback_sources:
-                        _try_cookie_sources(fallback_sources)
-
-                if info is None:
-                    raise last_err if last_err else RuntimeError("yt-dlp extraction failed")
-
-                final_url = info['url']
-                ytdlp_headers = info.get('http_headers', {})
-                self.current_title = info.get('title', title or 'Media Stream')
-            except Exception as e:
-                print(f"yt-dlp resolve failed: {e}")
-                _log(f"yt-dlp resolve failed: {e}")
-                wx.MessageBox(f"Could not resolve media URL via yt-dlp: {e}",
-                              "Error", wx.ICON_ERROR)
-                return
+                    final_url = info['url']
+                    ytdlp_headers = info.get('http_headers', {})
+                    self.current_title = info.get('title', title or 'Media Stream')
+                except Exception as e:
+                    print(f"yt-dlp resolve failed: {e}")
+                    _log(f"yt-dlp resolve failed: {e}")
+                    wx.MessageBox(f"Could not resolve media URL via yt-dlp: {e}",
+                                  "Error", wx.ICON_ERROR)
+                    return
         else:
             self.current_title = title or "Playing Audio..."
             try:
