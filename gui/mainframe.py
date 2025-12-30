@@ -72,7 +72,7 @@ class MainFrame(wx.Frame):
         # Initial load
         self.refresh_feeds()
         wx.CallAfter(self._focus_default_control)
-        wx.CallAfter(self._maybe_auto_check_updates)
+        wx.CallLater(15000, self._maybe_auto_check_updates)
 
     def init_ui(self):
         # Main Splitter: Tree vs Content Area

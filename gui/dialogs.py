@@ -107,7 +107,7 @@ class SettingsDialog(wx.Dialog):
         
         concurrency_sizer = wx.BoxSizer(wx.HORIZONTAL)
         concurrency_sizer.Add(wx.StaticText(general_panel, label="Max Concurrent Refreshes:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
-        self.concurrent_ctrl = wx.SpinCtrl(general_panel, min=1, max=50, initial=int(config.get("max_concurrent_refreshes", 12)))
+        self.concurrent_ctrl = wx.SpinCtrl(general_panel, min=1, max=50, initial=int(config.get("max_concurrent_refreshes", 5)))
         concurrency_sizer.Add(self.concurrent_ctrl, 0, wx.ALL, 5)
         general_sizer.Add(concurrency_sizer, 0, wx.EXPAND | wx.ALL, 5)
         
@@ -414,10 +414,11 @@ class FeedSearchDialog(wx.Dialog):
         
         # Search Box
         input_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        input_sizer.Add(wx.StaticText(self, label="Search term or URL:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        input_sizer.Add(wx.StaticText(self, label="Search:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
         
         self.search_ctrl = wx.SearchCtrl(self, style=wx.TE_PROCESS_ENTER)
         self.search_ctrl.ShowCancelButton(True)
+        self.search_ctrl.SetFocus()
         input_sizer.Add(self.search_ctrl, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
         
         self.search_btn = wx.Button(self, label="Search")
@@ -426,7 +427,7 @@ class FeedSearchDialog(wx.Dialog):
         sizer.Add(input_sizer, 0, wx.EXPAND | wx.ALL, 5)
 
         # Provider Status (optional, to show what's happening)
-        self.status_lbl = wx.StaticText(self, label="Ready. Enter a keyword or URL.")
+        self.status_lbl = wx.StaticText(self, label="Ready.")
         sizer.Add(self.status_lbl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         
         # Results List
@@ -440,7 +441,7 @@ class FeedSearchDialog(wx.Dialog):
 
         # Attribution / Help
         help_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        help_sizer.Add(wx.StaticText(self, label="Aggregates results from: iTunes, gPodder, Feedly, Feedsearch.dev, NewsBlur, Reddit, Fediverse, BlindRSS"), 0, wx.ALL, 5)
+        help_sizer.Add(wx.StaticText(self, label="Sources: iTunes, gPodder, Feedly, Feedsearch, NewsBlur, Reddit, Fediverse"), 0, wx.ALL, 5)
         sizer.Add(help_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 5)
         
         # Buttons

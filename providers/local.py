@@ -43,7 +43,7 @@ class LocalProvider(RSSProvider):
         if not feeds:
             return True
 
-        max_workers = max(1, int(self.config.get("max_concurrent_refreshes", 12) or 1))
+        max_workers = max(1, int(self.config.get("max_concurrent_refreshes", 5) or 1))
         per_host_limit = max(1, int(self.config.get("per_host_max_connections", 3) or 1))
         feed_timeout = max(1, int(self.config.get("feed_timeout_seconds", 15) or 15))
         retries = max(0, int(self.config.get("feed_retry_attempts", 1) or 0))
