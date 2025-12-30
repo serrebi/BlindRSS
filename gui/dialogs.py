@@ -440,7 +440,7 @@ class FeedSearchDialog(wx.Dialog):
 
         # Attribution / Help
         help_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        help_sizer.Add(wx.StaticText(self, label="Aggregates results from: iTunes, gPodder, Feedly, Feedsearch.dev, NewsBlur, BlindRSS"), 0, wx.ALL, 5)
+        help_sizer.Add(wx.StaticText(self, label="Aggregates results from: iTunes, gPodder, Feedly, Feedsearch.dev, NewsBlur, Reddit, BlindRSS"), 0, wx.ALL, 5)
         sizer.Add(help_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 5)
         
         # Buttons
@@ -505,7 +505,10 @@ class FeedSearchDialog(wx.Dialog):
         # 4. NewsBlur (Autocomplete)
         launch(self._search_newsblur, "NewsBlur")
 
-        # 5. Feedsearch.dev + BlindRSS (URL based)
+        # 5. Reddit (Subreddits)
+        launch(self._search_reddit, "Reddit")
+
+        # 6. Feedsearch.dev + BlindRSS (URL based)
         # Only run these if it looks like a URL or domain, OR if user wants broad search
         # Feedsearch.dev claims to search by URL. If we pass a keyword, it might fail, but let's try.
         # BlindRSS discovery is strictly URL based.
@@ -636,6 +639,39 @@ class FeedSearchDialog(wx.Dialog):
                         "url": u
                     })
                 queue.put(("NewsBlur", results))
+        except Exception:
+            pass
+
+    def _search_reddit(self, term, queue):
+        try:
+            import urllib.parse
+            # Search subreddits
+            url = f"https://www.reddit.com/subreddits/search.json?q={urllib.parse.quote(term)}&limit=10"
+            headers = {"User-Agent": "BlindRSS/1.0"}
+            resp = utils.safe_requests_get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = []
+                # Reddit API structure: data -> children -> [ { data: { display_name, public_description, subscribers, ... } } ]
+                children = data.get("data", {}).get("children", [])
+                for child in children:
+                    d = child.get("data", {})
+                    name = d.get("display_name")
+                    if not name: continue
+                    
+                    # Construct RSS URL
+                    rss_url = f"https://www.reddit.com/r/{name}/.rss"
+                    desc = d.get("public_description") or d.get("title") or f"r/{name}"
+                    subs = d.get("subscribers")
+                    if subs:
+                        desc = f"{desc} ({subs} subs)"
+                        
+                    results.append({
+                        "title": f"r/{name}",
+                        "detail": desc,
+                        "url": rss_url
+                    })
+                queue.put(("Reddit", results))
         except Exception:
             pass
 

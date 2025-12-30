@@ -134,8 +134,9 @@ The "Find a Podcast or RSS Feed" dialog aggregates results from multiple public 
     *   **Apple Podcasts (iTunes):** Keyword search.
     *   **gPodder.net:** Keyword search.
     *   **Feedly:** Keyword/URL search (`/v3/search/feeds`).
-    *   **Feedsearch.dev:** URL -> Feed discovery.
     *   **NewsBlur:** Feed autocomplete/lookup.
+    *   **Reddit:** Subreddit search (`/r/{name}/.rss`).
+    *   **Feedsearch.dev:** URL -> Feed discovery.
     *   **BlindRSS Discovery:** Local URL probing and HTML scraping (for `xml` links).
 *   **Reference / External Tools (Not in Unified Search):**
     *   **PodcastIndex.org:** Requires API Key.
