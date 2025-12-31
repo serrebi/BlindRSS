@@ -1,6 +1,15 @@
 @echo off
 setlocal enabledelayedexpansion
 
+rem Always log updater output so failures aren't silent when running hidden.
+for /f %%T in ('powershell -NoProfile -Command "(Get-Date).ToString(\"yyyyMMddHHmmss\")"') do set "RUNSTAMP=%%T"
+set "LOG_FILE=%TEMP%\BlindRSS_update_!RUNSTAMP!_!RANDOM!.log"
+call :main %* >> "%LOG_FILE%" 2>&1
+exit /b %ERRORLEVEL%
+
+:main
+echo [BlindRSS Update] Log: "%LOG_FILE%"
+
 set "PID=%~1"
 set "INSTALL_DIR=%~2"
 set "STAGING_DIR=%~3"
@@ -72,10 +81,11 @@ exit /b 0
 echo [BlindRSS Update] Update failed. Restoring backup...
 if exist "%BACKUP_DIR%" (
     if not exist "%INSTALL_DIR%" (
-        move /Y "%BACKUP_DIR%" "%INSTALL_DIR%" >nul 2>nul
+        call :move_with_retry "%BACKUP_DIR%" "%INSTALL_DIR%" 20
     )
 )
 start "" "%INSTALL_DIR%\%EXE_NAME%"
+powershell -NoProfile -Command "param([string]$log) try { Add-Type -AssemblyName PresentationFramework | Out-Null; $msg = 'BlindRSS update failed.' + \"`n`n\" + 'Log file:' + \"`n\" + $log; [System.Windows.MessageBox]::Show($msg, 'BlindRSS Update', 'OK', 'Error') | Out-Null } catch { }" "%LOG_FILE%" >nul 2>nul
 exit /b 1
 
 :move_with_retry
@@ -85,7 +95,7 @@ set "DST=%~2"
 set "RETRIES=%~3"
 if "%RETRIES%"=="" set "RETRIES=20"
 for /l %%I in (1,1,%RETRIES%) do (
-    move /Y "%SRC%" "%DST%" >nul 2>nul
+    powershell -NoProfile -Command "param([string]$src,[string]$dst) $ErrorActionPreference='Stop'; Move-Item -LiteralPath $src -Destination $dst -Force" "%SRC%" "%DST%" >nul 2>nul
     if not errorlevel 1 (
         endlocal
         exit /b 0
@@ -93,7 +103,7 @@ for /l %%I in (1,1,%RETRIES%) do (
     rem Exponential-ish backoff to reduce CPU spinning
     if %%I lss 5 ( timeout /t 1 /nobreak >nul ) else ( timeout /t 2 /nobreak >nul )
 )
-move /Y "%SRC%" "%DST%" >nul 2>nul
+powershell -NoProfile -Command "param([string]$src,[string]$dst) $ErrorActionPreference='Stop'; Move-Item -LiteralPath $src -Destination $dst -Force" "%SRC%" "%DST%" >nul 2>nul
 if errorlevel 1 (
     endlocal
     exit /b 1

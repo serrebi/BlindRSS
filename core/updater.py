@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 import hashlib
 from dataclasses import dataclass
@@ -335,6 +336,37 @@ def _launch_update_helper(helper_path: str, parent_pid: int, install_dir: str, s
         return False, f"Failed to start update helper: {e}"
 
 
+def _make_update_temp_root(install_dir: str) -> str:
+    """Create a temp working directory for updates.
+
+    Prefer a staging directory on the same drive as the install directory to avoid
+    cross-volume moves (which can fail for batch scripts or be very slow).
+    """
+    install_dir = os.path.abspath(str(install_dir or ""))
+    try:
+        parent = os.path.dirname(install_dir)
+    except Exception:
+        parent = ""
+
+    candidates: list[str] = []
+    if parent:
+        candidates.append(os.path.join(parent, "_BlindRSS_update_tmp"))
+
+    for base in candidates:
+        try:
+            os.makedirs(base, exist_ok=True)
+            # Basic writability probe (some locations exist but are not writable).
+            probe = os.path.join(base, f".probe_{os.getpid()}_{int(time.time())}")
+            with open(probe, "w", encoding="utf-8") as f:
+                f.write("ok")
+            os.remove(probe)
+            return tempfile.mkdtemp(prefix="BlindRSS_update_", dir=base)
+        except Exception:
+            continue
+
+    return tempfile.mkdtemp(prefix="BlindRSS_update_")
+
+
 def download_and_apply_update(info: UpdateInfo, debug_mode: bool = False) -> Tuple[bool, str]:
     if not is_update_supported():
         return False, "Auto-update is only available in the packaged Windows build."
@@ -344,7 +376,7 @@ def download_and_apply_update(info: UpdateInfo, debug_mode: bool = False) -> Tup
     if not os.path.isfile(helper_path):
         return False, "update_helper.bat is missing from the install directory."
 
-    temp_root = tempfile.mkdtemp(prefix="BlindRSS_update_")
+    temp_root = _make_update_temp_root(install_dir)
     zip_path = os.path.join(temp_root, info.asset_name)
     extract_dir = os.path.join(temp_root, "extract")
     os.makedirs(extract_dir, exist_ok=True)
