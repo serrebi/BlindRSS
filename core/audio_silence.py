@@ -279,26 +279,32 @@ def scan_audio_for_silence(
         "error",
     ]
 
-    # Use custom headers if provided
-    if headers:
-        header_str = ""
-        for k, v in headers.items():
-            if k.lower() == "user-agent":
-                cmd.extend(["-user_agent", str(v)])
-            else:
-                header_str += f"{k}: {v}\r\n"
-        if header_str:
-            cmd.extend(["-headers", header_str])
-    else:
-        # Default user agent if none provided
-        cmd.extend([
-            "-user_agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        ])
+    # Only pass HTTP header options for HTTP(S) URLs; local files/formats reject them.
+    source_str = str(source).strip()
+    source_lower = source_str.lower()
+    is_http_url = source_lower.startswith("http://") or source_lower.startswith("https://")
+
+    if is_http_url:
+        # Use custom headers if provided
+        if headers:
+            header_str = ""
+            for k, v in headers.items():
+                if k.lower() == "user-agent":
+                    cmd.extend(["-user_agent", str(v)])
+                else:
+                    header_str += f"{k}: {v}\r\n"
+            if header_str:
+                cmd.extend(["-headers", header_str])
+        else:
+            # Default user agent if none provided
+            cmd.extend([
+                "-user_agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            ])
 
     cmd.extend([
         "-i",
-        source,
+        source_str,
         "-ac",
         str(channels),
         "-ar",
@@ -342,6 +348,7 @@ def scan_audio_for_silence(
         assert proc.stdout is not None
         pcm_stream: List[bytes] | List[bytes]  # type: ignore
         pcm_stream = []
+        stderr_data = b""
         while True:
             if abort_event is not None and getattr(abort_event, "is_set", lambda: False)():
                 try:
@@ -359,7 +366,7 @@ def scan_audio_for_silence(
         # Drain stderr to avoid blocking on wait
         try:
             if proc.stderr:
-                proc.stderr.read()
+                stderr_data = proc.stderr.read() or b""
         except Exception:
             pass
         try:
@@ -379,6 +386,13 @@ def scan_audio_for_silence(
         except Exception:
             pass
     if proc.returncode not in (0, None):
+        details = ""
+        try:
+            details = (stderr_data or b"").decode("utf-8", "replace").strip()
+        except Exception:
+            details = ""
+        if details:
+            raise RuntimeError(f"ffmpeg exited with code {proc.returncode}: {details}")
         raise RuntimeError(f"ffmpeg exited with code {proc.returncode}")
 
     if use_vad:
