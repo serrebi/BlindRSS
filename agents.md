@@ -143,5 +143,11 @@ The "Find a Podcast or RSS Feed" dialog aggregates results from multiple public 
     *   **PodcastIndex.org:** Requires API Key.
     *   **Feedbin:** Requires Auth/API Key.
     *   **RSS.app:** Generator service.
-    *   **RSSFinder.app:** Web tool (scraping required).
-    *   **Feedspot:** Directory (scraping required).
+    *   **RSSFinder.app**: Web tool (scraping required).
+    *   **Feedspot**: Directory (scraping required).
+    
+    ### Special Platform Support (Local Provider)
+    *   **Rumble**: Supports channel/user URLs (e.g. `rumble.com/c/ChannelName`). Uses HTML scraping as Rumble does not provide reliable RSS.
+    *   **Odysee**: Supports channel/user URLs. Uses Odysee API/HTML scraping.
+    *   **YouTube**: Supports channel/user/playlist URLs. Uses yt-dlp or internal discovery to find XML feeds.
+    
