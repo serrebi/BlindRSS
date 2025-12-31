@@ -295,11 +295,7 @@ def _launch_update_helper(helper_path: str, parent_pid: int, install_dir: str, s
             # Invisible execution
             creationflags = 0
             if sys.platform == "win32":
-                creationflags = (
-                    subprocess.DETACHED_PROCESS | 
-                    subprocess.CREATE_NEW_PROCESS_GROUP | 
-                    subprocess.CREATE_NO_WINDOW
-                )
+                creationflags = 0x08000000  # CREATE_NO_WINDOW
             
             cmd = [
                 "cmd",
@@ -310,7 +306,15 @@ def _launch_update_helper(helper_path: str, parent_pid: int, install_dir: str, s
                 staging_root,
                 EXE_NAME,
             ]
-            subprocess.Popen(cmd, cwd=helper_cwd, creationflags=creationflags, close_fds=True)
+            subprocess.Popen(
+                cmd, 
+                cwd=helper_cwd, 
+                creationflags=creationflags, 
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True
+            )
         else:
             # Visible window for debugging
             cmd = [
