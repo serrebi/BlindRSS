@@ -101,6 +101,9 @@ if not exist "%SCRIPT_DIR%bin\\yt-dlp.exe" (
 exit /b 0
 
 :compute_next_version
+echo [BlindRSS Build] Syncing tags...
+git fetch origin --tags --prune >nul 2>nul
+if errorlevel 1 echo [!] Failed to fetch tags from origin. Using local tags.
 for /f "usebackq tokens=1* delims==" %%A in (`"%TOOL_PY%" tools\release.py next-version`) do (
     set "%%A=%%B"
 )
