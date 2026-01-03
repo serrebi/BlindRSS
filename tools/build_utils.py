@@ -70,21 +70,19 @@ def main():
 
     args = parser.parse_args()
 
+    def _write_output(digest: str) -> None:
+        if args.output:
+            Path(args.output).write_text(digest, encoding="utf-8")
+        else:
+            print(digest)
+
     match args.cmd:
         case "filter-requirements":
             filter_requirements(Path(args.input), Path(args.output), args.exclude)
         case "sha256":
-            digest = sha256_file(Path(args.input))
-            if args.output:
-                Path(args.output).write_text(digest, encoding="utf-8")
-            else:
-                print(digest)
+            _write_output(sha256_file(Path(args.input)))
         case "signtool-thumbprint":
-            digest = signtool_thumbprint(Path(args.signtool), Path(args.exe))
-            if args.output:
-                Path(args.output).write_text(digest, encoding="utf-8")
-            else:
-                print(digest)
+            _write_output(signtool_thumbprint(Path(args.signtool), Path(args.exe)))
 
     return 0
 
