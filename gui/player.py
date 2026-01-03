@@ -4,14 +4,18 @@ import threading
 import socket
 import time
 import platform
+import logging
 from core import utils
 from core import discovery
+from core import playback_state
 from core.casting import CastingManager
 from urllib.parse import urlparse
 from core.range_cache_proxy import get_range_cache_proxy
 from core.audio_silence import merge_ranges, merge_ranges_with_gap, scan_audio_for_silence
 from core.dependency_check import _log
 from .hotkeys import HoldRepeatHotkeys
+
+log = logging.getLogger(__name__)
 
 
 def _should_reapply_seek(target_ms: int, current_ms: int, tolerance_ms: int, remaining_retries: int) -> bool:
@@ -192,6 +196,13 @@ class PlayerFrame(wx.Frame):
         self._active_load_seq = 0
         self.current_title = "No Track Loaded"
 
+        # Persistent playback resume (stored locally in SQLite, keyed by the input URL).
+        self._resume_id = None
+        self._resume_last_save_ts = 0.0
+        self._resume_restore_inflight = False
+        self._resume_restore_id = None
+        self._resume_restore_target_ms = None
+
         # Seek coalescing / debounce
         self._seek_target_ms = None
         self._seek_target_ts = 0.0
@@ -329,6 +340,171 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pass
         return int(base)
+
+    # ---------------------------------------------------------------------
+    # Persistent resume (SQLite overlay)
+    # ---------------------------------------------------------------------
+
+    def _resume_feature_enabled(self) -> bool:
+        try:
+            return bool(self.config_manager.get("resume_playback", True))
+        except Exception:
+            return True
+
+    def _get_resume_id(self) -> str | None:
+        rid = getattr(self, "_resume_id", None)
+        if rid:
+            return str(rid)
+        url = getattr(self, "current_url", None)
+        if url:
+            return str(url)
+        return None
+
+    def _maybe_restore_playback_position(self, resume_id: str, title: str | None) -> None:
+        if not resume_id:
+            return
+        if not self._resume_feature_enabled():
+            return
+
+        try:
+            state = playback_state.get_playback_state(resume_id)
+        except Exception:
+            log.exception("Failed to read playback_state for resume")
+            return
+        if not state or state.completed:
+            return
+        if state.seek_supported is False:
+            # We previously learned this stream is not seekable, so avoid an auto-resume loop.
+            return
+
+        try:
+            pos_ms = int(state.position_ms or 0)
+        except Exception:
+            pos_ms = 0
+
+        try:
+            min_ms = int(self.config_manager.get("resume_min_ms", 20000) or 20000)
+        except Exception:
+            min_ms = 20000
+        if pos_ms < max(0, min_ms):
+            return
+
+        try:
+            complete_threshold_ms = int(self.config_manager.get("resume_complete_threshold_ms", 60000) or 60000)
+        except Exception:
+            complete_threshold_ms = 60000
+
+        try:
+            dur_ms = int(state.duration_ms) if state.duration_ms is not None else 0
+        except Exception:
+            dur_ms = 0
+        if dur_ms > 0 and (dur_ms - pos_ms) <= max(0, complete_threshold_ms):
+            # Treat items close to the end as completed (avoid resuming to the credits).
+            try:
+                playback_state.upsert_playback_state(
+                    resume_id,
+                    0,
+                    duration_ms=dur_ms,
+                    title=title,
+                    completed=True,
+                )
+            except Exception:
+                log.exception("Failed to mark playback_state as completed")
+            return
+
+        try:
+            back_ms = int(self.config_manager.get("resume_back_ms", 10000) or 10000)
+        except Exception:
+            back_ms = 10000
+        back_ms = max(0, back_ms)
+        target_ms = max(0, int(pos_ms) - int(back_ms))
+
+        try:
+            self._pending_resume_seek_ms = int(target_ms)
+            self._pending_resume_seek_attempts = 0
+            self._pending_resume_paused = False
+            self._resume_restore_inflight = True
+            self._resume_restore_id = str(resume_id)
+            self._resume_restore_target_ms = int(target_ms)
+            # Avoid writing a 0-position back to the DB while the resume seek is still pending.
+            self._resume_last_save_ts = float(time.monotonic())
+        except Exception:
+            pass
+
+    def _persist_playback_position(self, force: bool = False) -> None:
+        if not self._resume_feature_enabled():
+            return
+        resume_id = self._get_resume_id()
+        if not resume_id:
+            return
+
+        # Don't overwrite saved progress while the initial resume seek is pending.
+        if (
+            not force
+            and getattr(self, "_resume_restore_inflight", False)
+            and getattr(self, "_pending_resume_seek_ms", None) is not None
+        ):
+            return
+
+        try:
+            interval_s = float(self.config_manager.get("resume_save_interval_s", 15) or 15)
+        except Exception:
+            interval_s = 15.0
+        interval_s = max(2.0, float(interval_s))
+
+        now = float(time.monotonic())
+        if not force:
+            try:
+                last = float(getattr(self, "_resume_last_save_ts", 0.0) or 0.0)
+            except Exception:
+                last = 0.0
+            if (now - last) < interval_s:
+                return
+
+        try:
+            if self.is_casting:
+                pos_ms = int(getattr(self, "_cast_last_pos_ms", 0) or 0)
+            else:
+                pos_ms = int(self._current_position_ms())
+        except Exception:
+            pos_ms = 0
+
+        if not force and pos_ms < 1000:
+            # Avoid creating state rows for trivial playback attempts.
+            return
+
+        try:
+            dur_ms = int(getattr(self, "duration", 0) or 0)
+        except Exception:
+            dur_ms = 0
+        if dur_ms <= 0:
+            dur_ms = None
+
+        try:
+            complete_threshold_ms = int(self.config_manager.get("resume_complete_threshold_ms", 60000) or 60000)
+        except Exception:
+            complete_threshold_ms = 60000
+
+        completed = False
+        if dur_ms is not None and int(dur_ms) > 0:
+            remaining = int(dur_ms) - int(pos_ms)
+            if remaining <= max(0, int(complete_threshold_ms)):
+                completed = True
+                pos_ms = 0
+
+        title = getattr(self, "current_title", None)
+
+        try:
+            playback_state.upsert_playback_state(
+                resume_id,
+                int(pos_ms),
+                duration_ms=(int(dur_ms) if dur_ms is not None else None),
+                title=(str(title) if title else None),
+                completed=bool(completed),
+            )
+            self._resume_last_save_ts = float(now)
+        except Exception:
+            log.exception("Failed to persist playback_state")
 
     def focus_play_pause(self) -> None:
         try:
@@ -1056,8 +1232,24 @@ class PlayerFrame(wx.Frame):
         print(f"DEBUG: load_media url={url}, is_casting={self.is_casting}")
         if not url:
             return
+
+        # Persist the previous item's position before switching to the new one.
+        try:
+            self._persist_playback_position(force=True)
+        except Exception:
+            pass
             
         self.current_url = url
+        self._resume_id = str(url)
+        self._resume_restore_inflight = False
+        self._resume_restore_id = None
+        self._resume_restore_target_ms = None
+        try:
+            self._pending_resume_seek_ms = None
+            self._pending_resume_seek_attempts = 0
+            self._pending_resume_paused = False
+        except Exception:
+            pass
         try:
             self._load_seq += 1
             self._active_load_seq = self._load_seq
@@ -1199,11 +1391,33 @@ class PlayerFrame(wx.Frame):
                 maxr = 30
             final_url = utils.resolve_final_url(final_url, max_redirects=maxr)
             final_url = utils.normalize_url_for_vlc(final_url)
-            
+                
         self.title_lbl.SetLabel(self.current_title)
 
+        # Apply local resume state (if any) before starting playback.
+        try:
+            self._maybe_restore_playback_position(str(url), self.current_title)
+        except Exception:
+            pass
+
         if self.is_casting:
-            self.casting_manager.play(final_url, self.current_title, content_type="audio/mpeg")
+            try:
+                start_ms = getattr(self, "_pending_resume_seek_ms", None)
+            except Exception:
+                start_ms = None
+            if start_ms is not None and int(start_ms) > 0:
+                try:
+                    self._cast_last_pos_ms = int(start_ms)
+                except Exception:
+                    pass
+                self.casting_manager.play(
+                    final_url,
+                    self.current_title,
+                    content_type="audio/mpeg",
+                    start_time_seconds=float(int(start_ms)) / 1000.0,
+                )
+            else:
+                self.casting_manager.play(final_url, self.current_title, content_type="audio/mpeg")
         else:
             final_url = self._maybe_range_cache_url(final_url, headers=ytdlp_headers)
             self._last_load_chapters = chapters
@@ -1250,6 +1464,10 @@ class PlayerFrame(wx.Frame):
                     pos_sec = self.casting_manager.get_position()
                     if pos_sec is not None:
                         self._cast_last_pos_ms = int(float(pos_sec) * 1000.0)
+            except Exception:
+                pass
+            try:
+                self._persist_playback_position(force=False)
             except Exception:
                 pass
             return
@@ -1324,6 +1542,9 @@ class PlayerFrame(wx.Frame):
 
         if getattr(self, '_pending_resume_seek_ms', None) is not None:
             try:
+                restore_inflight = bool(getattr(self, "_resume_restore_inflight", False))
+                restore_id = getattr(self, "_resume_restore_id", None)
+
                 target_ms = int(self._pending_resume_seek_ms)
                 if target_ms < 0: target_ms = 0
                 if getattr(self, 'duration', 0) and int(self.duration) > 0 and target_ms > int(self.duration):
@@ -1359,6 +1580,15 @@ class PlayerFrame(wx.Frame):
                         pass
                 else:
                     self._pending_resume_seek_ms = None
+                    if restore_inflight and restore_id:
+                        try:
+                            playback_state.set_seek_supported(str(restore_id), True)
+                        except Exception:
+                            log.exception("Failed to update seek_supported=True for playback_state")
+                        try:
+                            self._resume_restore_inflight = False
+                        except Exception:
+                            pass
                     if bool(getattr(self, '_pending_resume_paused', False)):
                         try:
                             self.player.set_pause(1)
@@ -1373,8 +1603,21 @@ class PlayerFrame(wx.Frame):
                     self._pending_resume_seek_attempts = int(getattr(self, '_pending_resume_seek_attempts', 0) or 0) + 1
                 except Exception:
                     self._pending_resume_seek_attempts = 1
-                if int(getattr(self, '_pending_resume_seek_attempts', 0) or 0) >= int(getattr(self, '_pending_resume_seek_max_attempts', 25) or 25):
+                if (
+                    self._pending_resume_seek_ms is not None
+                    and int(getattr(self, '_pending_resume_seek_attempts', 0) or 0)
+                    >= int(getattr(self, '_pending_resume_seek_max_attempts', 25) or 25)
+                ):
                     self._pending_resume_seek_ms = None
+                    if restore_inflight and restore_id:
+                        try:
+                            playback_state.set_seek_supported(str(restore_id), False)
+                        except Exception:
+                            log.exception("Failed to update seek_supported=False for playback_state")
+                        try:
+                            self._resume_restore_inflight = False
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -1411,6 +1654,11 @@ class PlayerFrame(wx.Frame):
                         break
                 if idx != -1:
                     self.chapter_choice.SetSelection(int(idx))
+        except Exception:
+            pass
+
+        try:
+            self._persist_playback_position(force=False)
         except Exception:
             pass
 
@@ -2037,8 +2285,16 @@ class PlayerFrame(wx.Frame):
                 self.is_playing = False
             except Exception:
                 pass
+        try:
+            self._persist_playback_position(force=True)
+        except Exception:
+            pass
 
     def stop(self) -> None:
+        try:
+            self._persist_playback_position(force=True)
+        except Exception:
+            pass
         if self.is_casting:
             try:
                 self.casting_manager.stop_playback()
@@ -2081,6 +2337,10 @@ class PlayerFrame(wx.Frame):
         event.Skip()
 
     def on_close(self, event):
+        try:
+            self._persist_playback_position(force=True)
+        except Exception:
+            pass
         try:
             if getattr(self, "_media_hotkeys", None):
                 self._media_hotkeys.stop()

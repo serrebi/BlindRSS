@@ -47,6 +47,11 @@ DEFAULT_CONFIG = {
     "volume_step": 5,
     "seek_back_ms": 10000,
     "seek_forward_ms": 10000,
+    "resume_playback": True,
+    "resume_save_interval_s": 15,
+    "resume_back_ms": 10000,
+    "resume_min_ms": 20000,
+    "resume_complete_threshold_ms": 60000,
     "show_player_on_play": False,
     "vlc_network_caching_ms": 1000,
     "vlc_local_proxy_network_caching_ms": 1000,  # keep VLC buffering low for local range-cache proxy
