@@ -26,8 +26,11 @@ if defined SIGNTOOL_PATH (
 )
 
 if /I "%MODE%"=="dry-run" (
-    set "TOOL_PY=python"
+    call :detect_python
+    if errorlevel 1 exit /b 1
+    set "TOOL_PY=%PYTHON_EXE%"
     call :compute_next_version
+    if errorlevel 1 exit /b 1
     echo [Dry Run] Latest tag: !LATEST_TAG!
     echo [Dry Run] Next version: v!NEXT_VERSION! [!BUMP! bump]
     echo [Dry Run] Would bump core/version.py, build, sign with "%SIGNTOOL_EXE%", zip, generate manifest, tag, push, and create a GitHub release.
@@ -40,52 +43,127 @@ set "TOOL_PY=%VENV_PYTHON%"
 
 if /I "%MODE%"=="release" (
     call :compute_next_version
+    if errorlevel 1 exit /b 1
     set "VERSION_NO_V=!NEXT_VERSION!"
     set "VERSION_TAG=!NEXT_TAG!"
     echo [BlindRSS Build] Bumping version to !VERSION_TAG!...
     "%TOOL_PY%" tools\release.py bump-version --version !VERSION_NO_V!
     if errorlevel 1 exit /b 1
+
+    call :build_app
+    if errorlevel 1 exit /b 1
+    call :sign_exe
+    if errorlevel 1 exit /b 1
+    call :zip_release
+    if errorlevel 1 exit /b 1
+    call :hash_zip
+    if errorlevel 1 exit /b 1
+    call :write_notes
+    if errorlevel 1 exit /b 1
+    call :write_manifest
+    if errorlevel 1 exit /b 1
+    call :git_release
+    if errorlevel 1 exit /b 1
 ) else (
     call :compute_current_version
+    if errorlevel 1 exit /b 1
     set "VERSION_NO_V=!CURRENT_VERSION!"
     set "VERSION_TAG=v!CURRENT_VERSION!"
-    call :compute_next_version
-)
 
-call :build_app
-call :sign_exe
-call :zip_release
-call :hash_zip
-call :write_notes
-call :write_manifest
-
-if /I "%MODE%"=="release" (
-    call :git_release
+    call :build_app
+    if errorlevel 1 exit /b 1
+    call :sign_exe
+    if errorlevel 1 exit /b 1
+    call :zip_release
+    if errorlevel 1 exit /b 1
+    call :hash_zip
+    if errorlevel 1 exit /b 1
 )
 
 goto :done
 
+:detect_python
+set "PYTHON_EXE="
+where /q py
+if not errorlevel 1 (
+    for /f "delims=" %%P in ('py -3.12 -c "import sys; print(sys.executable)" 2^>nul') do (
+        set "PYTHON_EXE=%%P"
+    )
+)
+if defined PYTHON_EXE exit /b 0
+
+where /q py
+if not errorlevel 1 (
+    for /f "delims=" %%P in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do (
+        set "PYTHON_EXE=%%P"
+    )
+)
+if defined PYTHON_EXE exit /b 0
+
+where /q python
+if errorlevel 1 (
+    echo [X] Python not found. Install Python 3.12+ and ensure it is available (python/py).
+    exit /b 1
+)
+for /f "delims=" %%P in ('python -c "import sys; print(sys.executable)" 2^>nul') do (
+    set "PYTHON_EXE=%%P"
+)
+if not defined PYTHON_EXE (
+    echo [X] Python is present on PATH but failed to run (check Windows Store app execution aliases).
+    exit /b 1
+)
+exit /b 0
+
 :setup_venv
 set "VENV_DIR=%SCRIPT_DIR%.venv"
 echo [BlindRSS Build] Preparing Python environment...
+call :detect_python
+if errorlevel 1 exit /b 1
+
+if exist "%VENV_DIR%" (
+    if not exist "%VENV_DIR%\Scripts\python.exe" (
+        echo [BlindRSS Build] Existing virtualenv is incomplete. Recreating...
+        rd /s /q "%VENV_DIR%"
+    )
+)
+
 if not exist "%VENV_DIR%" (
-    python -m venv "%VENV_DIR%"
+    "%PYTHON_EXE%" -m venv "%VENV_DIR%"
+    if errorlevel 1 exit /b 1
 )
 
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 set "VENV_PIP=%VENV_DIR%\Scripts\pip.exe"
 set "VENV_PYINSTALLER=%VENV_DIR%\Scripts\pyinstaller.exe"
 
+if not exist "%VENV_PYTHON%" (
+    echo [X] Failed to create virtual environment at "%VENV_DIR%".
+    echo [X] Ensure Python is installed with venv support and try deleting the .venv folder.
+    exit /b 1
+)
+
 echo [BlindRSS Build] Updating build tools...
-"%VENV_PYTHON%" -m pip install --upgrade pip >nul
-"%VENV_PYTHON%" -m pip install --upgrade pyinstaller packaging >nul
+"%VENV_PYTHON%" -m pip install --upgrade pip
+if errorlevel 1 exit /b 1
+"%VENV_PYTHON%" -m pip install --upgrade pyinstaller packaging
+if errorlevel 1 exit /b 1
 
 echo [BlindRSS Build] Installing dependencies from requirements.txt...
 if exist "requirements.txt" (
-    "%VENV_PYTHON%" -m pip install -r requirements.txt >nul
+	    "%VENV_PYTHON%" -m pip install -r requirements.txt
+	    if errorlevel 1 (
+	        echo [WARN] Dependency installation failed. Retrying without optional native dependency: webrtcvad
+	        set "REQ_NO_WEBRTCVAD=%TEMP%\blindrss_requirements_no_webrtcvad.txt"
+	        "%VENV_PYTHON%" -c "import pathlib, re; src=pathlib.Path('requirements.txt'); out=pathlib.Path(r'!REQ_NO_WEBRTCVAD!'); lines=[ln for ln in src.read_text(encoding='utf-8').splitlines() if (ln.strip() and not ln.strip().startswith('#') and ((re.match(r'^([A-Za-z0-9_.-]+)', ln.strip()).group(1).lower() if re.match(r'^([A-Za-z0-9_.-]+)', ln.strip()) else '') != 'webrtcvad'))]; out.write_text('\\n'.join(lines)+'\\n', encoding='utf-8')"
+	        "%VENV_PYTHON%" -m pip install -r "!REQ_NO_WEBRTCVAD!"
+	        set "RC=!ERRORLEVEL!"
+	        del /f /q "!REQ_NO_WEBRTCVAD!" >nul 2>nul
+	        if not "!RC!"=="0" exit /b !RC!
+	    )
 ) else (
-    echo [!] requirements.txt not found. Installing defaults...
-    "%VENV_PYTHON%" -m pip install wxPython feedparser requests beautifulsoup4 yt-dlp python-dateutil mutagen python-vlc pychromecast async-upnp-client pyatv trafilatura webrtcvad brotli html5lib lxml setuptools^<81 >nul
+    echo [WARN] requirements.txt not found. Installing defaults...
+    "%VENV_PYTHON%" -m pip install wxPython feedparser requests beautifulsoup4 yt-dlp python-dateutil mutagen python-vlc pychromecast async-upnp-client pyatv trafilatura webrtcvad-wheels brotli html5lib lxml setuptools^<81
+    if errorlevel 1 exit /b 1
 )
 
 echo [BlindRSS Build] Ensuring yt-dlp binary is present...
@@ -103,7 +181,7 @@ exit /b 0
 :compute_next_version
 echo [BlindRSS Build] Syncing tags...
 git fetch origin --tags --prune >nul 2>nul
-if errorlevel 1 echo [!] Failed to fetch tags from origin. Using local tags.
+if errorlevel 1 echo [WARN] Failed to fetch tags from origin. Using local tags.
 for /f "usebackq tokens=1* delims==" %%A in (`"%TOOL_PY%" tools\release.py next-version`) do (
     set "%%A=%%B"
 )
@@ -145,10 +223,10 @@ if exist "%SCRIPT_DIR%dist" rd /s /q "%SCRIPT_DIR%dist"
 
 echo [BlindRSS Build] Running PyInstaller (main.spec)...
 if exist "main.spec" (
-    "%VENV_PYINSTALLER%" --clean --noconfirm main.spec
+    "%VENV_PYTHON%" -m PyInstaller --clean --noconfirm main.spec
 ) else (
-    echo [!] main.spec not found. Running basic one-file build...
-    "%VENV_PYINSTALLER%" --onefile --noconfirm --name BlindRSS main.py
+    echo [WARN] main.spec not found. Running basic one-file build...
+    "%VENV_PYTHON%" -m PyInstaller --onefile --noconfirm --name BlindRSS main.py
 )
 if errorlevel 1 exit /b 1
 
@@ -165,10 +243,10 @@ if exist "%DIST_PLUGINS%" (
     if exist "%VLC_CACHE_GEN%" (
         "%VLC_CACHE_GEN%" "%DIST_PLUGINS%" >nul 2>nul
     ) else (
-        echo [!] vlc-cache-gen.exe not found. Plugins cache will be rebuilt at runtime.
+        echo [WARN] vlc-cache-gen.exe not found. Plugins cache will be rebuilt at runtime.
     )
 ) else (
-    echo [!] VLC plugins directory not found in dist. Skipping cache refresh.
+    echo [WARN] VLC plugins directory not found in dist. Skipping cache refresh.
 )
 
 echo [BlindRSS Build] Staging companion files into dist...
@@ -180,6 +258,16 @@ if exist "%SCRIPT_DIR%dist\BlindRSS.exe" copy /Y "%SCRIPT_DIR%dist\BlindRSS.exe"
 exit /b 0
 
 :sign_exe
+if /I "%MODE%"=="build" (
+    if defined SKIP_SIGN (
+        echo [BlindRSS Build] SKIP_SIGN is set. Skipping Authenticode signing.
+        exit /b 0
+    )
+    if not exist "%SIGNTOOL_EXE%" (
+        echo [WARN] signtool.exe not found at "%SIGNTOOL_EXE%". Skipping signing for an unsigned build.
+        exit /b 0
+    )
+)
 if not exist "%SIGNTOOL_EXE%" (
     echo [X] signtool.exe not found at "%SIGNTOOL_EXE%".
     exit /b 1

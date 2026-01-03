@@ -26,9 +26,14 @@ binaries = [
 hiddenimports = [
     'vlc',
     'trafilatura',
-    'webrtcvad',
     'pkg_resources.py2_warn',
 ]
+
+try:
+    import webrtcvad  # noqa: F401
+    hiddenimports.append('webrtcvad')
+except Exception:
+    pass
 
 for pkg in packages_to_collect:
     d, b, h = collect_all(pkg)
@@ -56,7 +61,7 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=[os.path.join(os.getcwd(), 'hooks')],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
