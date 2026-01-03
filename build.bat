@@ -154,7 +154,7 @@ if exist "requirements.txt" (
 	    if errorlevel 1 (
 	        echo [WARN] Dependency installation failed. Retrying without optional native dependency: webrtcvad
 	        set "REQ_NO_WEBRTCVAD=%TEMP%\blindrss_requirements_no_webrtcvad.txt"
-	        "%VENV_PYTHON%" -c "import pathlib, re; src=pathlib.Path('requirements.txt'); out=pathlib.Path(r'!REQ_NO_WEBRTCVAD!'); lines=[ln for ln in src.read_text(encoding='utf-8').splitlines() if (ln.strip() and not ln.strip().startswith('#') and ((re.match(r'^([A-Za-z0-9_.-]+)', ln.strip()).group(1).lower() if re.match(r'^([A-Za-z0-9_.-]+)', ln.strip()) else '') != 'webrtcvad'))]; out.write_text('\\n'.join(lines)+'\\n', encoding='utf-8')"
+	        "%VENV_PYTHON%" tools\build_utils.py filter-requirements --input "requirements.txt" --output "!REQ_NO_WEBRTCVAD!" --exclude webrtcvad --exclude webrtcvad-wheels
 	        "%VENV_PYTHON%" -m pip install -r "!REQ_NO_WEBRTCVAD!"
 	        set "RC=!ERRORLEVEL!"
 	        del /f /q "!REQ_NO_WEBRTCVAD!" >nul 2>nul
@@ -286,7 +286,7 @@ if defined SIGN_CERT_THUMBPRINT (
     set "SIGNING_THUMBPRINT=%SIGN_CERT_THUMBPRINT%"
 ) else (
     set "SIGNING_THUMBPRINT_FILE=%TEMP%\\BlindRSS_thumbprint.txt"
-    "%TOOL_PY%" -c "import re, subprocess, pathlib; exe=r'%EXE_PATH%'; tool=r'%SIGNTOOL_EXE%'; result=subprocess.run([tool,'verify','/pa','/v',exe], capture_output=True, text=True); data=(result.stdout or '') + (result.stderr or ''); m=re.search(r'SHA1 hash:\s*([0-9A-Fa-f]{40})', data); pathlib.Path(r'!SIGNING_THUMBPRINT_FILE!').write_text(m.group(1) if m else '')"
+    "%TOOL_PY%" tools\build_utils.py signtool-thumbprint --signtool "%SIGNTOOL_EXE%" --exe "%EXE_PATH%" --output "!SIGNING_THUMBPRINT_FILE!"
     if exist "!SIGNING_THUMBPRINT_FILE!" set /p SIGNING_THUMBPRINT=<"!SIGNING_THUMBPRINT_FILE!"
     if exist "!SIGNING_THUMBPRINT_FILE!" del /f /q "!SIGNING_THUMBPRINT_FILE!" >nul 2>&1
     if defined SIGNING_THUMBPRINT set "SIGNING_THUMBPRINT=!SIGNING_THUMBPRINT: =!"
@@ -306,7 +306,7 @@ exit /b 0
 :hash_zip
 set "ZIP_SHA="
 set "ZIP_HASH_FILE=%TEMP%\\BlindRSS_zip_hash.txt"
-"%TOOL_PY%" -c "import hashlib, pathlib; p=r'%ZIP_PATH%'; h=hashlib.sha256(); f=open(p,'rb'); [h.update(chunk) for chunk in iter(lambda: f.read(1024*1024), b'')]; f.close(); pathlib.Path(r'!ZIP_HASH_FILE!').write_text(h.hexdigest())"
+"%TOOL_PY%" tools\build_utils.py sha256 --input "%ZIP_PATH%" --output "!ZIP_HASH_FILE!"
 if exist "!ZIP_HASH_FILE!" set /p ZIP_SHA=<"!ZIP_HASH_FILE!"
 if exist "!ZIP_HASH_FILE!" del /f /q "!ZIP_HASH_FILE!" >nul 2>&1
 if not defined ZIP_SHA (

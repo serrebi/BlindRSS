@@ -572,29 +572,40 @@ class LocalProvider(RSSProvider):
         finally:
             conn.close()
 
+    def _parse_article_view_filters(self, feed_id: str):
+        filter_read = None  # None=all, 0=unread, 1=read
+        filter_favorite = None  # None=all, 1=favorites only
+        real_feed_id = feed_id or ""
+
+        # Allow stacking prefixes in any order, e.g. "favorites:unread:all".
+        for _ in range(4):
+            if real_feed_id.startswith("favorites:"):
+                filter_favorite = 1
+                real_feed_id = real_feed_id[10:]
+                continue
+            if real_feed_id.startswith("fav:"):
+                filter_favorite = 1
+                real_feed_id = real_feed_id[4:]
+                continue
+            if real_feed_id.startswith("unread:"):
+                filter_read = 0
+                real_feed_id = real_feed_id[7:]
+                continue
+            if real_feed_id.startswith("read:"):
+                filter_read = 1
+                real_feed_id = real_feed_id[5:]
+                continue
+            break
+
+        return real_feed_id, filter_read, filter_favorite
+
     def get_articles(self, feed_id: str) -> List[Article]:
         conn = get_connection()
         try:
             c = conn.cursor()
             
             # Determine filters
-            filter_read = None  # None=all, 0=unread, 1=read
-            filter_favorite = None  # None=all, 1=favorites only
-            real_feed_id = feed_id
-
-            if real_feed_id.startswith("favorites:"):
-                filter_favorite = 1
-                real_feed_id = real_feed_id[10:]
-            elif real_feed_id.startswith("fav:"):
-                filter_favorite = 1
-                real_feed_id = real_feed_id[4:]
-
-            if real_feed_id.startswith("unread:"):
-                filter_read = 0
-                real_feed_id = real_feed_id[7:]
-            elif real_feed_id.startswith("read:"):
-                filter_read = 1
-                real_feed_id = real_feed_id[5:]
+            real_feed_id, filter_read, filter_favorite = self._parse_article_view_filters(feed_id)
 
             sql_parts = ["SELECT id, feed_id, title, url, content, date, author, is_read, is_favorite, media_url, media_type FROM articles"]
             where_clauses = []
@@ -680,23 +691,7 @@ class LocalProvider(RSSProvider):
             c = conn.cursor()
 
             # Determine filters
-            filter_read = None  # None=all, 0=unread, 1=read
-            filter_favorite = None  # None=all, 1=favorites only
-            real_feed_id = feed_id
-
-            if real_feed_id.startswith("favorites:"):
-                filter_favorite = 1
-                real_feed_id = real_feed_id[10:]
-            elif real_feed_id.startswith("fav:"):
-                filter_favorite = 1
-                real_feed_id = real_feed_id[4:]
-
-            if real_feed_id.startswith("unread:"):
-                filter_read = 0
-                real_feed_id = real_feed_id[7:]
-            elif real_feed_id.startswith("read:"):
-                filter_read = 1
-                real_feed_id = real_feed_id[5:]
+            real_feed_id, filter_read, filter_favorite = self._parse_article_view_filters(feed_id)
 
             # 1. Calculate Total
             count_sql_parts = []

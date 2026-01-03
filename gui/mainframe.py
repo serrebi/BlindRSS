@@ -656,13 +656,13 @@ class MainFrame(wx.Frame):
                 wx.TheClipboard.SetData(wx.TextDataObject(article.url))
                 wx.TheClipboard.Close()
 
-    def on_toggle_favorite(self, event=None):
+    def _supports_favorites(self) -> bool:
         try:
-            if not getattr(self.provider, "supports_favorites", lambda: False)():
-                return
+            return bool(getattr(self.provider, "supports_favorites", lambda: False)())
         except Exception:
-            return
+            return False
 
+    def _get_selected_article_index(self) -> int:
         idx = wx.NOT_FOUND
         try:
             idx = self.list_ctrl.GetFirstSelected()
@@ -673,7 +673,88 @@ class MainFrame(wx.Frame):
                 idx = self.list_ctrl.GetFocusedItem()
             except Exception:
                 idx = wx.NOT_FOUND
+        return idx
 
+    def _is_favorites_view(self, view_id: str) -> bool:
+        view_id = view_id or ""
+        return view_id.startswith("favorites:") or view_id.startswith("fav:")
+
+    def _sync_favorite_flag_in_cached_views(self, article_id: str, is_favorite: bool) -> None:
+        try:
+            with getattr(self, "_view_cache_lock", threading.Lock()):
+                for st in (self.view_cache or {}).values():
+                    for a in (st.get("articles") or []):
+                        if getattr(a, "id", None) == article_id:
+                            a.is_favorite = bool(is_favorite)
+        except Exception:
+            pass
+
+    def _update_cached_favorites_view(self, article, is_favorite: bool) -> None:
+        try:
+            fav_view_id = "favorites:all"
+            with getattr(self, "_view_cache_lock", threading.Lock()):
+                fav_st = (self.view_cache or {}).get(fav_view_id)
+                if fav_st is None:
+                    return
+
+                fav_articles = list(fav_st.get("articles") or [])
+                fav_id_set = set(fav_st.get("id_set") or set())
+
+                if bool(is_favorite):
+                    if article.id not in fav_id_set:
+                        fav_articles.append(article)
+                        fav_id_set.add(article.id)
+                        fav_articles.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
+                else:
+                    if article.id in fav_id_set:
+                        fav_id_set.discard(article.id)
+                        fav_articles = [a for a in fav_articles if getattr(a, "id", None) != article.id]
+
+                fav_st["articles"] = fav_articles
+                fav_st["id_set"] = fav_id_set
+                fav_st["last_access"] = time.time()
+        except Exception:
+            pass
+
+    def _remove_article_from_current_list(self, idx: int) -> None:
+        try:
+            self.list_ctrl.Freeze()
+            try:
+                self.current_articles.pop(idx)
+            except Exception:
+                pass
+            try:
+                self.list_ctrl.DeleteItem(idx)
+            except Exception:
+                pass
+            self.list_ctrl.Thaw()
+        except Exception:
+            pass
+
+    def _show_empty_articles_state(self) -> None:
+        try:
+            self._remove_loading_more_placeholder()
+            self.list_ctrl.DeleteAllItems()
+            self.list_ctrl.InsertItem(0, "No articles found.")
+            self.content_ctrl.Clear()
+            self.selected_article_id = None
+        except Exception:
+            pass
+
+    def _update_current_view_cache(self, view_id: str) -> None:
+        try:
+            st = self._ensure_view_state(view_id)
+            st["articles"] = self.current_articles
+            st["id_set"] = {a.id for a in (self.current_articles or [])}
+            st["last_access"] = time.time()
+        except Exception:
+            pass
+
+    def on_toggle_favorite(self, event=None):
+        if not self._supports_favorites():
+            return
+
+        idx = self._get_selected_article_index()
         if idx == wx.NOT_FOUND:
             return
         if self._is_load_more_row(idx):
@@ -691,73 +772,22 @@ class MainFrame(wx.Frame):
 
         article.is_favorite = bool(new_state)
 
-        # Sync favorite flag across cached views for the same article id.
-        try:
-            with getattr(self, "_view_cache_lock", threading.Lock()):
-                for st in (self.view_cache or {}).values():
-                    for a in (st.get("articles") or []):
-                        if getattr(a, "id", None) == article.id:
-                            a.is_favorite = bool(new_state)
-        except Exception:
-            pass
-
-        # Update a cached Favorites view if present.
-        try:
-            fav_view_id = "favorites:all"
-            with getattr(self, "_view_cache_lock", threading.Lock()):
-                fav_st = (self.view_cache or {}).get(fav_view_id)
-                if fav_st is not None:
-                    fav_articles = list(fav_st.get("articles") or [])
-                    fav_id_set = set(fav_st.get("id_set") or set())
-                    if bool(new_state):
-                        if article.id not in fav_id_set:
-                            fav_articles.append(article)
-                            fav_id_set.add(article.id)
-                            fav_articles.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
-                    else:
-                        if article.id in fav_id_set:
-                            fav_id_set.discard(article.id)
-                            fav_articles = [a for a in fav_articles if getattr(a, "id", None) != article.id]
-                    fav_st["articles"] = fav_articles
-                    fav_st["id_set"] = fav_id_set
-                    fav_st["last_access"] = time.time()
-        except Exception:
-            pass
+        self._sync_favorite_flag_in_cached_views(article.id, bool(new_state))
+        self._update_cached_favorites_view(article, bool(new_state))
 
         # If we're in the Favorites view and the item was removed from favorites, drop it from the list.
         fid = getattr(self, "current_feed_id", "") or ""
-        if (fid.startswith("favorites:") or fid.startswith("fav:")) and not bool(new_state):
-            try:
-                self.list_ctrl.Freeze()
-                try:
-                    self.current_articles.pop(idx)
-                except Exception:
-                    pass
-                try:
-                    self.list_ctrl.DeleteItem(idx)
-                except Exception:
-                    pass
-                self.list_ctrl.Thaw()
-            except Exception:
-                pass
+        if self._is_favorites_view(fid) and not bool(new_state):
+            self._remove_article_from_current_list(idx)
 
             # If the list is now empty, show an empty-state row.
             if not self.current_articles:
-                try:
-                    self._remove_loading_more_placeholder()
-                    self.list_ctrl.DeleteAllItems()
-                    self.list_ctrl.InsertItem(0, "No articles found.")
-                    self.content_ctrl.Clear()
-                    self.selected_article_id = None
-                except Exception:
-                    pass
+                self._show_empty_articles_state()
 
             # Keep cache for the current view consistent.
+            self._update_current_view_cache(fid)
             try:
                 st = self._ensure_view_state(fid)
-                st["articles"] = self.current_articles
-                st["id_set"] = {a.id for a in (self.current_articles or [])}
-                st["last_access"] = time.time()
                 if st.get("total") is not None:
                     try:
                         st["total"] = max(0, int(st["total"]) - 1)
