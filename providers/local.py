@@ -578,24 +578,21 @@ class LocalProvider(RSSProvider):
         real_feed_id = feed_id or ""
 
         # Allow stacking prefixes in any order, e.g. "favorites:unread:all".
-        for _ in range(4):
+        while True:
             if real_feed_id.startswith("favorites:"):
                 filter_favorite = 1
                 real_feed_id = real_feed_id[10:]
-                continue
-            if real_feed_id.startswith("fav:"):
+            elif real_feed_id.startswith("fav:"):
                 filter_favorite = 1
                 real_feed_id = real_feed_id[4:]
-                continue
-            if real_feed_id.startswith("unread:"):
+            elif real_feed_id.startswith("unread:"):
                 filter_read = 0
                 real_feed_id = real_feed_id[7:]
-                continue
-            if real_feed_id.startswith("read:"):
+            elif real_feed_id.startswith("read:"):
                 filter_read = 1
                 real_feed_id = real_feed_id[5:]
-                continue
-            break
+            else:
+                break
 
         return real_feed_id, filter_read, filter_favorite
 

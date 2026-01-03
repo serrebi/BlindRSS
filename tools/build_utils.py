@@ -38,7 +38,7 @@ def sha256_file(input_path: Path) -> str:
     return h.hexdigest()
 
 
-def signtool_thumbprint(signtool_exe: Path, exe_path: Path):
+def signtool_thumbprint(signtool_exe: Path, exe_path: Path) -> str:
     result = subprocess.run(
         [str(signtool_exe), "verify", "/pa", "/v", str(exe_path)],
         capture_output=True,
@@ -70,29 +70,24 @@ def main():
 
     args = parser.parse_args()
 
-    if args.cmd == "filter-requirements":
-        filter_requirements(Path(args.input), Path(args.output), args.exclude)
-        return 0
+    match args.cmd:
+        case "filter-requirements":
+            filter_requirements(Path(args.input), Path(args.output), args.exclude)
+        case "sha256":
+            digest = sha256_file(Path(args.input))
+            if args.output:
+                Path(args.output).write_text(digest, encoding="utf-8")
+            else:
+                print(digest)
+        case "signtool-thumbprint":
+            digest = signtool_thumbprint(Path(args.signtool), Path(args.exe))
+            if args.output:
+                Path(args.output).write_text(digest, encoding="utf-8")
+            else:
+                print(digest)
 
-    if args.cmd == "sha256":
-        digest = sha256_file(Path(args.input))
-        if args.output:
-            Path(args.output).write_text(digest, encoding="utf-8")
-        else:
-            print(digest)
-        return 0
-
-    if args.cmd == "signtool-thumbprint":
-        digest = signtool_thumbprint(Path(args.signtool), Path(args.exe))
-        if args.output:
-            Path(args.output).write_text(digest, encoding="utf-8")
-        else:
-            print(digest)
-        return 0
-
-    raise SystemExit(f"Unknown command: {args.cmd}")
+    return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
