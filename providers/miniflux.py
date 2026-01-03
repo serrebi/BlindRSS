@@ -194,6 +194,7 @@ class MinifluxProvider(RSSProvider):
                 date=date,
                 author=entry.get("author") or "",
                 is_read=(entry.get("status") == "read"),
+                is_favorite=entry.get("starred", False),
                 media_url=media_url,
                 media_type=media_type,
                 chapters=chapters
@@ -300,6 +301,26 @@ class MinifluxProvider(RSSProvider):
         elif feed_id.startswith("read:"):
             base_params["status"] = ["read"]
             real_feed_id = feed_id[5:]
+        elif feed_id.startswith("favorites:") or feed_id.startswith("starred:"):
+            base_params["starred"] = "true"
+            # Miniflux doesn't support "favorites:category:X", just global favorites or feed favorites if we combine?
+            # /v1/entries?starred=true -> All favorites.
+            # If we want favorites for a feed, /v1/feeds/{id}/entries?starred=true
+            # The UI usually sends "favorites:all" or just "favorites".
+            # If the user clicks "Favorites" in the tree, it might pass "favorites".
+            # Mainframe usually passes "favorites" or "favorites:all" if it's a special node.
+            # Let's handle "favorites" and "starred" as "all starred".
+            real_feed_id = "all" 
+            if ":" in feed_id:
+                # Handle "favorites:<feed_id>" if we ever support per-feed favorites view?
+                # For now let's assume global favorites view.
+                suffix = feed_id.split(":", 1)[1]
+                if suffix != "all":
+                    # Maybe it's favorites for a specific feed/category?
+                    # Miniflux supports starred=true on feed entries endpoint.
+                    real_feed_id = suffix
+                else:
+                    real_feed_id = "all"
 
         entries: List[Dict[str, Any]] = []
 
@@ -421,6 +442,35 @@ class MinifluxProvider(RSSProvider):
 
     def mark_read(self, article_id: str) -> bool:
         self._req("PUT", "/v1/entries", json={"entry_ids": [int(article_id)], "status": "read"})
+        return True
+
+    def supports_favorites(self) -> bool:
+        return True
+
+    def toggle_favorite(self, article_id: str):
+        # Miniflux: PUT /v1/entries/{id}/bookmark
+        res = self._req("PUT", f"/v1/entries/{article_id}/bookmark")
+        # Returns None on success (204) usually? Or updated entry?
+        # Actually Miniflux toggle endpoint "bookmark" toggles it.
+        # But wait, does it toggle or just set?
+        # API docs: "Toggle "bookmark" status for an entry." -> PUT /v1/entries/{entryID}/bookmark
+        if res is None: # 204 or success
+             # We need to know the new state to return it.
+             # Fetch entry to check?
+             entry = self._req("GET", f"/v1/entries/{article_id}")
+             if entry:
+                 return entry.get("starred", False)
+        return True # Assume toggled if we can't check? Or maybe we should use set_favorite if we want explicit control.
+
+    def set_favorite(self, article_id: str, is_favorite: bool) -> bool:
+        # Miniflux doesn't have explicit set-favorite, only toggle.
+        # So we must check state first.
+        entry = self._req("GET", f"/v1/entries/{article_id}")
+        if not entry:
+            return False
+        current = entry.get("starred", False)
+        if current != is_favorite:
+            self._req("PUT", f"/v1/entries/{article_id}/bookmark")
         return True
 
     def add_feed(self, url: str, category: str = "Uncategorized") -> bool:

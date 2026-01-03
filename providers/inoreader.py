@@ -63,6 +63,8 @@ class InoreaderProvider(RSSProvider):
             elif feed_id.startswith("read:"):
                 real_feed_id = feed_id[5:]
                 params["it"] = "user/-/state/com.google/read"
+            elif feed_id.startswith("favorites:") or feed_id.startswith("starred:"):
+                real_feed_id = "user/-/state/com.google/starred"
 
             url = f"{self.base_url}/stream/contents/{real_feed_id}"
             resp = requests.get(url, headers=self._headers(), params=params)
@@ -101,6 +103,14 @@ class InoreaderProvider(RSSProvider):
 
                 chapters = chapters_map.get(article_id, [])
 
+                is_fav = False
+                is_read_flag = False
+                for cat in item.get("categories", []):
+                    if "starred" in cat:
+                        is_fav = True
+                    if "read" in cat and "com.google" in cat:
+                        is_read_flag = True
+
                 articles.append(Article(
                     id=article_id,
                     feed_id=item["origin"]["streamId"],
@@ -109,7 +119,8 @@ class InoreaderProvider(RSSProvider):
                     content=content,
                     date=date,
                     author=item.get("author", "Unknown"),
-                    is_read=False,
+                    is_read=is_read_flag,
+                    is_favorite=is_fav,
                     media_url=media_url,
                     media_type=media_type,
                     chapters=chapters
@@ -139,6 +150,38 @@ class InoreaderProvider(RSSProvider):
         except Exception as e:
             log.error(f"Inoreader Mark Read Error: {e}")
             return False
+
+    def supports_favorites(self) -> bool:
+        return True
+
+    def set_favorite(self, article_id: str, is_favorite: bool) -> bool:
+        if not self.token: return False
+        try:
+            action = "a" if is_favorite else "r"
+            requests.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
+                "i": article_id,
+                action: "user/-/state/com.google/starred"
+            })
+            return True
+        except Exception as e:
+            log.error(f"Inoreader Set Favorite Error: {e}")
+            return False
+
+    def toggle_favorite(self, article_id: str):
+        if not self.token: return None
+        try:
+            resp = requests.get(f"{self.base_url}/stream/items/ids", headers=self._headers(), params={"i": article_id, "output": "json"})
+            if resp.ok:
+                items = resp.json().get("items", [])
+                if items:
+                    cats = items[0].get("categories", [])
+                    is_fav = any("starred" in c for c in cats)
+                    new_state = not is_fav
+                    self.set_favorite(article_id, new_state)
+                    return new_state
+        except:
+            pass
+        return None
 
     def add_feed(self, url: str, category: str = None) -> bool:
         if not self.token: return False

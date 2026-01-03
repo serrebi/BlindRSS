@@ -132,6 +132,8 @@ class TheOldReaderProvider(RSSProvider):
             elif real_feed_id.startswith("category:"):
                 label = real_feed_id.split(":", 1)[1]
                 stream_id = f"user/-/label/{label}"
+            elif real_feed_id.startswith("favorites:") or real_feed_id.startswith("starred:"):
+                stream_id = "user/-/state/com.google/starred"
             else:
                 stream_id = real_feed_id
             
@@ -193,6 +195,14 @@ class TheOldReaderProvider(RSSProvider):
                 
                 chapters = chapters_map.get(article_id, [])
 
+                is_fav = False
+                is_read_flag = False
+                for cat in item.get("categories", []):
+                    if "starred" in cat:
+                        is_fav = True
+                    if "read" in cat and "com.google" in cat:
+                        is_read_flag = True
+
                 articles.append(Article(
                     id=article_id,
                     feed_id=item.get("origin", {}).get("streamId", feed_id),
@@ -201,7 +211,8 @@ class TheOldReaderProvider(RSSProvider):
                     content=content,
                     date=date,
                     author=item.get("author", "Unknown"),
-                    is_read=False,
+                    is_read=is_read_flag,
+                    is_favorite=is_fav,
                     media_url=media_url,
                     media_type=media_type,
                     chapters=chapters
@@ -228,6 +239,39 @@ class TheOldReaderProvider(RSSProvider):
             return True
         except:
             return False
+
+    def supports_favorites(self) -> bool:
+        return True
+
+    def set_favorite(self, article_id: str, is_favorite: bool) -> bool:
+        if not self._login(): return False
+        try:
+            action = "a" if is_favorite else "r"
+            requests.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
+                "i": article_id,
+                action: "user/-/state/com.google/starred"
+            })
+            return True
+        except Exception as e:
+            log.error(f"TheOldReader Set Favorite Error: {e}")
+            return False
+
+    def toggle_favorite(self, article_id: str):
+        if not self._login(): return None
+        try:
+            # TheOldReader API supports stream/items/ids
+            resp = requests.get(f"{self.base_url}/stream/items/ids", headers=self._headers(), params={"i": article_id, "output": "json"})
+            if resp.ok:
+                items = resp.json().get("items", [])
+                if items:
+                    cats = items[0].get("categories", [])
+                    is_fav = any("starred" in c for c in cats)
+                    new_state = not is_fav
+                    self.set_favorite(article_id, new_state)
+                    return new_state
+        except:
+            pass
+        return None
 
     def add_feed(self, url: str, category: str = None) -> bool:
         if not self._login(): return False
