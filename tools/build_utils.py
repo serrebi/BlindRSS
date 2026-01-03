@@ -15,7 +15,7 @@ def _extract_requirement_name(line: str):
     return (m.group(1).lower() if m else None)
 
 
-def filter_requirements(input_path: Path, output_path: Path, exclude):
+def filter_requirements(input_path: Path, output_path: Path, exclude: list[str]):
     exclude = {e.lower() for e in (exclude or []) if e}
     if not exclude:
         raise SystemExit("No excluded package names provided.")

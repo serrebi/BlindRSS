@@ -4,7 +4,7 @@ import uuid
 import threading
 import sqlite3
 import concurrent.futures
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 from urllib.parse import urlparse
 from .base import RSSProvider
@@ -572,7 +572,7 @@ class LocalProvider(RSSProvider):
         finally:
             conn.close()
 
-    def _parse_article_view_filters(self, feed_id: str):
+    def _parse_article_view_filters(self, feed_id: str) -> Tuple[str, Optional[int], Optional[int]]:
         filter_read = None  # None=all, 0=unread, 1=read
         filter_favorite = None  # None=all, 1=favorites only
         real_feed_id = feed_id or ""
