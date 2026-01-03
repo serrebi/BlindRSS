@@ -659,7 +659,8 @@ class MainFrame(wx.Frame):
     def _supports_favorites(self) -> bool:
         try:
             return bool(getattr(self.provider, "supports_favorites", lambda: False)())
-        except Exception:
+        except Exception as e:
+            print(f"Error checking provider support for favorites: {e}")
             return False
 
     def _get_selected_article_index(self) -> int:
@@ -686,8 +687,8 @@ class MainFrame(wx.Frame):
                     for a in (st.get("articles") or []):
                         if getattr(a, "id", None) == article_id:
                             a.is_favorite = bool(is_favorite)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error syncing favorite flag in cached views: {e}")
 
     def _update_cached_favorites_view(self, article, is_favorite: bool) -> None:
         try:
@@ -713,23 +714,32 @@ class MainFrame(wx.Frame):
                 fav_st["articles"] = fav_articles
                 fav_st["id_set"] = fav_id_set
                 fav_st["last_access"] = time.time()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error updating cached favorites view: {e}")
 
     def _remove_article_from_current_list(self, idx: int) -> None:
+        froze = False
         try:
             self.list_ctrl.Freeze()
+            froze = True
+        except Exception as e:
+            print(f"Error freezing list_ctrl: {e}")
+
+        try:
             try:
                 self.current_articles.pop(idx)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error popping article from current_articles at index {idx}: {e}")
             try:
                 self.list_ctrl.DeleteItem(idx)
-            except Exception:
-                pass
-            self.list_ctrl.Thaw()
-        except Exception:
-            pass
+            except Exception as e:
+                print(f"Error deleting item from list_ctrl at index {idx}: {e}")
+        finally:
+            if froze:
+                try:
+                    self.list_ctrl.Thaw()
+                except Exception as e:
+                    print(f"Error thawing list_ctrl: {e}")
 
     def _show_empty_articles_state(self) -> None:
         try:
@@ -738,8 +748,8 @@ class MainFrame(wx.Frame):
             self.list_ctrl.InsertItem(0, "No articles found.")
             self.content_ctrl.Clear()
             self.selected_article_id = None
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error showing empty articles state: {e}")
 
     def _update_current_view_cache(self, view_id: str) -> None:
         try:
@@ -747,8 +757,8 @@ class MainFrame(wx.Frame):
             st["articles"] = self.current_articles
             st["id_set"] = {a.id for a in (self.current_articles or [])}
             st["last_access"] = time.time()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error updating current view cache for view_id '{view_id}': {e}")
 
     def on_toggle_favorite(self, event=None):
         if not self._supports_favorites():
