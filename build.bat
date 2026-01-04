@@ -244,7 +244,11 @@ if exist "main.spec" (
     echo [WARN] main.spec not found. Running basic one-file build...
     "%VENV_PYTHON%" -m PyInstaller --onefile --noconfirm --name BlindRSS main.py
 )
-if errorlevel 1 exit /b 1
+set "PYI_RC=%ERRORLEVEL%"
+if not "%PYI_RC%"=="0" (
+    call :restore_preserved_dist_data
+    exit /b %PYI_RC%
+)
 
 echo [BlindRSS Build] Refreshing VLC plugins cache...
 set "VLC_DIR=C:\Program Files\VideoLAN\VLC"
@@ -269,19 +273,26 @@ echo [BlindRSS Build] Staging companion files into dist...
 if exist "%SCRIPT_DIR%README.md" copy /Y "%SCRIPT_DIR%README.md" "%SCRIPT_DIR%dist\README.md" >nul
 if exist "%SCRIPT_DIR%update_helper.bat" copy /Y "%SCRIPT_DIR%update_helper.bat" "%SCRIPT_DIR%dist\BlindRSS\update_helper.bat" >nul
 
-if defined PRESERVE_DIR (
-    if exist "!PRESERVE_DIR!\\rss.db" (
-        echo [BlindRSS Build] Restoring preserved dist user data...
-        for %%F in (rss.db rss.db-wal rss.db-shm) do (
-            if exist "!PRESERVE_DIR!\\%%F" copy /Y "!PRESERVE_DIR!\\%%F" "%SCRIPT_DIR%dist\\BlindRSS\\%%F" >nul
-        )
-        if exist "!PRESERVE_DIR!\\podcasts" xcopy /E /I /Y "!PRESERVE_DIR!\\podcasts" "%SCRIPT_DIR%dist\\BlindRSS\\podcasts" >nul 2>nul
-    )
-    rd /s /q "!PRESERVE_DIR!" >nul 2>nul
-)
+call :restore_preserved_dist_data
 
 echo [BlindRSS Build] Copying exe to repo root...
 if exist "%SCRIPT_DIR%dist\BlindRSS.exe" copy /Y "%SCRIPT_DIR%dist\BlindRSS.exe" "%SCRIPT_DIR%BlindRSS.exe" >nul
+exit /b 0
+
+:restore_preserved_dist_data
+if not defined PRESERVE_DIR exit /b 0
+if not exist "!PRESERVE_DIR!\\rss.db" goto :restore_preserved_dist_data_cleanup
+
+echo [BlindRSS Build] Restoring preserved dist user data...
+if not exist "%SCRIPT_DIR%dist\\BlindRSS" mkdir "%SCRIPT_DIR%dist\\BlindRSS" >nul 2>nul
+for %%F in (rss.db rss.db-wal rss.db-shm) do (
+    if exist "!PRESERVE_DIR!\\%%F" copy /Y "!PRESERVE_DIR!\\%%F" "%SCRIPT_DIR%dist\\BlindRSS\\%%F" >nul
+)
+if exist "!PRESERVE_DIR!\\podcasts" xcopy /E /I /Y "!PRESERVE_DIR!\\podcasts" "%SCRIPT_DIR%dist\\BlindRSS\\podcasts" >nul 2>nul
+
+:restore_preserved_dist_data_cleanup
+rd /s /q "!PRESERVE_DIR!" >nul 2>nul
+set "PRESERVE_DIR="
 exit /b 0
 
 :sign_exe
