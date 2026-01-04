@@ -147,14 +147,20 @@ def _extract_meta_content(soup: BeautifulSoup, candidates: List[dict]) -> str:
     return ""
 
 
+def _parse_html_soup(html: Optional[str], *, context: str) -> Optional[BeautifulSoup]:
+    if not html:
+        return None
+    try:
+        return BeautifulSoup(html, "html.parser")
+    except Exception:
+        LOG.debug("Failed to parse HTML for %s", context, exc_info=True)
+        return None
+
+
 def _extract_meta_description(*, html: Optional[str] = None, soup: Optional[BeautifulSoup] = None) -> str:
     if soup is None:
-        if not html:
-            return ""
-        try:
-            soup = BeautifulSoup(html, "html.parser")
-        except Exception:
-            LOG.debug("Failed to parse HTML for meta description", exc_info=True)
+        soup = _parse_html_soup(html, context="meta description")
+        if soup is None:
             return ""
 
     try:
@@ -169,12 +175,8 @@ def _extract_meta_description(*, html: Optional[str] = None, soup: Optional[Beau
 
 def _extract_page_title(*, html: Optional[str] = None, soup: Optional[BeautifulSoup] = None) -> str:
     if soup is None:
-        if not html:
-            return ""
-        try:
-            soup = BeautifulSoup(html, "html.parser")
-        except Exception:
-            LOG.debug("Failed to parse HTML for page title", exc_info=True)
+        soup = _parse_html_soup(html, context="page title")
+        if soup is None:
             return ""
 
     try:
