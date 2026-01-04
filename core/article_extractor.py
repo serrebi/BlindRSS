@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import time
+import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Set
 from urllib.parse import urljoin, urlsplit
@@ -18,6 +19,8 @@ from urllib.parse import urljoin, urlsplit
 from bs4 import BeautifulSoup
 
 from core import utils
+
+LOG = logging.getLogger(__name__)
 
 try:
     import trafilatura
@@ -142,7 +145,7 @@ def _extract_meta_description(html: str) -> str:
             ],
         )
     except Exception:
-        pass
+        LOG.debug("Failed to extract meta description", exc_info=True)
     return ""
 
 
@@ -165,7 +168,7 @@ def _extract_page_title(html: str) -> str:
         if t and t.get_text(strip=True):
             return t.get_text(strip=True)
     except Exception:
-        pass
+        LOG.debug("Failed to extract page title", exc_info=True)
     return ""
 
 
@@ -410,18 +413,17 @@ def _trafilatura_extract_text(html: str, url: str = "") -> str:
     # Precision-first
     txt_prec = _do_extract({"favor_precision": True, "favor_recall": False})
     prec = (txt_prec or "").strip()
-    if prec:
+    if prec and len(prec) >= _LEAD_RECOVERY_MIN_PRECISION_LEN:
         prec_norm = _normalize_for_match(prec)
-        if len(prec) >= _LEAD_RECOVERY_MIN_PRECISION_LEN:
-            recovered = _attempt_lead_recovery(
-                html,
-                url,
-                precision_text=prec,
-                precision_norm=prec_norm,
-                do_extract=_do_extract,
-            )
-            if recovered:
-                return recovered
+        recovered = _attempt_lead_recovery(
+            html,
+            url,
+            precision_text=prec,
+            precision_norm=prec_norm,
+            do_extract=_do_extract,
+        )
+        if recovered:
+            return recovered
 
         return prec
 
