@@ -892,18 +892,10 @@ class MainFrame(wx.Frame):
             wx.CallAfter(self._flush_feed_refresh_progress)
         except Exception:
             # Likely during shutdown. We failed to schedule a flush.
-            # As a fallback, drain pending items and try to post them individually.
-            pending_items = []
             with self._refresh_progress_lock:
-                pending_items = list(self._refresh_progress_pending.values())
                 self._refresh_progress_pending.clear()
                 self._refresh_progress_flush_scheduled = False
-
-            for st in pending_items:
-                try:
-                    wx.CallAfter(self._apply_feed_refresh_progress, st)
-                except Exception:
-                    log.debug("Failed to schedule feed refresh progress update for an item", exc_info=True)
+            log.debug("Failed to schedule feed refresh progress flush, likely during shutdown.", exc_info=True)
 
     def _flush_feed_refresh_progress(self):
         with self._refresh_progress_lock:

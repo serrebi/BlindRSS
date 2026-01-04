@@ -23,6 +23,12 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 log = logging.getLogger(__name__)
 
+_REFRESH_WORKERS_MIN_CAP = 4
+_REFRESH_WORKERS_MAX_CAP = 16
+_REFRESH_WORKERS_PER_CPU_MULTIPLIER = 2
+_REFRESH_PER_HOST_MIN_CAP = 2
+_REFRESH_PER_HOST_MAX_CAP = 8
+
 class LocalProvider(RSSProvider):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -50,11 +56,14 @@ class LocalProvider(RSSProvider):
         # Refresh is a mix of network I/O and CPU-heavy parsing (feedparser/BeautifulSoup).
         # Unbounded concurrency quickly starves the GUI thread due to GIL contention and DB churn.
         cpu_count = os.cpu_count() or 4
-        hard_workers_cap = max(4, min(16, int(cpu_count) * 2))
+        hard_workers_cap = max(
+            _REFRESH_WORKERS_MIN_CAP,
+            min(_REFRESH_WORKERS_MAX_CAP, int(cpu_count) * _REFRESH_WORKERS_PER_CPU_MULTIPLIER),
+        )
         max_workers = min(configured_workers, hard_workers_cap, len(feeds))
 
         # Per-host concurrency beyond a small number rarely helps and can trigger rate limiting.
-        hard_per_host_cap = max(2, min(8, max_workers))
+        hard_per_host_cap = max(_REFRESH_PER_HOST_MIN_CAP, min(_REFRESH_PER_HOST_MAX_CAP, max_workers))
         per_host_limit = min(configured_per_host, hard_per_host_cap)
 
         if configured_workers != max_workers:

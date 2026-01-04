@@ -21,7 +21,19 @@ def _configure_conn(conn: sqlite3.Connection) -> None:
 
 
 def _is_locked_error(error: Exception) -> bool:
-    return isinstance(error, sqlite3.OperationalError) and ("locked" in str(error).lower())
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+
+    # Prefer SQLite error codes when available (Python 3.11+).
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is not None:
+        try:
+            return int(code) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+        except Exception:
+            pass
+
+    # Fallback for older Python versions / unknown errors.
+    return "locked" in str(error).lower()
 
 
 def _execute_write_op(op_name: str, op: Callable[[sqlite3.Cursor], None]) -> None:
