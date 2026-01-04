@@ -233,7 +233,6 @@ def _attempt_lead_recovery(
     if not _lead_recovery_enabled(url):
         return None
 
-    soup = None
     try:
         soup = BeautifulSoup(html, "html.parser")
     except Exception:
