@@ -395,21 +395,13 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
         except Exception as e:
             log.warning(f"Chapter fetch failed for {chapter_url}: {e}")
 
-    try:
-        if not bool(allow_id3):
-            return chapters_out
-    except Exception:
-        pass
+    if not allow_id3:
+        return chapters_out
 
     # 2) ID3 CHAP frames if audio
-    try:
-        media_type_l = (media_type or "").lower()
-    except Exception:
-        media_type_l = ""
-    try:
-        media_path_l = (urllib.parse.urlsplit(str(media_url or "")).path or "").lower()
-    except Exception:
-        media_path_l = str(media_url or "").lower()
+    media_url_str = str(media_url or "")
+    media_type_l = str(media_type or "").lower()
+    media_path_l = urllib.parse.urlsplit(media_url_str).path.lower() or media_url_str.lower()
     audio_exts = (".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".wav", ".flac")
 
     if media_url and (media_type_l.startswith("audio/") or "podcast" in media_type_l or media_path_l.endswith(audio_exts)):
