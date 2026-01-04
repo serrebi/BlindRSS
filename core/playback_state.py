@@ -16,8 +16,8 @@ _PLAYBACK_STATE_BUSY_TIMEOUT_MS = 500
 def _configure_conn(conn: sqlite3.Connection) -> None:
     try:
         conn.execute(f"PRAGMA busy_timeout={int(_PLAYBACK_STATE_BUSY_TIMEOUT_MS)}")
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        LOG.debug("Failed to set playback_state busy_timeout pragma: %s", e)
 
 
 def _is_locked_error(error: Exception) -> bool:

@@ -227,7 +227,7 @@ if /I "%MODE%"=="build" (
         mkdir "!PRESERVE_DIR!" >nul 2>nul
         echo [BlindRSS Build] Preserving dist user data...
         for %%F in (rss.db rss.db-wal rss.db-shm) do (
-            if exist "!DIST_APP_DIR!\\%%F" copy /Y "!DIST_APP_DIR!\\%%F" "!PRESERVE_DIR!\\%%F" >nul
+            if exist "!DIST_APP_DIR!\\%%F" copy /Y "!DIST_APP_DIR!\\%%F" "!PRESERVE_DIR!\\%%F" >nul 2>nul
         )
         if exist "!DIST_APP_DIR!\\podcasts" xcopy /E /I /Y "!DIST_APP_DIR!\\podcasts" "!PRESERVE_DIR!\\podcasts" >nul 2>nul
     )
@@ -286,7 +286,7 @@ if not exist "!PRESERVE_DIR!\\rss.db" goto :restore_preserved_dist_data_cleanup
 echo [BlindRSS Build] Restoring preserved dist user data...
 if not exist "%SCRIPT_DIR%dist\\BlindRSS" mkdir "%SCRIPT_DIR%dist\\BlindRSS" >nul 2>nul
 for %%F in (rss.db rss.db-wal rss.db-shm) do (
-    if exist "!PRESERVE_DIR!\\%%F" copy /Y "!PRESERVE_DIR!\\%%F" "%SCRIPT_DIR%dist\\BlindRSS\\%%F" >nul
+    if exist "!PRESERVE_DIR!\\%%F" copy /Y "!PRESERVE_DIR!\\%%F" "%SCRIPT_DIR%dist\\BlindRSS\\%%F" >nul 2>nul
 )
 if exist "!PRESERVE_DIR!\\podcasts" xcopy /E /I /Y "!PRESERVE_DIR!\\podcasts" "%SCRIPT_DIR%dist\\BlindRSS\\podcasts" >nul 2>nul
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+
 from PyInstaller.utils.hooks import copy_metadata
 
 hiddenimports = ["webrtcvad"]
@@ -15,6 +17,5 @@ for dist_name in ("webrtcvad", "webrtcvad-wheels", "webrtcvad_wheels"):
     try:
         datas += copy_metadata(dist_name)
         break
-    except Exception:
+    except PackageNotFoundError:
         pass
-
