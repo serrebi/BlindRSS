@@ -67,8 +67,69 @@ def _split_paragraphs(text: str) -> List[str]:
     t = _normalize_whitespace(text or "")
     if not t:
         return []
-    parts = [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
-    return parts
+    if "\n\n" in t:
+        return [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
+    # Trafilatura often emits single-newline-separated paragraphs (no blank lines).
+    return [p.strip() for p in t.split("\n") if p.strip()]
+
+
+def _normalize_for_match(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+
+def _strip_trailing_ellipsis(text: str) -> str:
+    return re.sub(r"(?:\.\.\.|…)\s*$", "", (text or "").strip()).strip()
+
+
+def _strip_title_suffix(title: str) -> str:
+    t = (title or "").strip()
+    for sep in (" | ", " - ", " — ", " – "):
+        if sep in t:
+            t = t.split(sep, 1)[0].strip()
+    return t
+
+
+def _extract_meta_description(html: str) -> str:
+    if not html:
+        return ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for attrs in (
+            {"property": "og:description"},
+            {"name": "description"},
+            {"name": "twitter:description"},
+        ):
+            tag = soup.find("meta", attrs=attrs)
+            if tag and tag.get("content"):
+                content = (tag.get("content") or "").strip()
+                if content:
+                    return content
+    except Exception:
+        return ""
+    return ""
+
+
+def _extract_page_title(html: str) -> str:
+    if not html:
+        return ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for attrs in (
+            {"property": "og:title"},
+            {"name": "twitter:title"},
+            {"name": "title"},
+        ):
+            tag = soup.find("meta", attrs=attrs)
+            if tag and tag.get("content"):
+                content = (tag.get("content") or "").strip()
+                if content:
+                    return content
+        t = soup.find("title")
+        if t and t.get_text(strip=True):
+            return t.get_text(strip=True)
+    except Exception:
+        return ""
+    return ""
 
 
 _ZDNET_BOILERPLATE_PATTERNS: List[re.Pattern] = [
@@ -197,6 +258,8 @@ def _trafilatura_extract_text(html: str, url: str = "") -> str:
     CPU considerations:
     - Prefer precision-first extraction to reduce boilerplate.
     - Only fall back to recall mode when the precision result is clearly too short.
+    - For some sites, precision extraction may skip a lead/intro; in that case, try recall and
+      prepend the missing intro paragraphs to the precision result.
     """
     if not html or trafilatura is None:
         return ""
@@ -230,15 +293,62 @@ def _trafilatura_extract_text(html: str, url: str = "") -> str:
             return ""
 
     # Precision-first
-    txt = _do_extract({"favor_precision": True, "favor_recall": False})
-    if txt:
-        t = (txt or "").strip()
-        if len(t) >= 200:
-            return t
+    txt_prec = _do_extract({"favor_precision": True, "favor_recall": False})
+    prec = (txt_prec or "").strip()
+    if prec:
+        if len(prec) >= 200:
+            # If the page has a meaningful meta description that is not present in the precision
+            # extraction, it likely indicates a missing lead/intro paragraph.
+            desc = _strip_trailing_ellipsis(_extract_meta_description(html))
+            desc_norm = _normalize_for_match(desc)
+            prec_norm = _normalize_for_match(prec)
+
+            should_try_recall = False
+            desc_snippet = ""
+            if desc_norm and len(desc_norm) >= 60:
+                desc_snippet = desc_norm[:120]
+                if desc_snippet and desc_snippet not in prec_norm:
+                    should_try_recall = True
+
+            if should_try_recall:
+                txt_rec = _do_extract({"favor_recall": True})
+                rec = (txt_rec or "").strip()
+                if rec:
+                    rec_norm = _normalize_for_match(rec)
+                    # Only attempt to recover intro if the recall result actually includes the meta description.
+                    if desc_snippet and desc_snippet in rec_norm:
+                        page_title = _strip_title_suffix(_extract_page_title(html))
+                        page_title_norm = _normalize_for_match(page_title)
+
+                        intro: List[str] = []
+                        desc_hit = False
+                        for p in _split_paragraphs(rec)[:8]:
+                            pn = _normalize_for_match(p)
+                            if not pn:
+                                continue
+                            if pn in prec_norm:
+                                break
+                            if page_title_norm and pn == page_title_norm:
+                                continue
+                            if len(p) < 40 or len(p) > 800:
+                                continue
+                            if not re.search(r"[.!?]", p) and len(p) < 120:
+                                continue
+                            if desc_snippet[:80] and desc_snippet[:80] in pn:
+                                desc_hit = True
+                            intro.append(p)
+                            if len(intro) >= 2:
+                                break
+
+                        if intro and desc_hit:
+                            combined = "\n\n".join(intro + [prec])
+                            return (combined or "").strip()
+
+            return prec
 
     # Recall fallback (only when precision is empty/too short)
-    txt = _do_extract({"favor_recall": True})
-    return (txt or "").strip()
+    txt_rec = _do_extract({"favor_recall": True})
+    return (txt_rec or "").strip()
 
 
 def _soup_extract_text(html: str) -> str:
