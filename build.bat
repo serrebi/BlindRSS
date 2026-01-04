@@ -28,7 +28,7 @@ if defined SIGNTOOL_PATH (
 if /I "%MODE%"=="dry-run" (
     call :detect_python
     if errorlevel 1 exit /b 1
-    set "TOOL_PY=%PYTHON_EXE%"
+    set "TOOL_PY=!PYTHON_EXE!"
     call :compute_next_version
     if errorlevel 1 exit /b 1
     echo [Dry Run] Latest tag: !LATEST_TAG!
