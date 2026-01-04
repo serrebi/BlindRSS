@@ -348,11 +348,25 @@ class PlayerFrame(wx.Frame):
     # Persistent resume (SQLite overlay)
     # ---------------------------------------------------------------------
 
-    def _resume_feature_enabled(self) -> bool:
+    def _get_config_int(self, key: str, default: int) -> int:
         try:
-            return bool(self.config_manager.get("resume_playback", True))
-        except Exception:
-            return True
+            return int(self.config_manager.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _get_config_bool(self, key: str, default: bool) -> bool:
+        val = self.config_manager.get(key, default)
+        if isinstance(val, str):
+            norm = val.strip().lower()
+            if norm in ("true", "1", "yes", "on"):
+                return True
+            if norm in ("false", "0", "no", "off"):
+                return False
+            return bool(default)
+        return bool(val)
+
+    def _resume_feature_enabled(self) -> bool:
+        return self._get_config_bool("resume_playback", True)
 
     def _get_resume_id(self) -> str | None:
         rid = getattr(self, "_resume_id", None)
@@ -383,27 +397,15 @@ class PlayerFrame(wx.Frame):
             # We previously learned this stream is not seekable, so avoid an auto-resume loop.
             return
 
-        try:
-            pos_ms = int(state.position_ms or 0)
-        except Exception:
-            pos_ms = 0
+        pos_ms = state.position_ms
 
-        try:
-            min_ms = int(self.config_manager.get("resume_min_ms", 20000) or 20000)
-        except Exception:
-            min_ms = 20000
+        min_ms = self._get_config_int("resume_min_ms", 20000)
         if pos_ms < max(0, min_ms):
             return
 
-        try:
-            complete_threshold_ms = int(self.config_manager.get("resume_complete_threshold_ms", 60000) or 60000)
-        except Exception:
-            complete_threshold_ms = 60000
+        complete_threshold_ms = self._get_config_int("resume_complete_threshold_ms", 60000)
 
-        try:
-            dur_ms = int(state.duration_ms) if state.duration_ms is not None else 0
-        except Exception:
-            dur_ms = 0
+        dur_ms = state.duration_ms or 0
         if dur_ms > 0 and (dur_ms - pos_ms) <= max(0, complete_threshold_ms):
             # Treat items close to the end as completed (avoid resuming to the credits).
             try:
@@ -418,26 +420,20 @@ class PlayerFrame(wx.Frame):
                 log.exception("Failed to mark playback_state as completed")
             return
 
-        try:
-            back_ms = int(self.config_manager.get("resume_back_ms", 10000) or 10000)
-        except Exception:
-            back_ms = 10000
+        back_ms = self._get_config_int("resume_back_ms", 10000)
         back_ms = max(0, back_ms)
-        target_ms = max(0, int(pos_ms) - int(back_ms))
+        target_ms = max(0, pos_ms - back_ms)
 
-        try:
-            self._pending_resume_seek_ms = int(target_ms)
-            self._pending_resume_seek_attempts = 0
-            self._pending_resume_paused = False
-            self._resume_restore_inflight = True
-            self._resume_restore_id = str(resume_id)
-            self._resume_restore_target_ms = int(target_ms)
-            self._resume_restore_attempts = 0
-            self._resume_restore_last_attempt_ts = 0.0
-            # Avoid writing a 0-position back to the DB while the resume seek is still pending.
-            self._resume_last_save_ts = float(time.monotonic())
-        except Exception:
-            pass
+        self._pending_resume_seek_ms = target_ms
+        self._pending_resume_seek_attempts = 0
+        self._pending_resume_paused = False
+        self._resume_restore_inflight = True
+        self._resume_restore_id = resume_id
+        self._resume_restore_target_ms = target_ms
+        self._resume_restore_attempts = 0
+        self._resume_restore_last_attempt_ts = 0.0
+        # Avoid writing a 0-position back to the DB while the resume seek is still pending.
+        self._resume_last_save_ts = time.monotonic()
 
     def _persist_playback_position(self, force: bool = False) -> None:
         if not self._resume_feature_enabled():
@@ -1580,10 +1576,7 @@ class PlayerFrame(wx.Frame):
 
                         # If VLC reports the stream is not seekable, stop trying and remember it.
                         try:
-                            try:
-                                already_tried = int(getattr(self, "_resume_restore_attempts", 0) or 0)
-                            except Exception:
-                                already_tried = 0
+                            already_tried = getattr(self, "_resume_restore_attempts", 0)
                             if (
                                 state_i is not None
                                 and state_i not in (1, 2)
