@@ -67,6 +67,18 @@ _LEAD_RECOVERY_MAX_PARA_LEN = 800
 _LEAD_RECOVERY_MIN_PUNCT_PARA_LEN = 120
 _LEAD_RECOVERY_MAX_INTRO_PARAS = 2
 
+_TITLE_SUFFIX_STRIP_SEPARATORS = (" | ", " — ", " – ")
+_META_DESCRIPTION_TAG_ATTRS: List[dict] = [
+    {"property": "og:description"},
+    {"name": "description"},
+    {"name": "twitter:description"},
+]
+_META_TITLE_TAG_ATTRS: List[dict] = [
+    {"property": "og:title"},
+    {"name": "twitter:title"},
+    {"name": "title"},
+]
+
 
 def _lead_recovery_enabled(url: str) -> bool:
     if not url:
@@ -116,7 +128,7 @@ def _strip_trailing_ellipsis(text: str) -> str:
 
 def _strip_title_suffix(title: str) -> str:
     t = (title or "").strip()
-    for sep in (" | ", " — ", " – "):
+    for sep in _TITLE_SUFFIX_STRIP_SEPARATORS:
         if sep in t:
             # Split from the right and take the longest segment.
             # This tends to drop short site-name suffix/prefix; we intentionally avoid stripping " - "
@@ -148,11 +160,7 @@ def _extract_meta_description(*, html: Optional[str] = None, soup: Optional[Beau
     try:
         return _extract_meta_content(
             soup,
-            [
-                {"property": "og:description"},
-                {"name": "description"},
-                {"name": "twitter:description"},
-            ],
+            _META_DESCRIPTION_TAG_ATTRS,
         )
     except Exception:
         LOG.debug("Failed to extract meta description", exc_info=True)
@@ -172,11 +180,7 @@ def _extract_page_title(*, html: Optional[str] = None, soup: Optional[BeautifulS
     try:
         meta_title = _extract_meta_content(
             soup,
-            [
-                {"property": "og:title"},
-                {"name": "twitter:title"},
-                {"name": "title"},
-            ],
+            _META_TITLE_TAG_ATTRS,
         )
         if meta_title:
             return meta_title
