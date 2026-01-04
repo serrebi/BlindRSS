@@ -46,6 +46,10 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_articles_feed_id ON articles (feed_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_articles_is_read ON articles (is_read)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_articles_date ON articles (date)")
+        # Composite indexes to speed up common paging/count queries on larger databases.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_articles_is_read_feed_id ON articles (is_read, feed_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_articles_date_id ON articles (date, id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_articles_feed_id_date_id ON articles (feed_id, date, id)")
 
         c.execute('''CREATE TABLE IF NOT EXISTS chapters (
             id TEXT PRIMARY KEY,
@@ -55,6 +59,7 @@ def init_db():
             href TEXT,
             FOREIGN KEY(article_id) REFERENCES articles(id)
         )''')
+        c.execute("CREATE INDEX IF NOT EXISTS idx_chapters_article_id_start ON chapters (article_id, start)")
 
         c.execute('''CREATE TABLE IF NOT EXISTS categories (
             id TEXT PRIMARY KEY,

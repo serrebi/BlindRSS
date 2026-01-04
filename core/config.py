@@ -22,8 +22,9 @@ DEFAULT_CONFIG = {
     "auto_download_podcasts": False,
     "auto_download_period": "unlimited",
     "refresh_interval": 300,  # seconds
-    "max_concurrent_refreshes": 50,
-    "per_host_max_connections": 32,
+    # Keep refresh concurrency conservative to avoid starving the GUI thread on large feed lists.
+    "max_concurrent_refreshes": 10,
+    "per_host_max_connections": 4,
     "feed_timeout_seconds": 15,
     "feed_retry_attempts": 5,
     "active_provider": "local",

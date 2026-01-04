@@ -217,6 +217,18 @@ if not exist "%SCRIPT_DIR%config.json" (
     echo { "active_provider": "local" } > "%SCRIPT_DIR%config.json"
 )
 
+rem Preserve local test data (e.g. rss.db) between iterative builds.
+rem This is only for MODE=build; release builds must always be clean.
+set "PRESERVE_DIR="
+if /I "%MODE%"=="build" (
+    set "DIST_APP_DIR=%SCRIPT_DIR%dist\\BlindRSS"
+	    if exist "!DIST_APP_DIR!\\rss.db" (
+	        set "PRESERVE_DIR=%TEMP%\\BlindRSS_dist_preserve_!RANDOM!"
+	        echo [BlindRSS Build] Preserving dist user data...
+	        call :copy_user_data "!DIST_APP_DIR!" "!PRESERVE_DIR!"
+	    )
+	)
+
 echo [BlindRSS Build] Cleaning previous build...
 if exist "%SCRIPT_DIR%build" rd /s /q "%SCRIPT_DIR%build"
 if exist "%SCRIPT_DIR%dist" rd /s /q "%SCRIPT_DIR%dist"
@@ -228,7 +240,11 @@ if exist "main.spec" (
     echo [WARN] main.spec not found. Running basic one-file build...
     "%VENV_PYTHON%" -m PyInstaller --onefile --noconfirm --name BlindRSS main.py
 )
-if errorlevel 1 exit /b 1
+set "PYI_RC=%ERRORLEVEL%"
+if not "%PYI_RC%"=="0" (
+    call :restore_preserved_dist_data
+    exit /b %PYI_RC%
+)
 
 echo [BlindRSS Build] Refreshing VLC plugins cache...
 set "VLC_DIR=C:\Program Files\VideoLAN\VLC"
@@ -253,9 +269,33 @@ echo [BlindRSS Build] Staging companion files into dist...
 if exist "%SCRIPT_DIR%README.md" copy /Y "%SCRIPT_DIR%README.md" "%SCRIPT_DIR%dist\README.md" >nul
 if exist "%SCRIPT_DIR%update_helper.bat" copy /Y "%SCRIPT_DIR%update_helper.bat" "%SCRIPT_DIR%dist\BlindRSS\update_helper.bat" >nul
 
+call :restore_preserved_dist_data
+
 echo [BlindRSS Build] Copying exe to repo root...
 if exist "%SCRIPT_DIR%dist\BlindRSS.exe" copy /Y "%SCRIPT_DIR%dist\BlindRSS.exe" "%SCRIPT_DIR%BlindRSS.exe" >nul
 exit /b 0
+
+:restore_preserved_dist_data
+if not defined PRESERVE_DIR exit /b 0
+if not exist "!PRESERVE_DIR!\\rss.db" goto :restore_preserved_dist_data_cleanup
+
+	echo [BlindRSS Build] Restoring preserved dist user data...
+	call :copy_user_data "!PRESERVE_DIR!" "%SCRIPT_DIR%dist\\BlindRSS"
+
+:restore_preserved_dist_data_cleanup
+	rd /s /q "!PRESERVE_DIR!" >nul 2>nul
+	set "PRESERVE_DIR="
+	exit /b 0
+
+:copy_user_data
+	set "SRC=%~1"
+	set "DEST=%~2"
+	if not exist "!DEST!" mkdir "!DEST!" >nul 2>nul
+	for %%F in (rss.db rss.db-wal rss.db-shm) do (
+	    if exist "!SRC!\\%%F" copy /Y "!SRC!\\%%F" "!DEST!\\%%F" >nul 2>nul
+	)
+	if exist "!SRC!\\podcasts" xcopy /E /I /Y "!SRC!\\podcasts" "!DEST!\\podcasts" >nul 2>nul
+	exit /b 0
 
 :sign_exe
 if /I "%MODE%"=="build" (
