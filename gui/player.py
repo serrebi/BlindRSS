@@ -348,6 +348,12 @@ class PlayerFrame(wx.Frame):
     # Persistent resume (SQLite overlay)
     # ---------------------------------------------------------------------
 
+    def _get_config_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.config_manager.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
     def _resume_feature_enabled(self) -> bool:
         return bool(self.config_manager.get("resume_playback", True))
 
@@ -382,17 +388,11 @@ class PlayerFrame(wx.Frame):
 
         pos_ms = state.position_ms
 
-        try:
-            min_ms = int(self.config_manager.get("resume_min_ms", 20000))
-        except (TypeError, ValueError):
-            min_ms = 20000
+        min_ms = self._get_config_int("resume_min_ms", 20000)
         if pos_ms < max(0, min_ms):
             return
 
-        try:
-            complete_threshold_ms = int(self.config_manager.get("resume_complete_threshold_ms", 60000))
-        except (TypeError, ValueError):
-            complete_threshold_ms = 60000
+        complete_threshold_ms = self._get_config_int("resume_complete_threshold_ms", 60000)
 
         dur_ms = state.duration_ms or 0
         if dur_ms > 0 and (dur_ms - pos_ms) <= max(0, complete_threshold_ms):
@@ -409,10 +409,7 @@ class PlayerFrame(wx.Frame):
                 log.exception("Failed to mark playback_state as completed")
             return
 
-        try:
-            back_ms = int(self.config_manager.get("resume_back_ms", 10000))
-        except (TypeError, ValueError):
-            back_ms = 10000
+        back_ms = self._get_config_int("resume_back_ms", 10000)
         back_ms = max(0, back_ms)
         target_ms = max(0, pos_ms - back_ms)
 
