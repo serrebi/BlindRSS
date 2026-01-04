@@ -354,8 +354,19 @@ class PlayerFrame(wx.Frame):
         except (TypeError, ValueError):
             return default
 
+    def _get_config_bool(self, key: str, default: bool) -> bool:
+        val = self.config_manager.get(key, default)
+        if isinstance(val, str):
+            norm = val.strip().lower()
+            if norm in ("true", "1", "yes", "on"):
+                return True
+            if norm in ("false", "0", "no", "off"):
+                return False
+            return bool(default)
+        return bool(val)
+
     def _resume_feature_enabled(self) -> bool:
-        return bool(self.config_manager.get("resume_playback", True))
+        return self._get_config_bool("resume_playback", True)
 
     def _get_resume_id(self) -> str | None:
         rid = getattr(self, "_resume_id", None)
