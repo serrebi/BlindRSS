@@ -224,7 +224,7 @@ def _attempt_lead_recovery(
         return None
 
     desc_snippet = desc_norm[:_LEAD_RECOVERY_DESC_SNIPPET_LEN]
-    if not desc_snippet or desc_snippet in precision_norm:
+    if desc_snippet in precision_norm:
         return None
 
     txt_rec = do_extract({"favor_recall": True})
