@@ -499,7 +499,7 @@ class LocalProvider(RSSProvider):
                         if key and key in chapter_map:
                             chapter_url = chapter_map[key]
 
-                    utils.fetch_and_store_chapters(article_id, media_url, media_type, chapter_url)
+                    utils.fetch_and_store_chapters(article_id, media_url, media_type, chapter_url, allow_id3=False)
 
                     # Commit every 5 items to save progress incrementally
                     if i % 5 == 0 or i == total_entries - 1:

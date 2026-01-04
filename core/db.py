@@ -60,6 +60,19 @@ def init_db():
             id TEXT PRIMARY KEY,
             title TEXT UNIQUE
         )''')
+
+        c.execute(
+            '''CREATE TABLE IF NOT EXISTS playback_state (
+            id TEXT PRIMARY KEY,
+            position_ms INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER,
+            updated_at INTEGER NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0,
+            seek_supported INTEGER,
+            title TEXT
+        )'''
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_playback_state_updated_at ON playback_state (updated_at)")
         
         # Migration: Add columns if they don't exist
         try:

@@ -356,7 +356,7 @@ def get_chapters_batch(article_ids: list) -> dict:
         conn.close()
 
 
-def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None):
+def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None, allow_id3: bool = True):
     """
     Fetches chapters from chapter_url (JSON) or media_url (ID3 tags).
     Stores them in DB linked to article_id.
@@ -395,38 +395,103 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
         except Exception as e:
             log.warning(f"Chapter fetch failed for {chapter_url}: {e}")
 
+    if not allow_id3:
+        return chapters_out
+
     # 2) ID3 CHAP frames if audio
-    if media_url and media_type and (media_type.startswith("audio/") or "podcast" in media_type or media_url.endswith("mp3")):
+    media_url_str = str(media_url or "")
+    media_type_l = str(media_type or "").lower()
+    media_path_l = urllib.parse.urlsplit(media_url_str).path.lower() or media_url_str.lower()
+    audio_exts = (".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".wav", ".flac")
+
+    if media_url and (media_type_l.startswith("audio/") or "podcast" in media_type_l or media_path_l.endswith(audio_exts)):
         try:
-            from mutagen.id3 import ID3
-            # Fetch first 2MB (usually enough for ID3v2 header)
-            resp = safe_requests_get(media_url, headers={"Range": "bytes=0-2000000"}, timeout=12)
-            if resp.ok:
-                id3 = ID3(BytesIO(resp.content))
-                conn = get_connection()
+            from mutagen.id3 import ID3, ID3Error
+
+            def _read_prefix_bytes(url: str, *, headers: dict, max_bytes: int, timeout_s: int) -> bytes:
+                if max_bytes <= 0:
+                    return b""
+                resp = safe_requests_get(url, headers=headers, timeout=int(timeout_s), stream=True)
                 try:
-                    c = conn.cursor()
-                    found_any = False
-                    for frame in id3.getall("CHAP"):
-                        found_any = True
-                        ch_id = str(uuid.uuid4())
-                        start = frame.start_time / 1000.0 if frame.start_time else 0
-                        title_ch = ""
-                        tit2 = frame.sub_frames.get("TIT2")
-                        if tit2 and tit2.text:
-                            title_ch = tit2.text[0]
-                        href = None
-                        # Extract URL from WXXX if needed? Usually just title.
-                        
-                        c.execute("INSERT OR REPLACE INTO chapters (id, article_id, start, title, href) VALUES (?, ?, ?, ?, ?)",
-                                  (ch_id, article_id, float(start), title_ch, href))
-                        chapters_out.append({"start": float(start), "title": title_ch, "href": href})
-                    
-                    conn.commit()
+                    if not getattr(resp, "ok", False):
+                        return b""
+                    buf = bytearray()
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        if not chunk:
+                            continue
+                        remaining = int(max_bytes) - len(buf)
+                        if remaining <= 0:
+                            break
+                        if len(chunk) > remaining:
+                            buf.extend(chunk[:remaining])
+                            break
+                        buf.extend(chunk)
+                        if len(buf) >= int(max_bytes):
+                            break
+                    return bytes(buf)
                 finally:
-                    conn.close()
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+
+            # Read just the ID3v2 header first to determine tag size.
+            hdr = _read_prefix_bytes(media_url, headers={"Range": "bytes=0-9"}, max_bytes=10, timeout_s=6)
+            if len(hdr) < 10 or hdr[:3] != b"ID3":
+                return chapters_out
+
+            try:
+                flags = int(hdr[5])
+                ss = hdr[6:10]
+                tag_size = ((ss[0] & 0x7F) << 21) | ((ss[1] & 0x7F) << 14) | ((ss[2] & 0x7F) << 7) | (ss[3] & 0x7F)
+                total = int(tag_size) + 10
+                if flags & 0x10:
+                    # Footer present.
+                    total += 10
+            except Exception:
+                total = 0
+
+            # Never download large media files just to detect chapters.
+            max_tag_bytes = 1_000_000
+            if total <= 10 or total > max_tag_bytes:
+                return chapters_out
+
+            tag_bytes = _read_prefix_bytes(
+                media_url,
+                headers={"Range": f"bytes=0-{int(total) - 1}"},
+                max_bytes=int(total),
+                timeout_s=12,
+            )
+            if len(tag_bytes) < 10 or tag_bytes[:3] != b"ID3":
+                return chapters_out
+
+            id3 = ID3(BytesIO(tag_bytes))
+            conn = get_connection()
+            try:
+                c = conn.cursor()
+                for frame in id3.getall("CHAP"):
+                    ch_id = str(uuid.uuid4())
+                    start = frame.start_time / 1000.0 if frame.start_time else 0
+                    title_ch = ""
+                    tit2 = frame.sub_frames.get("TIT2")
+                    if tit2 and tit2.text:
+                        title_ch = tit2.text[0]
+                    href = None
+                    # Extract URL from WXXX if needed? Usually just title.
+
+                    c.execute(
+                        "INSERT OR REPLACE INTO chapters (id, article_id, start, title, href) VALUES (?, ?, ?, ?, ?)",
+                        (ch_id, article_id, float(start), title_ch, href),
+                    )
+                    chapters_out.append({"start": float(start), "title": title_ch, "href": href})
+
+                conn.commit()
+            finally:
+                conn.close()
         except ImportError:
             log.info("mutagen not installed, skipping ID3 chapter parse.")
+        except ID3Error as e:
+            log.info(f"ID3 chapter parse failed for {media_url}: {e}")
         except Exception as e:
             log.info(f"ID3 chapter parse failed for {media_url}: {e}")
 

@@ -1993,19 +1993,64 @@ class MainFrame(wx.Frame):
                 
                 # Fetch chapters in background if missing
                 if not chapters:
-                    threading.Thread(target=self._fetch_chapters_for_player, args=(article.id,), daemon=True).start()
+                    try:
+                        chapter_media_url = getattr(article, "media_url", None) or None
+                    except Exception:
+                        chapter_media_url = None
+                    try:
+                        chapter_media_type = getattr(article, "media_type", None) or None
+                    except Exception:
+                        chapter_media_type = None
+
+                    threading.Thread(
+                        target=self._fetch_chapters_for_player,
+                        args=(article.id, chapter_media_url, chapter_media_type),
+                        daemon=True,
+                    ).start()
             else:
                 # Non-podcast/news items open in the user's default browser
                 webbrowser.open(article.url)
 
-    def _fetch_chapters_for_player(self, article_id):
-        if hasattr(self.provider, "get_article_chapters"):
+    def _fetch_chapters_for_player(self, article_id, media_url: str | None = None, media_type: str | None = None):
+        chapters = []
+        try:
+            if hasattr(self.provider, "get_article_chapters"):
+                chapters = self.provider.get_article_chapters(article_id) or []
+        except Exception as e:
+            print(f"Background chapter fetch (provider) failed: {e}")
+            chapters = []
+
+        # Fallback: if the provider doesn't resolve chapters itself, try extracting them directly
+        # from the playable audio URL (ID3 CHAP frames / Podcasting 2.0 chapters JSON).
+        if not chapters and media_url:
             try:
-                chapters = self.provider.get_article_chapters(article_id)
-                if chapters:
-                    wx.CallAfter(self.player_window.update_chapters, chapters)
+                chapters = utils.fetch_and_store_chapters(article_id, media_url, media_type) or []
             except Exception as e:
-                print(f"Background chapter fetch failed: {e}")
+                print(f"Background chapter fetch (media) failed: {e}")
+                chapters = chapters or []
+
+        if chapters:
+            try:
+                wx.CallAfter(self._apply_chapters_for_player, article_id, chapters)
+            except Exception:
+                pass
+
+    def _apply_chapters_for_player(self, article_id: str, chapters: list[dict]) -> None:
+        try:
+            for a in getattr(self, "current_articles", []) or []:
+                if getattr(a, "id", None) == article_id:
+                    try:
+                        a.chapters = chapters
+                    except Exception:
+                        pass
+                    break
+        except Exception:
+            pass
+
+        try:
+            self.player_window.update_chapters(chapters)
+        except Exception:
+            pass
 
     def _should_play_in_player(self, article):
         """Only treat bona-fide podcast/media items as playable; everything else opens in browser."""
