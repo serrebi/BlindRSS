@@ -64,14 +64,14 @@ def upsert_playback_state(
 
     try:
         pos = max(0, int(position_ms))
-    except Exception:
+    except (TypeError, ValueError):
         pos = 0
 
     dur = None
     if duration_ms is not None:
         try:
             dur = int(duration_ms)
-        except Exception:
+        except (TypeError, ValueError):
             dur = None
         if dur is not None and dur <= 0:
             dur = None

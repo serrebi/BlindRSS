@@ -3,6 +3,7 @@ import vlc
 import threading
 import socket
 import time
+import sqlite3
 import platform
 import logging
 from core import utils
@@ -370,8 +371,11 @@ class PlayerFrame(wx.Frame):
 
         try:
             state = playback_state.get_playback_state(resume_id)
-        except Exception:
+        except sqlite3.Error:
             log.exception("Failed to read playback_state for resume")
+            return
+        except Exception:
+            log.exception("Unexpected error while reading playback_state for resume")
             return
         if not state or state.completed:
             return
