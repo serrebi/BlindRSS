@@ -1993,14 +1993,8 @@ class MainFrame(wx.Frame):
                 
                 # Fetch chapters in background if missing
                 if not chapters:
-                    try:
-                        chapter_media_url = getattr(article, "media_url", None) or None
-                    except Exception:
-                        chapter_media_url = None
-                    try:
-                        chapter_media_type = getattr(article, "media_type", None) or None
-                    except Exception:
-                        chapter_media_type = None
+                    chapter_media_url = getattr(article, "media_url", None)
+                    chapter_media_type = getattr(article, "media_type", None)
 
                     threading.Thread(
                         target=self._fetch_chapters_for_player,
@@ -2027,7 +2021,6 @@ class MainFrame(wx.Frame):
                 chapters = utils.fetch_and_store_chapters(article_id, media_url, media_type) or []
             except Exception as e:
                 print(f"Background chapter fetch (media) failed: {e}")
-                chapters = chapters or []
 
         if chapters:
             try:
