@@ -414,18 +414,18 @@ class PlayerFrame(wx.Frame):
         except (TypeError, ValueError):
             back_ms = 10000
         back_ms = max(0, back_ms)
-        target_ms = max(0, int(pos_ms) - int(back_ms))
+        target_ms = max(0, pos_ms - back_ms)
 
-        self._pending_resume_seek_ms = int(target_ms)
+        self._pending_resume_seek_ms = target_ms
         self._pending_resume_seek_attempts = 0
         self._pending_resume_paused = False
         self._resume_restore_inflight = True
-        self._resume_restore_id = str(resume_id)
-        self._resume_restore_target_ms = int(target_ms)
+        self._resume_restore_id = resume_id
+        self._resume_restore_target_ms = target_ms
         self._resume_restore_attempts = 0
         self._resume_restore_last_attempt_ts = 0.0
         # Avoid writing a 0-position back to the DB while the resume seek is still pending.
-        self._resume_last_save_ts = float(time.monotonic())
+        self._resume_last_save_ts = time.monotonic()
 
     def _persist_playback_position(self, force: bool = False) -> None:
         if not self._resume_feature_enabled():
@@ -1580,7 +1580,7 @@ class PlayerFrame(wx.Frame):
 
                         # If VLC reports the stream is not seekable, stop trying and remember it.
                         try:
-                            already_tried = int(getattr(self, "_resume_restore_attempts", 0) or 0)
+                            already_tried = getattr(self, "_resume_restore_attempts", 0)
                             if (
                                 state_i is not None
                                 and state_i not in (1, 2)
