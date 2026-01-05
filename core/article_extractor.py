@@ -126,6 +126,17 @@ def _strip_trailing_ellipsis(text: str) -> str:
     return re.sub(r"(?:\.\.\.|…)\s*$", "", (text or "").strip()).strip()
 
 
+def _is_reasonable_lead_paragraph(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if len(t) < _LEAD_RECOVERY_MIN_PARA_LEN or len(t) > _LEAD_RECOVERY_MAX_PARA_LEN:
+        return False
+    if re.search(r"[.!?]", t):
+        return True
+    return len(t) >= _LEAD_RECOVERY_MIN_PUNCT_PARA_LEN
+
+
 def _strip_title_suffix(title: str) -> str:
     t = (title or "").strip()
     for sep in _TITLE_SUFFIX_STRIP_SEPARATORS:
@@ -265,11 +276,7 @@ def _attempt_lead_recovery(
     def _fallback_prepend_meta_desc() -> Optional[str]:
         # Fallback: when recall extraction fails to capture the meta description, prepend the
         # cleaned meta description itself (allowlist-only). This is intentionally conservative.
-        if not desc:
-            return None
-        if len(desc) < _LEAD_RECOVERY_MIN_PARA_LEN or len(desc) > _LEAD_RECOVERY_MAX_PARA_LEN:
-            return None
-        if not re.search(r"[.!?]", desc) and len(desc) < _LEAD_RECOVERY_MIN_PUNCT_PARA_LEN:
+        if not _is_reasonable_lead_paragraph(desc):
             return None
         combined = "\n\n".join([desc, precision_text])
         return (combined or "").strip()
@@ -277,9 +284,7 @@ def _attempt_lead_recovery(
     lead_html = _extract_allowlisted_lead_from_html(soup, url)
     lead_html_norm = _normalize_for_match(lead_html)
     if lead_html_norm and desc_hit_snippet and desc_hit_snippet in lead_html_norm and lead_html_norm not in precision_norm:
-        if _LEAD_RECOVERY_MIN_PARA_LEN <= len(lead_html) <= _LEAD_RECOVERY_MAX_PARA_LEN and (
-            re.search(r"[.!?]", lead_html) or len(lead_html) >= _LEAD_RECOVERY_MIN_PUNCT_PARA_LEN
-        ):
+        if _is_reasonable_lead_paragraph(lead_html):
             combined = "\n\n".join([lead_html, precision_text])
             return (combined or "").strip()
 
