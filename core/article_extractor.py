@@ -244,14 +244,26 @@ def _attempt_lead_recovery(
     if desc_snippet in precision_norm:
         return None
 
+    def _fallback_prepend_meta_desc() -> Optional[str]:
+        # Fallback: when recall extraction fails to capture the meta description, prepend the
+        # cleaned meta description itself (allowlist-only). This is intentionally conservative.
+        if not desc:
+            return None
+        if len(desc) < _LEAD_RECOVERY_MIN_PARA_LEN or len(desc) > _LEAD_RECOVERY_MAX_PARA_LEN:
+            return None
+        if not re.search(r"[.!?]", desc) and len(desc) < _LEAD_RECOVERY_MIN_PUNCT_PARA_LEN:
+            return None
+        combined = "\n\n".join([desc, precision_text])
+        return (combined or "").strip()
+
     txt_rec = do_extract({"favor_recall": True})
     rec = (txt_rec or "").strip()
     if not rec:
-        return None
+        return _fallback_prepend_meta_desc()
 
     rec_head_norm = _normalize_for_match(rec[:_LEAD_RECOVERY_MAX_RECALL_NORM_CHARS])
     if desc_snippet not in rec_head_norm:
-        return None
+        return _fallback_prepend_meta_desc()
 
     page_title = _strip_title_suffix(_extract_page_title(soup=soup))
     page_title_norm = _normalize_for_match(page_title)
@@ -265,7 +277,7 @@ def _attempt_lead_recovery(
         desc_hit_snippet=desc_snippet[:_LEAD_RECOVERY_DESC_HIT_SNIPPET_LEN],
     )
     if not intro:
-        return None
+        return _fallback_prepend_meta_desc()
 
     combined = "\n\n".join(intro + [precision_text])
     return (combined or "").strip()
