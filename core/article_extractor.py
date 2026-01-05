@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import re
 import time
+import logging
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Set
+from typing import Callable, Optional, Tuple, List, Set
 from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
 from core import utils
+
+LOG = logging.getLogger(__name__)
 
 try:
     import trafilatura
@@ -47,6 +50,48 @@ _MEDIA_EXTS = (
     ".pdf",
 )
 
+_LEAD_RECOVERY_ALLOWED_NETLOC_SUFFIXES = {
+    # Some sites have a meaningful lead/intro in the HTML meta description that trafilatura may
+    # skip when running in precision mode.
+    "wirtualnemedia.pl",
+}
+
+_LEAD_RECOVERY_MIN_PRECISION_LEN = 200
+_LEAD_RECOVERY_MIN_DESC_LEN = 60
+_LEAD_RECOVERY_DESC_SNIPPET_LEN = 120
+_LEAD_RECOVERY_DESC_HIT_SNIPPET_LEN = 80
+_LEAD_RECOVERY_MAX_RECALL_NORM_CHARS = 8000
+_LEAD_RECOVERY_MAX_SCAN_PARAS = 8
+_LEAD_RECOVERY_MIN_PARA_LEN = 40
+_LEAD_RECOVERY_MAX_PARA_LEN = 800
+_LEAD_RECOVERY_MIN_PUNCT_PARA_LEN = 120
+_LEAD_RECOVERY_MAX_INTRO_PARAS = 2
+
+_TITLE_SUFFIX_STRIP_SEPARATORS = (" | ", " — ", " – ")
+_META_DESCRIPTION_TAG_ATTRS: List[dict] = [
+    {"property": "og:description"},
+    {"name": "description"},
+    {"name": "twitter:description"},
+]
+_META_TITLE_TAG_ATTRS: List[dict] = [
+    {"property": "og:title"},
+    {"name": "twitter:title"},
+    {"name": "title"},
+]
+
+
+def _lead_recovery_enabled(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        host = urlsplit(url).hostname
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if not host or not isinstance(host, str):
+        return False
+    host = host.lower()
+    return any(host == d or host.endswith("." + d) for d in _LEAD_RECOVERY_ALLOWED_NETLOC_SUFFIXES)
+
 
 def _looks_like_media_url(url: str) -> bool:
     try:
@@ -67,8 +112,205 @@ def _split_paragraphs(text: str) -> List[str]:
     t = _normalize_whitespace(text or "")
     if not t:
         return []
-    parts = [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
-    return parts
+    # Split by blank lines first (strong paragraph separator), then by single newlines.
+    # This handles mixed separators like "p1\\np2\\n\\np3" without merging p1+p2.
+    blocks = re.split(r"\n\s*\n", t)
+    return [p.strip() for block in blocks for p in block.split("\n") if p.strip()]
+
+
+def _normalize_for_match(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+
+def _strip_trailing_ellipsis(text: str) -> str:
+    return re.sub(r"(?:\.\.\.|…)\s*$", "", (text or "").strip()).strip()
+
+
+def _is_reasonable_lead_paragraph(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if len(t) < _LEAD_RECOVERY_MIN_PARA_LEN or len(t) > _LEAD_RECOVERY_MAX_PARA_LEN:
+        return False
+    if re.search(r"[.!?]", t):
+        return True
+    return len(t) >= _LEAD_RECOVERY_MIN_PUNCT_PARA_LEN
+
+
+def _strip_title_suffix(title: str) -> str:
+    t = (title or "").strip()
+    for sep in _TITLE_SUFFIX_STRIP_SEPARATORS:
+        if sep in t:
+            # Split from the right and take the longest segment.
+            # This tends to drop short site-name suffix/prefix; we intentionally avoid stripping " - "
+            # because it's common in legitimate titles.
+            return max(t.rsplit(sep, 1), key=len).strip()
+    return t
+
+
+def _extract_meta_content(soup: BeautifulSoup, candidates: List[dict]) -> str:
+    for attrs in candidates:
+        tag = soup.find("meta", attrs=attrs)
+        if tag and tag.get("content"):
+            content = (tag.get("content") or "").strip()
+            if content:
+                return content
+    return ""
+
+
+def _parse_html_soup(html: Optional[str], *, context: str) -> Optional[BeautifulSoup]:
+    if not html:
+        return None
+    try:
+        return BeautifulSoup(html, "html.parser")
+    except Exception:
+        LOG.debug("Failed to parse HTML for %s", context, exc_info=True)
+        return None
+
+
+def _extract_meta_description(*, html: Optional[str] = None, soup: Optional[BeautifulSoup] = None) -> str:
+    if soup is None:
+        soup = _parse_html_soup(html, context="meta description")
+        if soup is None:
+            return ""
+
+    return _extract_meta_content(
+        soup,
+        _META_DESCRIPTION_TAG_ATTRS,
+    )
+
+
+def _extract_page_title(*, html: Optional[str] = None, soup: Optional[BeautifulSoup] = None) -> str:
+    if soup is None:
+        soup = _parse_html_soup(html, context="page title")
+        if soup is None:
+            return ""
+
+    meta_title = _extract_meta_content(
+        soup,
+        _META_TITLE_TAG_ATTRS,
+    )
+    if meta_title:
+        return meta_title
+    t = soup.find("title")
+    if t and t.get_text(strip=True):
+        return t.get_text(strip=True)
+    return ""
+
+
+def _extract_allowlisted_lead_from_html(soup: BeautifulSoup, url: str) -> str:
+    try:
+        host = urlsplit(url).hostname
+    except Exception:
+        host = None
+    if not host or not isinstance(host, str):
+        return ""
+    host = host.lower()
+
+    if host == "wirtualnemedia.pl" or host.endswith(".wirtualnemedia.pl"):
+        node = soup.find("div", class_="wm-article-header-lead")
+        if node:
+            return (node.get_text(" ", strip=True) or "").strip()
+
+    return ""
+
+
+def _recover_intro_paragraphs(
+    recall_text: str,
+    *,
+    precision_paras_norm: Set[str],
+    page_title_norm: str,
+    desc_hit_snippet: str,
+) -> List[str]:
+    intro: List[str] = []
+    desc_hit = False
+
+    for p in _split_paragraphs(recall_text)[:_LEAD_RECOVERY_MAX_SCAN_PARAS]:
+        pn = _normalize_for_match(p)
+        if not pn:
+            continue
+        if pn in precision_paras_norm:
+            break
+        if page_title_norm and pn == page_title_norm:
+            continue
+        if not _is_reasonable_lead_paragraph(p):
+            continue
+        if desc_hit_snippet and desc_hit_snippet in pn:
+            desc_hit = True
+        intro.append(p)
+        if len(intro) >= _LEAD_RECOVERY_MAX_INTRO_PARAS:
+            break
+
+    if not intro or not desc_hit:
+        return []
+    return intro
+
+
+def _attempt_lead_recovery(
+    html: str,
+    url: str,
+    *,
+    precision_text: str,
+    precision_norm: str,
+    do_extract: Callable[[dict], str],
+) -> Optional[str]:
+    if not _lead_recovery_enabled(url):
+        return None
+
+    soup = _parse_html_soup(html, context="lead recovery")
+    if soup is None:
+        return None
+
+    desc = _strip_trailing_ellipsis(_extract_meta_description(soup=soup))
+    desc_norm = _normalize_for_match(desc)
+    if not desc_norm or len(desc_norm) < _LEAD_RECOVERY_MIN_DESC_LEN:
+        return None
+
+    desc_snippet = desc_norm[:_LEAD_RECOVERY_DESC_SNIPPET_LEN]
+    desc_hit_snippet = desc_norm[:_LEAD_RECOVERY_DESC_HIT_SNIPPET_LEN]
+    if desc_snippet in precision_norm:
+        return None
+
+    def _fallback_prepend_meta_desc() -> Optional[str]:
+        # Fallback: when recall extraction fails to capture the meta description, prepend the
+        # cleaned meta description itself (allowlist-only). This is intentionally conservative.
+        if not _is_reasonable_lead_paragraph(desc):
+            return None
+        combined = "\n\n".join([desc, precision_text])
+        return (combined or "").strip()
+
+    lead_html = _extract_allowlisted_lead_from_html(soup, url)
+    lead_html_norm = _normalize_for_match(lead_html)
+    if lead_html_norm and desc_hit_snippet and desc_hit_snippet in lead_html_norm and lead_html_norm not in precision_norm:
+        if _is_reasonable_lead_paragraph(lead_html):
+            combined = "\n\n".join([lead_html, precision_text])
+            return (combined or "").strip()
+
+    txt_rec = do_extract({"favor_recall": True})
+    rec = (txt_rec or "").strip()
+    if not rec:
+        return _fallback_prepend_meta_desc()
+
+    rec_head_norm = _normalize_for_match(rec[:_LEAD_RECOVERY_MAX_RECALL_NORM_CHARS])
+    if desc_snippet not in rec_head_norm:
+        return _fallback_prepend_meta_desc()
+
+    page_title = _strip_title_suffix(_extract_page_title(soup=soup))
+    page_title_norm = _normalize_for_match(page_title)
+
+    precision_paras_norm = {_normalize_for_match(p) for p in _split_paragraphs(precision_text)}
+
+    intro = _recover_intro_paragraphs(
+        rec,
+        precision_paras_norm=precision_paras_norm,
+        page_title_norm=page_title_norm,
+        desc_hit_snippet=desc_hit_snippet,
+    )
+    if not intro:
+        return _fallback_prepend_meta_desc()
+
+    combined = "\n\n".join(intro + [precision_text])
+    return (combined or "").strip()
 
 
 _ZDNET_BOILERPLATE_PATTERNS: List[re.Pattern] = [
@@ -197,6 +439,8 @@ def _trafilatura_extract_text(html: str, url: str = "") -> str:
     CPU considerations:
     - Prefer precision-first extraction to reduce boilerplate.
     - Only fall back to recall mode when the precision result is clearly too short.
+    - For some sites, precision extraction may skip a lead/intro; in that case, try recall and
+      prepend the missing intro paragraphs to the precision result.
     """
     if not html or trafilatura is None:
         return ""
@@ -230,15 +474,25 @@ def _trafilatura_extract_text(html: str, url: str = "") -> str:
             return ""
 
     # Precision-first
-    txt = _do_extract({"favor_precision": True, "favor_recall": False})
-    if txt:
-        t = (txt or "").strip()
-        if len(t) >= 200:
-            return t
+    txt_prec = _do_extract({"favor_precision": True, "favor_recall": False})
+    prec = (txt_prec or "").strip()
+    if prec and len(prec) >= _LEAD_RECOVERY_MIN_PRECISION_LEN:
+        prec_norm = _normalize_for_match(prec)
+        recovered = _attempt_lead_recovery(
+            html,
+            url,
+            precision_text=prec,
+            precision_norm=prec_norm,
+            do_extract=_do_extract,
+        )
+        if recovered:
+            return recovered
+
+        return prec
 
     # Recall fallback (only when precision is empty/too short)
-    txt = _do_extract({"favor_recall": True})
-    return (txt or "").strip()
+    txt_rec = _do_extract({"favor_recall": True})
+    return (txt_rec or "").strip()
 
 
 def _soup_extract_text(html: str) -> str:
