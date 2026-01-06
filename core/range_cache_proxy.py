@@ -122,7 +122,7 @@ def _parse_content_range(value: str) -> Optional[Tuple[int, int, Optional[int]]]
     # Example: "bytes 0-0/12345" or "bytes 0-0/*"
     if not value:
         return None
-    m = re.match(r"^\s*bytes\s+(\d+)-(\d+)/(\d+|*)\s*$", value, re.IGNORECASE)
+    m = re.match(r"^\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$", value, re.IGNORECASE)
     if not m:
         return None
     a = int(m.group(1))
@@ -761,10 +761,10 @@ class _Entry:
                             f.write(chunk)
 
                             try:
-                                self.wfile.write(chunk)
+                                wfile.write(chunk)
                                 if flush_first and first:
                                     try:
-                                        self.wfile.flush()
+                                        wfile.flush()
                                     except Exception:
                                         pass
                                     first = False
