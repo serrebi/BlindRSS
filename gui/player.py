@@ -19,6 +19,7 @@ from .hotkeys import HoldRepeatHotkeys
 log = logging.getLogger(__name__)
 
 MIN_FORCE_SAVE_MS = 2000
+MIN_TRIVIAL_POSITION_MS = 1000
 
 
 def _should_reapply_seek(target_ms: int, current_ms: int, tolerance_ms: int, remaining_retries: int) -> bool:
@@ -383,15 +384,24 @@ class PlayerFrame(wx.Frame):
             return str(url)
         return None
 
-    def _cancel_scheduled_resume_save(self) -> None:
+    def _stop_calllater(self, attr_name: str, log_message: str) -> None:
         try:
-            calllater = getattr(self, "_resume_seek_save_calllater", None)
+            calllater = getattr(self, attr_name, None)
             if calllater is not None:
                 calllater.Stop()
         except Exception:
-            log.exception("Failed to cancel scheduled resume save")
-        self._resume_seek_save_calllater = None
-        self._resume_seek_save_id = None
+            log.exception(log_message)
+        finally:
+            try:
+                setattr(self, attr_name, None)
+            except Exception:
+                pass
+
+    def _cancel_scheduled_resume_save(self) -> None:
+        try:
+            self._stop_calllater("_resume_seek_save_calllater", "Failed to cancel scheduled resume save")
+        finally:
+            self._resume_seek_save_id = None
 
     def _note_user_seek(self) -> None:
         try:
@@ -399,6 +409,8 @@ class PlayerFrame(wx.Frame):
             # User-initiated seeks should override any pending auto-resume seek.
             if getattr(self, "_resume_restore_inflight", False) and getattr(self, "_pending_resume_seek_ms", None) is not None:
                 self._pending_resume_seek_ms = None
+                self._pending_resume_seek_attempts = 0
+                self._pending_resume_paused = False
                 self._resume_restore_inflight = False
                 self._resume_restore_id = None
                 self._resume_restore_target_ms = None
@@ -436,7 +448,7 @@ class PlayerFrame(wx.Frame):
                 log.exception("Failed to get position in scheduled resume save tick")
                 return
 
-            if pos_ms < 1000:
+            if pos_ms < MIN_TRIVIAL_POSITION_MS:
                 return
 
             try:
@@ -561,7 +573,7 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pos_ms = 0
 
-        if not force and pos_ms < 1000:
+        if not force and pos_ms < MIN_TRIVIAL_POSITION_MS:
             # Avoid creating state rows for trivial playback attempts.
             return
 
@@ -1332,13 +1344,10 @@ class PlayerFrame(wx.Frame):
             log.exception("Failed to persist playback position on media load")
         try:
             self._cancel_scheduled_resume_save()
-            calllater = getattr(self, "_seek_apply_calllater", None)
-            if calllater:
-                calllater.Stop()
+            self._stop_calllater("_seek_apply_calllater", "Error handling seek apply calllater on media load")
         except Exception:
             log.exception("Error during media load cleanup")
         finally:
-            self._seek_apply_calllater = None
             self._stopped_needs_resume = False
             
         self.current_url = url
@@ -2590,14 +2599,7 @@ class PlayerFrame(wx.Frame):
             self._cancel_scheduled_resume_save()
         except Exception:
             log.exception("Error canceling scheduled resume save on stop")
-        try:
-            calllater = getattr(self, "_seek_apply_calllater", None)
-            if calllater:
-                calllater.Stop()
-        except Exception:
-            log.exception("Error handling seek apply calllater on stop")
-        finally:
-            self._seek_apply_calllater = None
+        self._stop_calllater("_seek_apply_calllater", "Error handling seek apply calllater on stop")
         if self.is_casting:
             try:
                 self.casting_manager.stop_playback()
@@ -2680,23 +2682,8 @@ class PlayerFrame(wx.Frame):
         except Exception:
             log.exception("Error canceling scheduled resume save during shutdown")
 
-        try:
-            calllater = getattr(self, "_seek_apply_calllater", None)
-            if calllater is not None:
-                calllater.Stop()
-        except Exception:
-            log.exception("Error handling seek apply calllater during shutdown")
-        finally:
-            self._seek_apply_calllater = None
-
-        try:
-            calllater = getattr(self, "_seek_guard_calllater", None)
-            if calllater is not None:
-                calllater.Stop()
-        except Exception:
-            log.exception("Error handling seek guard calllater during shutdown")
-        finally:
-            self._seek_guard_calllater = None
+        self._stop_calllater("_seek_apply_calllater", "Error handling seek apply calllater during shutdown")
+        self._stop_calllater("_seek_guard_calllater", "Error handling seek guard calllater during shutdown")
 
         try:
             self._cancel_silence_scan()
