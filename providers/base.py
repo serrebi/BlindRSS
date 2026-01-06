@@ -22,6 +22,12 @@ class RSSProvider(abc.ABC):
         """
         pass
 
+    def refresh_feed(self, feed_id: str, progress_cb=None) -> bool:
+        """
+        Triggers a sync/refresh of a single feed.
+        """
+        return False
+
     @abc.abstractmethod
     def get_feeds(self) -> List[Feed]:
         pass

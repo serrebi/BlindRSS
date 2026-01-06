@@ -37,6 +37,30 @@ class LocalProvider(RSSProvider):
     def get_name(self) -> str:
         return "Local RSS"
 
+    def refresh_feed(self, feed_id: str, progress_cb=None) -> bool:
+        conn = get_connection()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT id, url, title, category, etag, last_modified FROM feeds WHERE id = ?", (feed_id,))
+            row = c.fetchone()
+        finally:
+            conn.close()
+
+        if not row:
+            return False
+
+        # For single feed refresh, use a simple semaphore since we aren't competing with other threads here.
+        host_limits = defaultdict(lambda: threading.Semaphore(1))
+        feed_timeout = max(1, int(self.config.get("feed_timeout_seconds", 15) or 15))
+        retries = max(0, int(self.config.get("feed_retry_attempts", 1) or 0))
+
+        try:
+            self._refresh_single_feed(row, host_limits, feed_timeout, retries, progress_cb, force=True)
+            return True
+        except Exception as e:
+            log.error(f"Single feed refresh failed: {e}")
+            return False
+
     def refresh(self, progress_cb=None, force: bool = False) -> bool:
         conn = get_connection()
         try:

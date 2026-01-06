@@ -431,6 +431,31 @@ def _strip_zdnet_recommends_block(text: str) -> str:
     return cleaned
 
 
+def _strip_thetyee_boilerplate(text: str) -> str:
+    """Remove common The Tyee fundraising boilerplate."""
+    t = (text or "").strip()
+    
+    # 1. Top fundraising block (long text ending in 'Support Us Now')
+    # Use dotall to match across newlines.
+    # Pattern covers "Our journalism is supported..." down to "...Support Us Now"
+    t = re.sub(
+        r"(?si)^Our\s+[Jj]ournalism\s+is\s+supported\s+by\s+(?:readers|Tyee\s+Builders)\s+like\s+you.*?\nSupport\s+Us\s+Now\s*",
+        "",
+        t,
+        count=1
+    )
+    
+    # 2. Bottom subscription/privacy footer
+    # "Subscribe now... Privacy policy"
+    t = re.sub(
+        r"(?si)\bSubscribe\s+now\s+Privacy\s+policy.*?Subscribe\s+now\s+Privacy\s+policy\s*$",
+        "",
+        t
+    )
+    
+    return t.strip()
+
+
 def _postprocess_extracted_text(text: str, url: str) -> str:
     t = _normalize_whitespace(text or "")
     if not t:
@@ -444,6 +469,8 @@ def _postprocess_extracted_text(text: str, url: str) -> str:
 
     if netloc.endswith("zdnet.com"):
         t = _strip_zdnet_recommends_block(t)
+    elif netloc.endswith("thetyee.ca"):
+        t = _strip_thetyee_boilerplate(t)
 
     return _normalize_whitespace(t)
 

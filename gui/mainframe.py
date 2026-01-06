@@ -541,6 +541,23 @@ class MainFrame(wx.Frame):
         # self.SetTitle("RSS Reader - Refreshing...") 
         threading.Thread(target=self._manual_refresh_thread, daemon=True).start()
 
+    def on_refresh_single_feed(self, event):
+        item = self.tree.GetSelection()
+        feed_id = self._get_feed_id_from_tree_item(item)
+        if not feed_id:
+            return
+        threading.Thread(target=self._refresh_single_feed_thread, args=(feed_id,), daemon=True).start()
+
+    def _refresh_single_feed_thread(self, feed_id):
+        try:
+            # Re-use the existing progress callback mechanism
+            self.provider.refresh_feed(feed_id, progress_cb=self._on_feed_refresh_progress)
+            wx.CallAfter(self._flush_feed_refresh_progress) # Ensure it flushes immediately
+            # We don't need to call refresh_feeds() (full tree rebuild) if we just updated one feed.
+            # The progress callback updates the tree item label.
+        except Exception as e:
+            print(f"Single feed refresh error: {e}")
+
     def _run_refresh(self, block: bool, force: bool = False) -> bool:
         """Run provider.refresh with optional blocking guard to avoid overlap."""
         acquired = False
@@ -654,6 +671,9 @@ class MainFrame(wx.Frame):
             self.Bind(wx.EVT_MENU, lambda e: self.on_import_opml(e, target_category=cat_title), import_item)
             
         elif data["type"] == "feed":
+            refresh_feed_item = menu.Append(wx.ID_ANY, "Refresh Feed")
+            self.Bind(wx.EVT_MENU, self.on_refresh_single_feed, refresh_feed_item)
+
             edit_item = menu.Append(wx.ID_ANY, "Edit Feed...")
             self.Bind(wx.EVT_MENU, self.on_edit_feed, edit_item)
 
