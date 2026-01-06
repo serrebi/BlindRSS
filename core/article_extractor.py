@@ -521,8 +521,26 @@ def _postprocess_extracted_text(text: str, url: str) -> str:
         t = _strip_canada_boilerplate(t)
     elif "castanet.net" in netloc:
         t = _strip_castanet_boilerplate(t)
+    elif "androidauthority.com" in netloc:
+        t = _strip_androidauthority_boilerplate(t)
 
     return _normalize_whitespace(t)
+
+
+def _strip_androidauthority_boilerplate(text: str) -> str:
+    """Remove common Android Authority boilerplate."""
+    t = (text or "").strip()
+    
+    # Remove "TL;DR" block (usually at the top or distinct)
+    # Matches "TL;DR" header and its content paragraph(s).
+    # Terminates at double newline, or specific footer, or end of string.
+    t = re.sub(r"(?si)^\s*TL;DR\s+.*?(?=\n\s*\n|\n\s*Don’t want to miss|\Z)", "", t)
+    t = re.sub(r"(?si)\n\s*TL;DR\s+.*?(?=\n\s*\n|\n\s*Don’t want to miss|\Z)", "\n", t)
+
+    # Remove "Don't want to miss..." footer
+    t = re.sub(r"(?i)Don’t want to miss the best from Android Authority\?.*", "", t)
+    
+    return t
 
 
 def _download_html(url: str, timeout: int = 20) -> Optional[str]:

@@ -125,8 +125,10 @@ class LocalProvider(RSSProvider):
 
         headers = {}
         if not force:
-            if etag: headers['If-None-Match'] = etag
-            if last_modified: headers['If-Modified-Since'] = last_modified
+            # NPR feeds are finicky with 304s; force full refresh to avoid empty listings
+            if "npr.org" not in feed_url:
+                if etag: headers['If-None-Match'] = etag
+                if last_modified: headers['If-Modified-Since'] = last_modified
 
         host = urlparse(feed_url).hostname or feed_url
         limiter = host_limits[host]
