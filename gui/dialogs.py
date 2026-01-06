@@ -455,6 +455,21 @@ class FeedPropertiesDialog(wx.Dialog):
         self.SetSizer(sizer)
         self.Centre()
 
+        # Fix tab order: Title -> URL -> Category -> OK -> Cancel
+        self.title_ctrl.SetFocus()
+        if self.url_ctrl.AcceptsFocus():
+            self.url_ctrl.MoveAfterInTabOrder(self.title_ctrl)
+        
+        self.cat_ctrl.MoveAfterInTabOrder(self.url_ctrl)
+        
+        ok_btn = btn_sizer.GetAffirmativeButton()
+        cancel_btn = btn_sizer.GetCancelButton()
+        
+        if ok_btn:
+            ok_btn.MoveAfterInTabOrder(self.cat_ctrl)
+        if cancel_btn and ok_btn:
+            cancel_btn.MoveAfterInTabOrder(ok_btn)
+
     def get_data(self):
         title = ""
         url = ""

@@ -424,6 +424,17 @@ class LocalProvider(RSSProvider):
 
             d = feedparser.parse(xml_data)
             
+            # Resilience: if 0 entries, try parsing decoded text as fallback
+            # (Sometimes feedparser fails on bytes with certain encoding declarations vs actual content)
+            if len(d.entries) == 0 and d.bozo:
+                try:
+                    d_text = feedparser.parse(xml_text)
+                    if len(d_text.entries) > 0:
+                        d = d_text
+                        log.info(f"Fallback to text parsing successful for {feed_url}")
+                except Exception:
+                    pass
+            
             # Build chapter map
             chapter_map = {}
             try:
