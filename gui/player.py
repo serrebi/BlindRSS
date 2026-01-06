@@ -18,6 +18,8 @@ from .hotkeys import HoldRepeatHotkeys
 
 log = logging.getLogger(__name__)
 
+MIN_FORCE_SAVE_MS = 2000
+
 
 def _should_reapply_seek(target_ms: int, current_ms: int, tolerance_ms: int, remaining_retries: int) -> bool:
     try:
@@ -387,7 +389,7 @@ class PlayerFrame(wx.Frame):
             if calllater is not None:
                 calllater.Stop()
         except Exception:
-            pass
+            log.exception("Failed to cancel scheduled resume save")
         self._resume_seek_save_calllater = None
         self._resume_seek_save_id = None
 
@@ -445,7 +447,7 @@ class PlayerFrame(wx.Frame):
             try:
                 self._persist_playback_position(force=True)
             except Exception:
-                pass
+                log.exception("Failed to persist playback position after seek")
 
         try:
             self._resume_seek_save_calllater = wx.CallLater(int(delay), _tick)
@@ -530,7 +532,6 @@ class PlayerFrame(wx.Frame):
 
         # Even for force saves, avoid overwriting stored progress with a near-zero position while restore is pending.
         if restore_pending and force:
-            MIN_FORCE_SAVE_MS = 2000
             try:
                 if self.is_casting:
                     cur_pos_ms = int(getattr(self, "_cast_last_pos_ms", 0) or 0)
@@ -1339,11 +1340,11 @@ class PlayerFrame(wx.Frame):
                 try:
                     self._seek_apply_calllater.Stop()
                 except Exception:
-                    pass
+                    log.exception("Error stopping seek apply calllater on media load")
                 self._seek_apply_calllater = None
             self._stopped_needs_resume = False
         except Exception:
-            pass
+            log.exception("Error during media load cleanup")
             
         self.current_url = url
         self._resume_id = str(url)
@@ -2727,13 +2728,13 @@ class PlayerFrame(wx.Frame):
                 try:
                     self.casting_manager.stop_playback()
                 except Exception:
-                    pass
+                    log.exception("Error stopping casting playback during shutdown")
                 try:
                     self.casting_manager.disconnect()
                 except Exception:
-                    pass
+                    log.exception("Error disconnecting from cast device during shutdown")
         except Exception:
-            pass
+            log.exception("Error during casting shutdown")
 
         if getattr(self, "player", None) is not None:
             try:
