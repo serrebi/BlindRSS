@@ -1,5 +1,6 @@
 import wx
 import wx.adv
+import sys
 # import wx.html2 # Removed as per request
 import webbrowser
 import threading
@@ -573,7 +574,15 @@ class MainFrame(wx.Frame):
         
         # Resolve relative path
         if not os.path.isabs(path):
-            path = os.path.join(APP_DIR, path)
+            # Check PyInstaller bundle path first
+            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+                 bundled_path = os.path.join(sys._MEIPASS, path)
+                 if os.path.exists(bundled_path):
+                     path = bundled_path
+                 else:
+                     path = os.path.join(APP_DIR, path)
+            else:
+                path = os.path.join(APP_DIR, path)
             
         if os.path.exists(path):
             try:
