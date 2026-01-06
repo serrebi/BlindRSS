@@ -13,6 +13,9 @@ from core.models import Feed, Article
 from core.db import get_connection, init_db
 from core.discovery import discover_feed
 from core import utils
+from core import rumble as rumble_mod
+from core import odysee as odysee_mod
+from core import npr as npr_mod
 from bs4 import BeautifulSoup as BS, XMLParsedAsHTMLWarning
 import xml.etree.ElementTree as ET
 import logging
@@ -400,6 +403,7 @@ class LocalProvider(RSSProvider):
                         resp.raise_for_status()
                         # Use content instead of text to let feedparser handle encoding detection
                         xml_data = resp.content
+                        xml_text = resp.text
                         new_etag = resp.headers.get('ETag')
                         new_last_modified = resp.headers.get('Last-Modified')
                         break
@@ -553,6 +557,10 @@ class LocalProvider(RSSProvider):
                                     media_url = mc_url
                                     media_type = mc_type or "audio/mpeg"
                                     break
+
+                    # 4. Check NPR-specific extraction if still no media
+                    if not media_url and npr_mod.is_npr_url(url):
+                        media_url, media_type = npr_mod.extract_npr_audio(url, timeout_s=feed_timeout)
 
                     c.execute("INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
                                 (article_id, feed_id, title, url, content, date, author, media_url, media_type))
