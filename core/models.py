@@ -1,5 +1,3 @@
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime, timezone
 from core.utils import parse_datetime_utc
 
 class Article:

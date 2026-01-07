@@ -2,7 +2,6 @@ import requests
 import re
 import logging
 from typing import List, Dict, Any
-from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
 from dateutil import parser as dateparser
 from .base import RSSProvider

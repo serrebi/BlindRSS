@@ -3,9 +3,8 @@ import copy
 import threading
 import webbrowser
 from urllib.parse import urlparse
-from core.discovery import discover_feed, is_ytdlp_supported
+from core.discovery import is_ytdlp_supported
 from core import utils
-from core.casting import CastingManager
 
 
 class AddFeedDialog(wx.Dialog):
@@ -569,7 +568,6 @@ class FeedSearchDialog(wx.Dialog):
         threading.Thread(target=self._unified_search_manager, args=(term,), daemon=True).start()
 
     def _unified_search_manager(self, term):
-        import urllib.parse
         from queue import Queue
 
         results_queue = Queue()

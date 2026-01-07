@@ -6,7 +6,6 @@ import platform
 import os
 import urllib.request
 import contextlib
-import ctypes
 import time
 import tempfile
 

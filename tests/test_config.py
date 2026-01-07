@@ -1,6 +1,5 @@
 import unittest
 import os
-import json
 from unittest.mock import patch
 from core.config import ConfigManager
 

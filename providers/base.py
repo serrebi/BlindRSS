@@ -1,5 +1,5 @@
 import abc
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Tuple
 from core import utils
 from core.models import Article, Feed
 

@@ -1,5 +1,4 @@
 import unittest
-import math
 from core.audio_silence import (
     _rms,
     _dbfs,

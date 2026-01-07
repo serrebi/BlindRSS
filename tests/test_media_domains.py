@@ -1,7 +1,6 @@
 import sys
 import os
 import platform
-import json
 
 # Ensure we can import from core
 sys.path.append(os.getcwd())

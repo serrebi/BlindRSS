@@ -15,7 +15,6 @@ from core.discovery import discover_feed
 from core import utils
 from core import rumble as rumble_mod
 from core import odysee as odysee_mod
-from core import npr as npr_mod
 from bs4 import BeautifulSoup as BS, XMLParsedAsHTMLWarning
 import xml.etree.ElementTree as ET
 import logging
@@ -973,8 +972,6 @@ class LocalProvider(RSSProvider):
 
     def add_feed(self, url: str, category: str = "Uncategorized") -> bool:
         from core.discovery import get_ytdlp_feed_url
-        from core import rumble as rumble_mod
-        from core import odysee as odysee_mod
         
         # Try to get native feed URL for media sites (e.g. YouTube)
         real_url = get_ytdlp_feed_url(url) or discover_feed(url) or url
@@ -1059,7 +1056,6 @@ class LocalProvider(RSSProvider):
 
     def import_opml(self, path: str, target_category: str = None) -> bool:
         import os
-        import sys
         import tempfile
         
         log_filename = os.path.join(tempfile.gettempdir(), f"opml_debug_{int(time.time())}_{uuid.uuid4().hex[:4]}.log")
@@ -1192,7 +1188,7 @@ class LocalProvider(RSSProvider):
                     write_log(f"OPML Import error: {e}")
                     write_log(traceback.format_exc())
                     return False
-        except Exception as e:
+        except Exception:
             # Logging file failed; continue without logging
             return False
 

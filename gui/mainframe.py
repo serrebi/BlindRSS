@@ -2504,7 +2504,8 @@ class MainFrame(wx.Frame):
             self._apply_download_retention(target_dir)
             wx.CallAfter(lambda: wx.MessageBox(f"Downloaded to:\n{target_path}", "Download complete"))
         except Exception as e:
-            wx.CallAfter(lambda: wx.MessageBox(f"Download failed: {e}", "Download error", wx.ICON_ERROR))
+            error_msg = str(e)
+            wx.CallAfter(lambda: wx.MessageBox(f"Download failed: {error_msg}", "Download error", wx.ICON_ERROR))
 
     def _guess_extension(self, url, content_type=None):
         path = urlsplit(url).path if url else ""
@@ -2739,7 +2740,7 @@ class MainFrame(wx.Frame):
         try:
             success = self.provider.import_opml(path, target_category)
             wx.CallAfter(self._post_import_opml, success)
-        except Exception as e:
+        except Exception:
             import traceback
             traceback.print_exc()
 

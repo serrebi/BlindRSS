@@ -12,7 +12,7 @@ from core import playback_state
 from core.casting import CastingManager
 from urllib.parse import urlparse
 from core.range_cache_proxy import get_range_cache_proxy
-from core.audio_silence import merge_ranges, merge_ranges_with_gap, scan_audio_for_silence
+from core.audio_silence import merge_ranges_with_gap, scan_audio_for_silence
 from core.dependency_check import _log
 from .hotkeys import HoldRepeatHotkeys
 
@@ -1162,6 +1162,7 @@ class PlayerFrame(wx.Frame):
 
         # 2. Increase cushion past silence (2000ms for remote)
         resume_backoff = 2000 if is_remote else 800
+        retrigger_backoff = int(self.config_manager.get('silence_skip_retrigger_backoff_ms', 1400))
         
         for idx, (start, end) in enumerate(self._silence_ranges):
             if pos_ms < start - 1000:
@@ -1294,7 +1295,7 @@ class PlayerFrame(wx.Frame):
             self._last_range_proxy_cache_dir = cache_dir if cache_dir else None
             self._last_range_proxy_prefetch_kb = prefetch_kb
             self._last_range_proxy_initial_burst_kb = initial_burst_kb
-            self._last_range_proxy_initial_inline_kb = initial_inline_prefetch_kb
+            self._last_range_proxy_initial_inline_kb = initial_inline_kb
             
             proxied = proxy.proxify(url, headers=req_headers)
             print(f"DEBUG: Proxy URL generated: {proxied}")
@@ -1312,7 +1313,7 @@ class PlayerFrame(wx.Frame):
                             except Exception:
                                 pass
                             break
-                        except Exception as e:
+                        except Exception:
                             # print(f"DEBUG: Proxy connection check failed: {e}")
                             ok = False
                             time.sleep(0.1)

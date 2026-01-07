@@ -1,6 +1,4 @@
 import requests
-import time
-import urllib.parse
 import logging
 from typing import List, Dict, Any
 from datetime import datetime, timezone
