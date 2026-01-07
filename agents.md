@@ -113,6 +113,16 @@ Tests scripts are in the /tests directory. Add new ones to it if you need to tes
 
 The Build Agent manages the creation of redistributable packages for Windows using `build.bat`.
 
+### Release Protocol (MANDATORY)
+**Always use `.\build.bat release` for publishing.**
+This script is the **only approved method** for releases because it:
+1.  **Generates the Update Manifest (`BlindRSS-update.json`):** This file is critical for the application's auto-update feature. It MUST be generated and included in the GitHub release assets.
+2.  **Calculates SHA-256 Hashes:** Ensures integrity verification for users.
+3.  **Signs the Executable:** Applies Authenticode signing if `signtool.exe` is present.
+4.  **Automates Versioning:** Correctly bumps the version in `core/version.py` and creates Git tags.
+
+**Never** create a release manually via the GitHub website or CLI without running this script first to generate the necessary artifacts.
+
 ### Build Modes
 
 1.  **Iterative Build (`.\build.bat build`)**:
