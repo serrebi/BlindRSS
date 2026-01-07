@@ -462,8 +462,8 @@ class FeedPropertiesDialog(wx.Dialog):
         
         self.cat_ctrl.MoveAfterInTabOrder(self.url_ctrl)
         
-        ok_btn = btn_sizer.GetAffirmativeButton()
-        cancel_btn = btn_sizer.GetCancelButton()
+        ok_btn = self.FindWindow(wx.ID_OK)
+        cancel_btn = self.FindWindow(wx.ID_CANCEL)
         
         if ok_btn:
             ok_btn.MoveAfterInTabOrder(self.cat_ctrl)
