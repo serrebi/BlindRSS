@@ -467,8 +467,12 @@ class FeedPropertiesDialog(wx.Dialog):
         
         if ok_btn:
             ok_btn.MoveAfterInTabOrder(self.cat_ctrl)
+            ok_btn.Bind(wx.EVT_BUTTON, self.on_ok)
         if cancel_btn and ok_btn:
             cancel_btn.MoveAfterInTabOrder(ok_btn)
+
+    def on_ok(self, event):
+        self.EndModal(wx.ID_OK)
 
     def get_data(self):
         title = ""

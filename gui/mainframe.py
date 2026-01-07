@@ -1969,13 +1969,13 @@ class MainFrame(wx.Frame):
         if cached:
             try:
                 self._fulltext_loading_url = None
-                self.content_ctrl.SetValue(cached)
-                self.content_ctrl.SetInsertionPoint(0)
+                # Fix: Don't reset text if it's already displayed (preserves cursor position)
+                if self.content_ctrl.GetValue() != cached:
+                    self.content_ctrl.SetValue(cached)
+                    self.content_ctrl.SetInsertionPoint(0)
             except Exception:
                 pass
             return
-
-        # Cancel previous debounce timer.
         if getattr(self, "_fulltext_debounce", None) is not None:
             try:
                 self._fulltext_debounce.Stop()
