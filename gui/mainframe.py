@@ -761,6 +761,7 @@ class MainFrame(wx.Frame):
 
         menu = wx.Menu()
         open_item = menu.Append(wx.ID_ANY, "Open Article")
+        open_browser_item = menu.Append(wx.ID_ANY, "Open in Browser")
         menu.AppendSeparator()
         mark_read_item = menu.Append(wx.ID_ANY, "Mark as Read\tM")
         mark_unread_item = menu.Append(wx.ID_ANY, "Mark as Unread")
@@ -786,6 +787,7 @@ class MainFrame(wx.Frame):
         # on_article_activate (event) needs an event object, but I can re-create one or just call its core logic
         # For simplicity, pass idx to lambda
         self.Bind(wx.EVT_MENU, lambda e: self.on_article_activate(event=wx.ListEvent(wx.EVT_LIST_ITEM_ACTIVATED.type, self.list_ctrl.GetId(), idx=idx)), open_item)
+        self.Bind(wx.EVT_MENU, lambda e: self.on_open_in_browser(idx), open_browser_item)
         self.Bind(wx.EVT_MENU, lambda e: self.mark_article_read(idx), mark_read_item)
         self.Bind(wx.EVT_MENU, lambda e: self.mark_article_unread(idx), mark_unread_item)
         self.Bind(wx.EVT_MENU, lambda e: self.on_copy_link(idx), copy_item)
@@ -794,6 +796,12 @@ class MainFrame(wx.Frame):
 
         self.list_ctrl.PopupMenu(menu, menu_pos)
         menu.Destroy()
+
+    def on_open_in_browser(self, idx):
+        if idx != wx.NOT_FOUND and 0 <= idx < len(self.current_articles):
+            article = self.current_articles[idx]
+            if article.url:
+                webbrowser.open(article.url)
 
     def on_copy_feed_url(self, event):
         item = self.tree.GetSelection()
