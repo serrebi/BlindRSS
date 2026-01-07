@@ -218,6 +218,10 @@ class SettingsDialog(wx.Dialog):
         self.auto_update_chk = wx.CheckBox(general_panel, label="Check for updates on startup")
         self.auto_update_chk.SetValue(bool(config.get("auto_check_updates", True)))
         general_sizer.Add(self.auto_update_chk, 0, wx.ALL, 5)
+
+        self.refresh_startup_chk = wx.CheckBox(general_panel, label="Automatically refresh feeds upon start")
+        self.refresh_startup_chk.SetValue(bool(config.get("refresh_on_startup", True)))
+        general_sizer.Add(self.refresh_startup_chk, 0, wx.ALL, 5)
         
         general_panel.SetSizer(general_sizer)
         notebook.AddPage(general_panel, "General")
@@ -409,6 +413,7 @@ class SettingsDialog(wx.Dialog):
             "minimize_to_tray": self.min_tray_chk.GetValue(),
             "start_maximized": self.start_maximized_chk.GetValue(),
             "debug_mode": self.debug_mode_chk.GetValue(),
+            "refresh_on_startup": self.refresh_startup_chk.GetValue(),
             "auto_check_updates": self.auto_update_chk.GetValue(),
             "sounds_enabled": self.sounds_enabled_chk.GetValue(),
             "sound_refresh_complete": self.sound_complete_ctrl.GetValue(),

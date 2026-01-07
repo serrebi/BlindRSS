@@ -1193,6 +1193,12 @@ class MainFrame(wx.Frame):
             )
 
     def refresh_loop(self):
+        # If auto-refresh on startup is disabled, wait for one interval before the first check.
+        if not self.config_manager.get("refresh_on_startup", True):
+             interval = int(self.config_manager.get("refresh_interval", 300))
+             if self.stop_event.wait(interval):
+                 return
+
         while not self.stop_event.is_set():
             interval = int(self.config_manager.get("refresh_interval", 300))
             try:

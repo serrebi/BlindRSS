@@ -29,6 +29,7 @@ DEFAULT_CONFIG = {
     "feed_retry_attempts": 5,
     "active_provider": "local",
     "debug_mode": False,
+    "refresh_on_startup": True,
     "auto_check_updates": True,
     "sounds_enabled": True,
     "sound_refresh_complete": "sounds/refresh_complete.wav",
