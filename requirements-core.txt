@@ -1,0 +1,20 @@
+feedparser
+requests
+beautifulsoup4
+yt-dlp
+python-dateutil
+mutagen
+python-vlc
+pychromecast>=14.0.0
+async-upnp-client
+pyatv
+trafilatura
+webrtcvad-wheels
+# Pin setuptools to avoid pkg_resources deprecation warnings until upstream drops pkg_resources.
+setuptools<81
+pytest
+pyinstaller
+packaging
+brotli
+html5lib
+lxml

@@ -1,6 +1,21 @@
 import unittest
+from unittest.mock import patch
 
-from gui.player import _should_reapply_seek
+# Since we can't import wx in a headless environment, we'll mock it
+class MockWx:
+    class Window:
+        pass
+    class KeyEvent:
+        pass
+    class TimerEvent:
+        pass
+    class Dialog:
+        pass
+    class Frame:
+        pass
+
+with patch.dict('sys.modules', {'wx': MockWx()}):
+    from gui.player import _should_reapply_seek
 
 
 class SeekGuardLogicTests(unittest.TestCase):

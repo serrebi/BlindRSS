@@ -66,7 +66,7 @@ def is_ytdlp_supported(url: str) -> bool:
         "youtube.com", "youtu.be", "vimeo.com", "twitch.tv", "dailymotion.com",
         "soundcloud.com", "facebook.com", "twitter.com", "x.com", "tiktok.com",
         "instagram.com", "rumble.com", "bilibili.com", "mixcloud.com",
-        "odysee.com", "lbry.tv", "bbc.com",
+        "odysee.com", "lbry.tv",
     ]
     if any(kd in domain for kd in known_domains):
         return True
