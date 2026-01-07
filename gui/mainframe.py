@@ -1314,7 +1314,7 @@ class MainFrame(wx.Frame):
             self.feed_nodes = {}
             
             # Special Views
-            self.all_feeds_node = self.tree.AppendItem(self.root, "All Feeds")
+            self.all_feeds_node = self.tree.AppendItem(self.root, "All Articles")
             self.tree.SetItemData(self.all_feeds_node, {"type": "all", "id": "all"})
 
             self.unread_node = self.tree.AppendItem(self.root, "Unread Articles")
@@ -1787,11 +1787,16 @@ class MainFrame(wx.Frame):
         if not new_entries:
             return
 
-        # Remember selection by article id if possible
+        # Remember selection and focus by article id
         selected_id = getattr(self, "selected_article_id", None)
         
-        # Check if the list currently has keyboard focus
-        list_had_focus = (wx.Window.FindFocus() == self.list_ctrl)
+        focused_idx = self.list_ctrl.GetFocusedItem()
+        focused_article_id = None
+        if focused_idx != wx.NOT_FOUND and 0 <= focused_idx < len(self.current_articles):
+             focused_article_id = self.current_articles[focused_idx].id
+
+        # Check if the list currently has keyboard focus (system-wide)
+        list_has_system_focus = (wx.Window.FindFocus() == self.list_ctrl)
 
         self._updating_list = True
         try:
@@ -1813,22 +1818,24 @@ class MainFrame(wx.Frame):
                 self.list_ctrl.SetItem(idx, 2, article.author or "")
                 self.list_ctrl.SetItem(idx, 3, "Read" if article.is_read else "Unread")
             
-            # Restore selection state without stealing focus
+            # Restore selection state
             if selected_id:
                 for i, a in enumerate(self.current_articles):
                     if a.id == selected_id:
-                        # Set selection silently
                         self.list_ctrl.SetItemState(i, wx.LIST_STATE_SELECTED, wx.LIST_STATE_SELECTED)
-                        # Only restore focus state if the list actually had focus, 
-                        # otherwise screen readers might jump back to the list.
-                        if list_had_focus:
-                            self.list_ctrl.SetItemState(i, wx.LIST_STATE_FOCUSED, wx.LIST_STATE_FOCUSED)
-                        
-                        # Ensure visible only if it was already selected/focused
-                        # (prevents random scrolling in background)
-                        if list_had_focus:
-                            self.list_ctrl.EnsureVisible(i)
+                        if not focused_article_id: # If no focus tracked, ensure selection is visible
+                             self.list_ctrl.EnsureVisible(i)
                         break
+            
+            # Restore focus state (distinct from selection)
+            if focused_article_id:
+                for i, a in enumerate(self.current_articles):
+                    if a.id == focused_article_id:
+                        self.list_ctrl.SetItemState(i, wx.LIST_STATE_FOCUSED, wx.LIST_STATE_FOCUSED)
+                        # Only scroll to it if the list is actually active or we want to maintain context
+                        self.list_ctrl.EnsureVisible(i)
+                        break
+
             self.list_ctrl.Thaw()
         finally:
             self._updating_list = False
