@@ -27,8 +27,8 @@ BlindRSS can check GitHub Releases for updates, verify integrity, and safely swa
 - `signtool.exe` from Windows SDK (override path with `SIGNTOOL_PATH`).
 - GitHub CLI (`gh`) authenticated (`gh auth login`).
 
-
-  `.\build.bat`.
+### How to build with build.bat
+  `.\build.bat` with one of these options:
 - `build.bat build`   builds + signs + zips locally (no git/release).
 - `build.bat release` computes next version, bumps code, builds, signs, zips, generates update manifest, tags, pushes, and creates a GitHub release.
 - `build.bat dry-run` prints what it would do.
