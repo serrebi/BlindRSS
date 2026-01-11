@@ -1710,6 +1710,14 @@ class MainFrame(wx.Frame):
         focused_on_load_more = self._is_load_more_row(focused_idx)
         selected_on_load_more = self._is_load_more_row(selected_idx)
 
+        load_more_requested = focused_on_load_more or selected_on_load_more
+        first_new_article_id = None
+        if load_more_requested:
+            try:
+                first_new_article_id = new_articles[0].id
+            except Exception:
+                first_new_article_id = None
+
         focused_article_id = None
         if (not focused_on_load_more) and focused_idx != wx.NOT_FOUND and 0 <= focused_idx < len(self.current_articles):
              focused_article_id = self.current_articles[focused_idx].id
@@ -1787,9 +1795,8 @@ class MainFrame(wx.Frame):
         else:
             self._remove_loading_more_placeholder()
 
-        restore_load_more = focused_on_load_more or selected_on_load_more
-        if restore_load_more:
-            wx.CallAfter(self._restore_load_more_focus)
+        if load_more_requested and first_new_article_id:
+            wx.CallAfter(self._restore_loaded_page_focus, first_new_article_id)
         else:
             # Restore view state AFTER Thaw to ensure layout is updated
             wx.CallAfter(self._restore_list_view, focused_article_id, top_article_id, selected_article_id)
@@ -1856,6 +1863,27 @@ class MainFrame(wx.Frame):
             return
 
         target_idx = count - 1
+        try:
+            self.list_ctrl.SetItemState(target_idx, wx.LIST_STATE_SELECTED, wx.LIST_STATE_SELECTED)
+            self.list_ctrl.SetItemState(target_idx, wx.LIST_STATE_FOCUSED, wx.LIST_STATE_FOCUSED)
+            self.list_ctrl.EnsureVisible(target_idx)
+        except Exception:
+            pass
+
+    def _restore_loaded_page_focus(self, article_id: str | None):
+        """Focus the first newly loaded article after paging."""
+        if not article_id:
+            return
+        target_idx = -1
+        try:
+            for i, a in enumerate(self.current_articles):
+                if a.id == article_id:
+                    target_idx = i
+                    break
+        except Exception:
+            target_idx = -1
+        if target_idx < 0:
+            return
         try:
             self.list_ctrl.SetItemState(target_idx, wx.LIST_STATE_SELECTED, wx.LIST_STATE_SELECTED)
             self.list_ctrl.SetItemState(target_idx, wx.LIST_STATE_FOCUSED, wx.LIST_STATE_FOCUSED)
