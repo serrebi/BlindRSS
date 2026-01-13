@@ -505,15 +505,15 @@ class MainFrame(wx.Frame):
 
     def init_shortcuts(self):
         # Add accelerator for Ctrl+R (F5 is handled by menu item text usually, but being explicit helps)
-        self._toggle_favorite_id = int(wx.NewIdRef())
+        self._toggle_favorite_id = wx.NewIdRef()
         entries = [
             wx.AcceleratorEntry(wx.ACCEL_CTRL, ord('R'), wx.ID_REFRESH),
             wx.AcceleratorEntry(wx.ACCEL_NORMAL, wx.WXK_F5, wx.ID_REFRESH),
-            wx.AcceleratorEntry(wx.ACCEL_CTRL, ord('D'), self._toggle_favorite_id),
+            wx.AcceleratorEntry(wx.ACCEL_CTRL, ord('D'), int(self._toggle_favorite_id)),
         ]
         accel = wx.AcceleratorTable(entries)
         self.SetAcceleratorTable(accel)
-        self.Bind(wx.EVT_MENU, self.on_toggle_favorite, id=self._toggle_favorite_id)
+        self.Bind(wx.EVT_MENU, self.on_toggle_favorite, id=int(self._toggle_favorite_id))
 
 
     def on_char_hook(self, event: wx.KeyEvent) -> None:
@@ -869,7 +869,7 @@ class MainFrame(wx.Frame):
             try:
                 if getattr(self.provider, "supports_favorites", lambda: False)() and hasattr(self, "_toggle_favorite_id"):
                     label = "Remove from Favorites" if getattr(article_for_menu, "is_favorite", False) else "Add to Favorites"
-                    menu.Append(self._toggle_favorite_id, f"{label}\tCtrl+D")
+                    menu.Append(int(self._toggle_favorite_id), f"{label}\tCtrl+D")
             except Exception:
                 pass
         

@@ -1452,6 +1452,25 @@ class PlayerFrame(wx.Frame):
                     # Resolve a direct media URL via yt-dlp. We intentionally try
                     # *without* browser cookies first to avoid Windows cookie/DPAPI
                     # issues and reduce noisy stderr output.
+                    parsed_url = None
+                    try:
+                        parsed_url = urlparse(url)
+                    except Exception:
+                        parsed_url = None
+                    origin = None
+                    try:
+                        if parsed_url and parsed_url.scheme and parsed_url.netloc:
+                            origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                    except Exception:
+                        origin = None
+                    ytdlp_headers = {
+                        "User-Agent": utils.HEADERS.get("User-Agent", ""),
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    }
+                    if origin:
+                        ytdlp_headers["Origin"] = origin
+
                     base_opts = {
                         'format': 'bestaudio/best',
                         'quiet': True,
@@ -1461,6 +1480,8 @@ class PlayerFrame(wx.Frame):
                         'noprogress': True,
                         'color': 'never',
                         'logger': ytdlp_logger,
+                        'http_headers': ytdlp_headers,
+                        'geo_bypass': True,
                     }
                     if platform.system().lower() == "windows":
                         # Hide internal yt-dlp subprocess windows (ffmpeg/ffprobe)
@@ -1471,32 +1492,45 @@ class PlayerFrame(wx.Frame):
                             return ydl.extract_info(url, download=False)
 
                     info = None
-                    err_no_cookies = None
-                    err_with_cookies = None
-
+                    last_err = None
+                    tried_cookie_sources = []
+                    cookie_sources = list(discovery.get_ytdlp_cookie_sources(url) or [])
+                    prefer_cookies = False
                     try:
-                        info = _extract_with_opts(dict(base_opts))
-                    except Exception as e:
-                        err_no_cookies = e
+                        if parsed_url and parsed_url.netloc:
+                            prefer_cookies = "bloomberg.com" in parsed_url.netloc.lower()
+                    except Exception:
+                        prefer_cookies = False
 
-                    if info is None:
-                        tried_cookie_sources = []
-                        for source in (discovery.get_ytdlp_cookie_sources(url) or []):
+                    attempts = []
+                    if prefer_cookies and cookie_sources:
+                        for source in cookie_sources:
+                            attempts.append(("cookies", source))
+                        attempts.append(("base", None))
+                    else:
+                        attempts.append(("base", None))
+                        for source in cookie_sources:
+                            attempts.append(("cookies", source))
+
+                    for kind, source in attempts:
+                        opts = dict(base_opts)
+                        if kind == "cookies" and source:
                             if source in tried_cookie_sources:
                                 continue
                             tried_cookie_sources.append(source)
-                            opts = dict(base_opts)
                             opts["cookiesfrombrowser"] = source
-                            try:
-                                info = _extract_with_opts(opts)
+                        try:
+                            info = _extract_with_opts(opts)
+                            if kind == "cookies" and source:
                                 _log(f"yt-dlp cookies OK ({source[0]})")
-                                break
-                            except Exception as e:
-                                err_with_cookies = e
-                                _log(f"yt-dlp cookies failed ({source[0]}): {e}")
+                            break
+                        except Exception as e:
+                            last_err = e
+                            if kind == "cookies" and source:
+                                _log(f"yt-dlp cookies failed ({source[0]})")
 
                     if info is None:
-                        raise err_no_cookies or err_with_cookies or RuntimeError("yt-dlp extraction failed")
+                        raise last_err or RuntimeError("yt-dlp extraction failed")
 
                     # Handle playlists/multi-video pages
                     if 'entries' in info:
