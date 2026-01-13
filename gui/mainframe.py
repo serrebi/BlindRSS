@@ -318,8 +318,16 @@ class MainFrame(wx.Frame):
             self.list_ctrl.Freeze()
             for i, article in enumerate(self.current_articles):
                 idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
-                self.list_ctrl.SetItem(idx, 1, utils.humanize_article_date(article.date))
-                self.list_ctrl.SetItem(idx, 2, article.author or "")
+                feed_title = ""
+                try:
+                    feed = self.feed_map.get(article.feed_id)
+                    feed_title = (feed.title or "") if feed else ""
+                except Exception:
+                    feed_title = ""
+                self.list_ctrl.SetItem(idx, 1, feed_title)
+                self.list_ctrl.SetItem(idx, 2, utils.humanize_article_date(article.date))
+                self.list_ctrl.SetItem(idx, 3, article.author or "")
+                self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
             self.list_ctrl.Thaw()
 
             if not bool(st.get("fully_loaded", False)):
