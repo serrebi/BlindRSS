@@ -25,8 +25,49 @@ def _chapters_references_old_articles(cursor: sqlite3.Cursor) -> bool:
     return any(len(row) > 2 and row[2] == "old_articles" for row in rows)
 
 
+def _articles_id_is_unique(cursor: sqlite3.Cursor) -> bool:
+    if not _table_exists(cursor, "articles"):
+        return False
+
+    try:
+        cursor.execute("PRAGMA table_info(articles)")
+        table_info = cursor.fetchall()
+    except sqlite3.Error:
+        return False
+
+    pk_columns = [row[1] for row in table_info if row and len(row) > 5 and row[5]]
+    if pk_columns == ["id"]:
+        return True
+
+    try:
+        cursor.execute("PRAGMA index_list(articles)")
+        index_list = cursor.fetchall()
+    except sqlite3.Error:
+        return False
+
+    for row in index_list:
+        if not row or len(row) < 3:
+            continue
+        index_name = row[1]
+        is_unique = bool(row[2])
+        if not is_unique:
+            continue
+
+        safe_index_name = str(index_name).replace('"', '""')
+        try:
+            cursor.execute(f'PRAGMA index_info("{safe_index_name}")')
+            index_info = cursor.fetchall()
+        except sqlite3.Error:
+            continue
+
+        if len(index_info) == 1 and len(index_info[0]) > 2 and index_info[0][2] == "id":
+            return True
+
+    return False
+
+
 def _migrate_legacy_chapters_foreign_key(conn: sqlite3.Connection) -> None:
-    """Repair legacy schemas where `chapters` references a missing `old_articles` table.
+    """Repair legacy schemas where `chapters` references `old_articles`.
 
     Older databases used a `chapters.article_id -> old_articles(id)` foreign key.
     With foreign key enforcement enabled, deletes/updates on chapters can fail with:
@@ -45,15 +86,17 @@ def _migrate_legacy_chapters_foreign_key(conn: sqlite3.Connection) -> None:
     try:
         cursor.execute("SAVEPOINT migrate_chapters_old_articles_fk")
 
-        can_add_fk = False
-        try:
-            if _table_exists(cursor, "articles"):
-                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_id_unique ON articles (id)")
-                can_add_fk = True
-        except sqlite3.IntegrityError:
-            can_add_fk = False
-        except sqlite3.Error:
-            can_add_fk = False
+        can_add_fk = _articles_id_is_unique(cursor)
+        if not can_add_fk:
+            try:
+                cursor.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_id_unique ON articles (id)"
+                )
+            except sqlite3.IntegrityError:
+                pass
+            except sqlite3.Error:
+                pass
+            can_add_fk = _articles_id_is_unique(cursor)
 
         prev_fk_setting = None
         try:
