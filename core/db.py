@@ -92,10 +92,8 @@ def _migrate_legacy_chapters_foreign_key(conn: sqlite3.Connection) -> None:
                 cursor.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_id_unique ON articles (id)"
                 )
-            except sqlite3.IntegrityError:
-                pass
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as e:
+                log.debug("Could not create unique index on articles(id) during migration: %s", e)
             can_add_fk = _articles_id_is_unique(cursor)
 
         prev_fk_setting = None
