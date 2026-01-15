@@ -21,6 +21,22 @@ log = logging.getLogger(__name__)
 MIN_FORCE_SAVE_MS = 2000
 MIN_TRIVIAL_POSITION_MS = 1000
 
+_SEEKABLE_EXTENSIONS = (
+    ".mp3",
+    ".m4a",
+    ".m4b",
+    ".aac",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".flac",
+    ".mp4",
+    ".m4v",
+    ".webm",
+    ".mkv",
+    ".mov",
+)
+
 
 def _should_reapply_seek(target_ms: int, current_ms: int, tolerance_ms: int, remaining_retries: int) -> bool:
     try:
@@ -196,18 +212,26 @@ class PlayerFrame(wx.Frame):
         self.current_chapters = []
         self.chapter_marks = []
         self.current_url = None
+        self.current_article_id = None
         self._load_seq = 0
         self._active_load_seq = 0
         self.current_title = "No Track Loaded"
 
         # Persistent playback resume (stored locally in SQLite, keyed by the input URL).
         self._resume_id = None
+        self._resume_fallback_id = None
+        self._resume_memory_state = {}
+        self._resume_pending_db_upserts = {}
+        self._resume_pending_db_seek_supported = {}
+        self._resume_pending_db_flush_calllater = None
+        self._resume_seek_supported_marked = set()
         self._resume_last_save_ts = 0.0
         self._resume_restore_inflight = False
         self._resume_restore_id = None
         self._resume_restore_target_ms = None
         self._resume_restore_attempts = 0
         self._resume_restore_last_attempt_ts = 0.0
+        self._resume_restore_started_ts = 0.0
         self._resume_seek_save_calllater = None
         self._resume_seek_save_id = None
         self._stopped_needs_resume = False
@@ -386,6 +410,256 @@ class PlayerFrame(wx.Frame):
             return str(url)
         return None
 
+    def _set_resume_ids(self, url: str, article_id: object | None) -> None:
+        fallback = str(url) if url else None
+
+        primary = None
+        if article_id is not None:
+            try:
+                aid = str(article_id).strip()
+            except TypeError as e:
+                log.warning("Could not convert article_id to string: %s", e)
+                aid = ""
+            if aid:
+                primary = f"article:{aid}"
+
+        self._resume_id = primary or fallback
+        self._resume_fallback_id = fallback if primary else None
+
+    def _current_input_looks_seekable(self) -> bool:
+        url = ""
+        try:
+            url = str(getattr(self, "current_url", "") or "")
+        except Exception as e:
+            log.debug("Could not get current_url for seekable check: %s", e)
+            url = ""
+        if not url:
+            return False
+        low = url.lower()
+        if ".m3u8" in low:
+            return False
+        try:
+            path = urlparse(low).path.lower() or low
+        except Exception as e:
+            log.debug("Could not parse URL path for seekable check: %s", e)
+            path = low
+        return path.endswith(_SEEKABLE_EXTENSIONS)
+
+    def _cache_resume_state(
+        self,
+        resume_id: str,
+        position_ms: int,
+        duration_ms: int | None,
+        title: str | None,
+        completed: bool,
+        seek_supported: bool | None = None,
+    ) -> None:
+        if not resume_id:
+            return
+        try:
+            self._resume_memory_state[str(resume_id)] = playback_state.PlaybackState(
+                id=str(resume_id),
+                position_ms=int(position_ms or 0),
+                duration_ms=(int(duration_ms) if duration_ms is not None else None),
+                updated_at=int(time.time()),
+                completed=bool(completed),
+                seek_supported=seek_supported,
+                title=(str(title) if title else None),
+            )
+        except Exception:
+            log.exception("Failed to cache resume state for %s", resume_id)
+
+    def _save_playback_state(
+        self,
+        resume_id: str,
+        position_ms: int,
+        duration_ms: int | None,
+        title: str | None,
+        completed: bool,
+        *,
+        seek_supported: bool | None = None,
+    ) -> bool:
+        """Caches state and persists it, queuing a retry if SQLite is locked.
+
+        Returns True if the state was written to DB or queued for a later flush.
+        """
+        if not resume_id:
+            return False
+
+        rid = str(resume_id)
+        pos_ms = int(position_ms or 0)
+
+        self._cache_resume_state(
+            rid,
+            pos_ms,
+            duration_ms,
+            title,
+            bool(completed),
+            seek_supported=seek_supported,
+        )
+
+        ok = False
+        try:
+            ok = playback_state.upsert_playback_state(
+                rid,
+                pos_ms,
+                duration_ms=duration_ms,
+                title=title,
+                completed=bool(completed),
+                seek_supported=seek_supported,
+            )
+        except Exception:
+            log.exception("Failed to persist playback_state for %s", rid)
+            ok = False
+
+        if ok:
+            return True
+
+        try:
+            self._queue_resume_db_upsert(
+                rid,
+                pos_ms,
+                duration_ms,
+                title,
+                bool(completed),
+                seek_supported=seek_supported,
+            )
+            return True
+        except Exception:
+            log.exception("Failed to queue playback_state upsert for %s", rid)
+            return False
+
+    def _get_playback_state_cached(self, resume_id: str) -> playback_state.PlaybackState | None:
+        """Return playback state for resume_id using in-memory cache, falling back to SQLite."""
+        if not resume_id:
+            return None
+
+        rid = str(resume_id)
+
+        state = self._resume_memory_state.get(rid)
+        if state is not None:
+            return state
+
+        try:
+            state = playback_state.get_playback_state(rid)
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower():
+                log.debug("playback_state is locked while reading %s; skipping", rid)
+                return None
+            log.exception("Failed to read playback_state for resume: %s", rid)
+            return None
+        except sqlite3.Error:
+            log.exception("Failed to read playback_state for resume: %s", rid)
+            return None
+        except Exception:
+            log.exception("Unexpected error while reading playback_state for resume: %s", rid)
+            return None
+
+        if state is None:
+            return None
+
+        self._resume_memory_state[rid] = state
+        return state
+
+    def _schedule_resume_db_flush(self, delay_ms: int = 450) -> None:
+        try:
+            if self._resume_pending_db_flush_calllater is not None:
+                return
+            self._resume_pending_db_flush_calllater = wx.CallLater(int(max(50, delay_ms)), self._flush_pending_resume_db_writes)
+        except Exception:
+            self._resume_pending_db_flush_calllater = None
+
+    def _queue_resume_db_upsert(
+        self,
+        resume_id: str,
+        position_ms: int,
+        duration_ms: int | None,
+        title: str | None,
+        completed: bool,
+        seek_supported: bool | None = None,
+    ) -> None:
+        if not resume_id:
+            return
+        try:
+            self._resume_pending_db_upserts[str(resume_id)] = {
+                "position_ms": int(position_ms or 0),
+                "duration_ms": (int(duration_ms) if duration_ms is not None else None),
+                "title": (str(title) if title else None),
+                "completed": bool(completed),
+                "seek_supported": seek_supported,
+            }
+        except Exception:
+            log.exception("Failed to queue resume DB upsert for %s", resume_id)
+            return
+        self._schedule_resume_db_flush()
+
+    def _queue_resume_db_seek_supported(self, resume_id: str, seek_supported: bool) -> None:
+        if not resume_id:
+            return
+        try:
+            self._resume_pending_db_seek_supported[str(resume_id)] = bool(seek_supported)
+        except Exception:
+            log.exception("Failed to queue resume DB seek_supported for %s", resume_id)
+            return
+        self._schedule_resume_db_flush()
+
+    def _flush_pending_items(
+        self,
+        pending: dict,
+        write_item,
+        retry_value,
+        drop_log_message: str,
+    ) -> dict:
+        remaining = {}
+        for rid, payload in pending.items():
+            try:
+                ok = write_item(str(rid), payload)
+                if ok is False:
+                    remaining[str(rid)] = retry_value(payload)
+            except Exception:
+                log.exception(drop_log_message, rid)
+        return remaining
+
+    def _flush_pending_resume_upserts(self) -> dict:
+        pending = self._resume_pending_db_upserts.copy()
+        remaining = self._flush_pending_items(
+            pending,
+            lambda rid, payload: playback_state.upsert_playback_state(
+                str(rid),
+                int(payload.get("position_ms", 0) or 0),
+                duration_ms=payload.get("duration_ms", None),
+                title=payload.get("title", None),
+                completed=bool(payload.get("completed", False)),
+                seek_supported=payload.get("seek_supported", None),
+            ),
+            lambda payload: dict(payload),
+            "Failed to flush queued playback_state upsert for %s; dropping item",
+        )
+        self._resume_pending_db_upserts = remaining
+        return remaining
+
+    def _flush_pending_seek_supported_updates(self) -> dict:
+        pending_seek = self._resume_pending_db_seek_supported.copy()
+        if not pending_seek:
+            return {}
+        remaining_seek = self._flush_pending_items(
+            pending_seek,
+            lambda rid, val: playback_state.set_seek_supported(str(rid), bool(val)),
+            lambda val: bool(val),
+            "Failed to flush queued seek_supported update for %s; dropping item",
+        )
+        self._resume_pending_db_seek_supported = remaining_seek
+        return remaining_seek
+
+    def _flush_pending_resume_db_writes(self) -> None:
+        self._resume_pending_db_flush_calllater = None
+
+        remaining = self._flush_pending_resume_upserts()
+        remaining_seek = self._flush_pending_seek_supported_updates()
+
+        if remaining or remaining_seek:
+            self._schedule_resume_db_flush(delay_ms=900)
+
     def _stop_calllater(self, attr_name: str, log_message: str) -> None:
         try:
             calllater = getattr(self, attr_name, None)
@@ -415,6 +689,7 @@ class PlayerFrame(wx.Frame):
         self._resume_restore_target_ms = None
         self._resume_restore_attempts = 0
         self._resume_restore_last_attempt_ts = 0.0
+        self._resume_restore_started_ts = 0.0
 
     def _note_user_seek(self) -> None:
         try:
@@ -425,6 +700,51 @@ class PlayerFrame(wx.Frame):
             self._silence_skip_reset_floor = True
         except Exception:
             log.exception("Error resetting resume state on user seek")
+        try:
+            self._mark_current_resume_seek_supported()
+        except Exception as e:
+            log.debug("Error marking current resume as seek supported: %s", e)
+
+    def _mark_current_resume_seek_supported(self) -> None:
+        rid = self._get_resume_id()
+        if not rid:
+            return
+        rid = str(rid)
+
+        fallback = self._resume_fallback_id
+
+        ids = [rid]
+        if fallback and str(fallback) != rid:
+            ids.append(str(fallback))
+
+        for pid in ids:
+            if not pid:
+                continue
+            if pid in self._resume_seek_supported_marked:
+                continue
+            self._resume_seek_supported_marked.add(pid)
+
+            st = self._resume_memory_state.get(pid)
+            if st is not None and st.seek_supported is not True:
+                self._cache_resume_state(
+                    pid,
+                    int(st.position_ms or 0),
+                    st.duration_ms,
+                    st.title,
+                    bool(st.completed),
+                    seek_supported=True,
+                )
+
+            try:
+                ok = playback_state.set_seek_supported(pid, True)
+            except Exception as e:
+                log.debug("Failed to persist seek_supported=True for %s: %s", pid, e)
+                ok = False
+            if ok is False:
+                try:
+                    self._queue_resume_db_seek_supported(pid, True)
+                except Exception:
+                    log.exception("Failed to queue seek_supported update for %s", pid)
 
     def _schedule_resume_save_after_seek(self, delay_ms: int = 900) -> None:
         if not self._resume_feature_enabled():
@@ -475,17 +795,12 @@ class PlayerFrame(wx.Frame):
         if not self._resume_feature_enabled():
             return
 
-        try:
-            state = playback_state.get_playback_state(resume_id)
-        except sqlite3.Error:
-            log.exception("Failed to read playback_state for resume")
-            return
-        except Exception:
-            log.exception("Unexpected error while reading playback_state for resume")
-            return
+        rid = str(resume_id)
+
+        state = self._get_playback_state_cached(rid)
         if not state or state.completed:
             return
-        if state.seek_supported is False:
+        if state.seek_supported is False and not self._current_input_looks_seekable():
             # We previously learned this stream is not seekable, so avoid an auto-resume loop.
             return
 
@@ -501,12 +816,13 @@ class PlayerFrame(wx.Frame):
         if dur_ms > 0 and (dur_ms - pos_ms) <= max(0, complete_threshold_ms):
             # Treat items close to the end as completed (avoid resuming to the credits).
             try:
-                playback_state.upsert_playback_state(
-                    resume_id,
+                self._save_playback_state(
+                    rid,
                     0,
-                    duration_ms=dur_ms,
-                    title=title,
-                    completed=True,
+                    int(dur_ms),
+                    title,
+                    True,
+                    seek_supported=state.seek_supported,
                 )
             except Exception:
                 log.exception("Failed to mark playback_state as completed")
@@ -525,10 +841,11 @@ class PlayerFrame(wx.Frame):
         self._pending_resume_seek_attempts = 0
         self._pending_resume_paused = False
         self._resume_restore_inflight = True
-        self._resume_restore_id = resume_id
+        self._resume_restore_id = rid
         self._resume_restore_target_ms = target_ms
         self._resume_restore_attempts = 0
         self._resume_restore_last_attempt_ts = 0.0
+        self._resume_restore_started_ts = time.monotonic()
         # Avoid writing a 0-position back to the DB while the resume seek is still pending.
         self._resume_last_save_ts = time.monotonic()
 
@@ -538,6 +855,7 @@ class PlayerFrame(wx.Frame):
         resume_id = self._get_resume_id()
         if not resume_id:
             return
+        resume_id = str(resume_id)
 
         restore_pending = bool(getattr(self, "_resume_restore_inflight", False)) and getattr(self, "_pending_resume_seek_ms", None) is not None
 
@@ -603,19 +921,23 @@ class PlayerFrame(wx.Frame):
                 completed = True
                 pos_ms = 0
 
-        title = getattr(self, "current_title", None)
+        # Avoid overwriting meaningful progress with a near-zero forced save. This can happen if
+        # VLC briefly reports 0ms (e.g., during reconnect/pause glitches) right before we persist.
+        if force and not completed and int(pos_ms) < int(MIN_FORCE_SAVE_MS):
+            existing = self._get_playback_state_cached(resume_id)
+            if existing and not existing.completed and int(existing.position_ms or 0) >= int(MIN_FORCE_SAVE_MS):
+                return
 
-        try:
-            playback_state.upsert_playback_state(
-                resume_id,
-                int(pos_ms),
-                duration_ms=(int(dur_ms) if dur_ms is not None else None),
-                title=(str(title) if title else None),
-                completed=bool(completed),
-            )
+        title = getattr(self, "current_title", None)
+        saved = self._save_playback_state(
+            resume_id,
+            int(pos_ms),
+            (int(dur_ms) if dur_ms is not None else None),
+            (str(title) if title else None),
+            bool(completed),
+        )
+        if saved:
             self._resume_last_save_ts = float(now)
-        except Exception:
-            log.exception("Failed to persist playback_state")
 
     def focus_play_pause(self) -> None:
         try:
@@ -639,14 +961,14 @@ class PlayerFrame(wx.Frame):
 
     def _on_vlc_error(self, event) -> None:
         _log("VLC encountered an error event.")
-        print("DEBUG: VLC error event")
+        log.debug("VLC error event")
         try:
             wx.CallAfter(self._handle_vlc_error)
         except Exception:
-            pass
+            log.exception("Failed to schedule VLC error handler")
 
     def _handle_vlc_error(self) -> None:
-        print("DEBUG: Handling VLC error")
+        log.debug("Handling VLC error")
         if self.is_casting:
             return
         if not self._last_vlc_url:
@@ -691,7 +1013,7 @@ class PlayerFrame(wx.Frame):
                 pass
 
     def _load_vlc_url(self, final_url: str, load_seq: int | None = None) -> None:
-        print(f"DEBUG: _load_vlc_url {final_url}")
+        log.debug("load_vlc_url: %s", final_url)
         try:
             if load_seq is None:
                 load_seq = int(getattr(self, '_active_load_seq', 0))
@@ -716,7 +1038,7 @@ class PlayerFrame(wx.Frame):
             else:
                 file_cache_ms = max(500, cache_ms)
 
-            print(f"DEBUG: VLC options: network-caching={cache_ms}, file-caching={file_cache_ms}")
+            log.debug("VLC options: network-caching=%s file-caching=%s", cache_ms, file_cache_ms)
             media.add_option(f':network-caching={cache_ms}')
             media.add_option(f':file-caching={file_cache_ms}')
             media.add_option(':http-reconnect')
@@ -727,14 +1049,15 @@ class PlayerFrame(wx.Frame):
         def _do_play():
             try:
                 if int(getattr(self, '_active_load_seq', 0)) != int(load_seq):
-                    print("DEBUG: _do_play aborted (stale seq)")
+                    log.debug("_do_play aborted (stale seq)")
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Error checking load sequence in _do_play: %s", e)
             try:
-                print("DEBUG: Calling self.player.play()")
+                log.debug("Calling self.player.play()")
                 self.player.play()
             except Exception:
+                log.exception("Error calling self.player.play()")
                 return
             try:
                 self.player.audio_set_volume(int(getattr(self, 'volume', 100)))
@@ -912,7 +1235,13 @@ class PlayerFrame(wx.Frame):
                 self._pending_resume_seek_ms = max(0, int(cast_pos_ms))
                 self._pending_resume_seek_attempts = 0
                 self._pending_resume_paused = (not cast_was_playing)
-                self.load_media(self.current_url, is_youtube=False, chapters=self.current_chapters)
+                self.load_media(
+                    self.current_url,
+                    use_ytdlp=False,
+                    chapters=self.current_chapters,
+                    title=self.current_title,
+                    article_id=getattr(self, "current_article_id", None),
+                )
                 self._cast_handoff_source_url = None
             return
 
@@ -1124,12 +1453,9 @@ class PlayerFrame(wx.Frame):
                     return
                 self._silence_ranges = merged
                 self._silence_scan_ready = True
-                try:
-                    print(f"DEBUG: silence scan ready ({len(merged)} ranges)")
-                except Exception:
-                    pass
+                log.debug("Silence scan ready (%s ranges)", len(merged))
             except Exception as e:
-                print(f"DEBUG: silence scan failed: {e}")
+                log.debug("Silence scan failed: %s", e)
                 self._silence_scan_ready = False
 
         try:
@@ -1328,12 +1654,13 @@ class PlayerFrame(wx.Frame):
             self._last_range_proxy_initial_inline_kb = initial_inline_prefetch_kb
             
             proxied = proxy.proxify(url, headers=req_headers)
-            print(f"DEBUG: Proxy URL generated: {proxied}")
+            log.debug("Proxy URL generated: %s", proxied)
             try:
                 pu = urlparse(proxied)
                 if pu.hostname in ("127.0.0.1", "localhost") and pu.port:
                     deadline = time.time() + 3.0
                     ok = False
+                    last_err = None
                     while time.time() < deadline:
                         try:
                             s = socket.create_connection((pu.hostname, int(pu.port)), timeout=0.5)
@@ -1344,33 +1671,44 @@ class PlayerFrame(wx.Frame):
                                 pass
                             break
                         except Exception as e:
-                            # print(f"DEBUG: Proxy connection check failed: {e}")
+                            last_err = e
                             ok = False
                             time.sleep(0.1)
                     if not ok:
-                        print("DEBUG: Proxy skipped - connection check timed out.")
+                        if last_err is not None:
+                            log.debug("Proxy connection check failed: %s", last_err)
+                        log.debug("Proxy skipped - connection check timed out")
                         self._last_used_range_proxy = False
                         self._last_vlc_url = url
                         return url
             except Exception as e:
-                print(f"DEBUG: Proxy connection check error: {e}")
+                log.debug("Proxy connection check error: %s", e)
                 pass
             
-            print("DEBUG: Proxy connection verified. Using proxy.")
+            log.debug("Proxy connection verified; using proxy")
             self._last_vlc_url = proxied
             return proxied
         except Exception as e:
-            print(f"DEBUG: _maybe_range_cache_url exception: {e}")
+            log.debug("_maybe_range_cache_url exception: %s", e)
             return url
 
-    def load_media(self, url, use_ytdlp=False, chapters=None, title=None):
+    def load_media(self, url, use_ytdlp=False, chapters=None, title=None, article_id=None):
         if not self.initialized and not self.is_casting:
             wx.MessageBox("VLC is not initialized. Playback is unavailable.", "Error", wx.OK | wx.ICON_ERROR)
             return
         _log(f"load_media: {url} (ytdlp={use_ytdlp})")
-        print(f"DEBUG: load_media url={url}, is_casting={self.is_casting}")
+        log.debug("load_media url=%s is_casting=%s", url, self.is_casting)
         if not url:
             return
+
+        try:
+            if article_id is not None:
+                self.current_article_id = str(article_id)
+            else:
+                self.current_article_id = None
+        except Exception:
+            log.exception("Error updating current_article_id")
+            self.current_article_id = None
 
         # Persist the previous item's position before switching to the new one.
         try:
@@ -1386,7 +1724,12 @@ class PlayerFrame(wx.Frame):
             self._stopped_needs_resume = False
             
         self.current_url = url
-        self._resume_id = str(url)
+        try:
+            self._set_resume_ids(str(url), article_id)
+        except Exception:
+            log.exception("Failed to set resume IDs, falling back to URL-based ID")
+            self._resume_id = str(url)
+            self._resume_fallback_id = None
         self._resume_restore_inflight = False
         self._resume_restore_id = None
         self._resume_restore_target_ms = None
@@ -1565,15 +1908,18 @@ class PlayerFrame(wx.Frame):
 
                     final_url = info.get('url')
                     if not final_url:
-                         raise RuntimeError("No media URL found in yt-dlp info")
+                        raise RuntimeError("No media URL found in yt-dlp info")
 
                     ytdlp_headers = info.get('http_headers', {})
                     self.current_title = info.get('title', title or 'Media Stream')
                 except Exception as e:
-                    print(f"yt-dlp resolve failed: {e}")
+                    log.exception("yt-dlp resolve failed")
                     _log(f"yt-dlp resolve failed: {e}")
-                    wx.MessageBox(f"Could not resolve media URL via yt-dlp: {e}",
-                                  "Error", wx.ICON_ERROR)
+                    wx.MessageBox(
+                        f"Could not resolve media URL via yt-dlp: {e}",
+                        "Error",
+                        wx.ICON_ERROR,
+                    )
                     return
         else:
             self.current_title = title or "Playing Audio..."
@@ -1588,9 +1934,45 @@ class PlayerFrame(wx.Frame):
 
         # Apply local resume state (if any) before starting playback.
         try:
-            self._maybe_restore_playback_position(str(url), self.current_title)
+            primary_resume_id = self._get_resume_id()
+            fallback_resume_id = self._resume_fallback_id
+
+            if primary_resume_id:
+                self._maybe_restore_playback_position(str(primary_resume_id), self.current_title)
+
+            if (
+                getattr(self, "_pending_resume_seek_ms", None) is None
+                and fallback_resume_id
+                and str(fallback_resume_id) != str(primary_resume_id or "")
+            ):
+                self._maybe_restore_playback_position(str(fallback_resume_id), self.current_title)
+
+                # Opportunistically migrate URL-keyed state to the primary id.
+                try:
+                    if (
+                        primary_resume_id
+                        and str(getattr(self, "_resume_restore_id", None) or "") == str(fallback_resume_id)
+                        and str(primary_resume_id) != str(fallback_resume_id)
+                    ):
+                        st = self._get_playback_state_cached(str(fallback_resume_id))
+                        if st is not None:
+                            pos_ms = int(getattr(st, "position_ms", 0) or 0)
+                            dur_ms = getattr(st, "duration_ms", None)
+                            completed = bool(getattr(st, "completed", False))
+                            seek_supported = None  # Let seekability be re-detected for the new key.
+
+                            self._save_playback_state(
+                                str(primary_resume_id),
+                                pos_ms,
+                                dur_ms,
+                                self.current_title,
+                                completed,
+                                seek_supported=seek_supported,
+                            )
+                except Exception:
+                    log.exception("Failed to migrate playback state")
         except Exception:
-            pass
+            log.exception("Error during playback position restore and migration")
 
         if self.is_casting:
             try:
@@ -1781,7 +2163,9 @@ class PlayerFrame(wx.Frame):
                         self._pending_resume_seek_ms = None
                         if restore_id:
                             try:
-                                playback_state.set_seek_supported(str(restore_id), True)
+                                ok = playback_state.set_seek_supported(str(restore_id), True)
+                                if ok is False:
+                                    self._queue_resume_db_seek_supported(str(restore_id), True)
                             except Exception:
                                 log.exception("Failed to update seek_supported=True for playback_state")
                         try:
@@ -1791,31 +2175,48 @@ class PlayerFrame(wx.Frame):
                     else:
                         state_i = None
                         try:
-                            state_i = int(self.player.get_state())
-                        except Exception:
+                            state_i = self.player.get_state()
+                        except Exception as e:
+                            log.debug("Failed to read VLC state: %s", e)
                             state_i = None
+
+                        opening_states = (vlc.State.Opening, vlc.State.Buffering)
 
                         # If VLC reports the stream is not seekable, stop trying and remember it.
                         try:
-                            already_tried = getattr(self, "_resume_restore_attempts", 0)
-                            if (
-                                state_i is not None
-                                and state_i not in (1, 2)
-                                and already_tried > 0
-                                and restore_id
-                                and hasattr(self.player, "is_seekable")
-                                and (self.player.is_seekable() is False)
-                            ):
-                                playback_state.set_seek_supported(str(restore_id), False)
+                            already_tried = int(getattr(self, "_resume_restore_attempts", 0) or 0)
+                            started_ts = float(getattr(self, "_resume_restore_started_ts", 0.0) or 0.0)
+                            elapsed = float(now_mono) - float(started_ts) if started_ts else 0.0
+
+                            player_stalled = state_i is not None and state_i not in opening_states
+                            try:
+                                vlc_reports_unseekable = hasattr(self.player, "is_seekable") and (self.player.is_seekable() is False)
+                            except Exception as e:
+                                log.debug("Failed to check VLC seekable flag: %s", e)
+                                vlc_reports_unseekable = False
+
+                            should_give_up = (
+                                restore_id
+                                and player_stalled
+                                and already_tried >= 3
+                                and elapsed >= 8.0
+                                and vlc_reports_unseekable
+                                and not self._current_input_looks_seekable()
+                            )
+
+                            if should_give_up:
+                                ok = playback_state.set_seek_supported(str(restore_id), False)
+                                if ok is False:
+                                    self._queue_resume_db_seek_supported(str(restore_id), False)
                                 self._pending_resume_seek_ms = None
                                 self._resume_restore_inflight = False
                                 restore_inflight = False
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log.debug("Error evaluating seekability during resume restore: %s", e)
 
                         if restore_inflight:
                             # Don't spam play() while VLC is Opening/Buffering; load already starts playback.
-                            if state_i in (1, 2):
+                            if state_i in opening_states:
                                 pass
                             else:
                                 now_seek = time.monotonic()
@@ -1828,7 +2229,7 @@ class PlayerFrame(wx.Frame):
                                         attempts = int(getattr(self, "_resume_restore_attempts", 0) or 0)
                                     except Exception:
                                         attempts = 0
-                                    if attempts < 1:
+                                    if attempts < 3:
                                         try:
                                             self.player.set_time(int(target_ms))
                                             try:
@@ -1848,7 +2249,7 @@ class PlayerFrame(wx.Frame):
                                         except Exception:
                                             pass
                                     else:
-                                        # After we requested a seek once, avoid re-seeking (it can cause audio loops).
+                                        # After we requested a seek a few times, avoid re-seeking (it can cause audio loops).
                                         # If VLC does not land close enough within a few seconds, give up for this
                                         # session without marking the source as unseekable.
                                         try:
@@ -2156,6 +2557,25 @@ class PlayerFrame(wx.Frame):
     def has_media_loaded(self) -> bool:
         return bool(getattr(self, "current_url", None))
 
+    def is_current_media(self, article_id: object | None, media_url: str | None) -> bool:
+        """Returns True if the given article_id/media_url matches what's currently loaded."""
+        try:
+            if not self.has_media_loaded():
+                return False
+
+            cur_id = getattr(self, "current_article_id", None)
+            if cur_id is not None and article_id is not None and str(cur_id) == str(article_id):
+                return True
+
+            cur_url = getattr(self, "current_url", None)
+            if cur_url and media_url and str(cur_url) == str(media_url):
+                return True
+        except Exception:
+            log.exception("Error checking if media is current")
+            return False
+
+        return False
+
     def is_audio_playing(self) -> bool:
         """Return True only when audio is actively playing."""
         try:
@@ -2418,7 +2838,7 @@ class PlayerFrame(wx.Frame):
     
 
     def _apply_seek_time_ms(self, target_ms: int, force: bool = False) -> None:
-        print(f"DEBUG: _apply_seek_time_ms target={target_ms} force={force}")
+        log.debug("_apply_seek_time_ms target=%s force=%s", target_ms, force)
         if self.is_casting:
             return
         try:
@@ -2637,7 +3057,7 @@ class PlayerFrame(wx.Frame):
             log.exception("Error scheduling resume save in seek_relative_ms")
 
     def play(self) -> None:
-        print("DEBUG: play called")
+        log.debug("play called")
         if not self.has_media_loaded():
             return
         if self.is_casting:
@@ -2676,9 +3096,13 @@ class PlayerFrame(wx.Frame):
                 pass
 
     def pause(self) -> None:
-        print("DEBUG: pause called")
+        log.debug("pause called")
         if not self.has_media_loaded():
             return
+        try:
+            self._persist_playback_position(force=True)
+        except Exception:
+            log.exception("Failed to persist playback position on pause")
         if self.is_casting:
             try:
                 self.casting_manager.pause()
@@ -2694,11 +3118,7 @@ class PlayerFrame(wx.Frame):
                     self.player.pause()
                 self.is_playing = False
             except Exception:
-                pass
-        try:
-            self._persist_playback_position(force=True)
-        except Exception:
-            pass
+                log.exception("Failed to pause player")
 
     def stop(self) -> None:
         try:
@@ -2786,6 +3206,12 @@ class PlayerFrame(wx.Frame):
             self._persist_playback_position(force=True)
         except Exception:
             log.exception("Failed to persist playback position during shutdown")
+
+        try:
+            self._stop_calllater("_resume_pending_db_flush_calllater", "Error canceling resume DB flush during shutdown")
+            self._flush_pending_resume_db_writes()
+        except Exception:
+            log.exception("Error flushing pending resume DB writes during shutdown")
 
         try:
             self._cancel_scheduled_resume_save()

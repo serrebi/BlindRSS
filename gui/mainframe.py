@@ -515,6 +515,13 @@ class MainFrame(wx.Frame):
         self.SetAcceleratorTable(accel)
         self.Bind(wx.EVT_MENU, self.on_toggle_favorite, id=int(self._toggle_favorite_id))
 
+    def _get_focused_window(self) -> "wx.Window | None":
+        try:
+            return wx.Window.FindFocus()
+        except Exception as e:
+            log.debug("Could not find focused window: %s", e)
+            return None
+
 
     def on_char_hook(self, event: wx.KeyEvent) -> None:
         """Global media shortcuts while the main window is focused."""
@@ -523,19 +530,27 @@ class MainFrame(wx.Frame):
         except Exception:
             key = None
 
+        if key == wx.WXK_SPACE:
+            focus = self._get_focused_window()
+            if focus == self.list_ctrl:
+                idx = self.list_ctrl.GetFirstSelected()
+                if idx != wx.NOT_FOUND:
+                    try:
+                        evt = wx.ListEvent(wx.EVT_LIST_ITEM_ACTIVATED.type, self.list_ctrl.GetId(), idx=idx)
+                        self.on_article_activate(evt)
+                        return
+                    except Exception:
+                        log.exception("Error activating article on space press")
+
         if key == wx.WXK_DELETE:
-            focus = None
-            try:
-                focus = wx.Window.FindFocus()
-            except Exception:
-                focus = None
-            if focus == getattr(self, "list_ctrl", None):
+            focus = self._get_focused_window()
+            if focus == self.list_ctrl:
                 self.on_delete_article()
                 return
 
         if key == ord('M') or key == ord('m'):
-            focus = wx.Window.FindFocus()
-            if focus == getattr(self, "list_ctrl", None):
+            focus = self._get_focused_window()
+            if focus == self.list_ctrl:
                 idx = self.list_ctrl.GetFirstSelected()
                 if idx != wx.NOT_FOUND and 0 <= idx < len(self.current_articles):
                     article = self.current_articles[idx]
@@ -2730,8 +2745,27 @@ class MainFrame(wx.Frame):
                 pw = self._ensure_player_window()
                 if not pw:
                     return
+
+                # If the selected episode is already loaded in the player, toggle play/pause
+                # instead of restarting it.
+                try:
+                    if pw.is_current_media(getattr(article, "id", None), media_url):
+                        try:
+                            pw.toggle_play_pause()
+                        except Exception:
+                            log.exception("Error toggling play/pause for current article")
+                        return
+                except Exception:
+                    log.exception("Error checking if article is currently playing")
+
                 # Start playback immediately (avoid blocking)
-                pw.load_media(media_url, use_ytdlp, chapters, title=getattr(article, "title", None))
+                pw.load_media(
+                    media_url,
+                    use_ytdlp,
+                    chapters,
+                    title=getattr(article, "title", None),
+                    article_id=getattr(article, "id", None),
+                )
 
                 # Respect the preference for showing/hiding the player on playback
                 if bool(self.config_manager.get("show_player_on_play", True)):
