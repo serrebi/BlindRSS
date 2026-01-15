@@ -1085,20 +1085,18 @@ class LocalProvider(RSSProvider):
                 removed = int(c.rowcount or 0)
                 conn.commit()
                 return removed > 0
-            except sqlite3.OperationalError as e:
+            except Exception as e:
                 try:
                     conn.rollback()
                 except Exception:
-                    pass
-                if _is_locked_error(e):
-                    log.warning("Database locked while removing feed %s", feed_id)
-                    return False
-                raise
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
+                    pass  # Ignore rollback errors
+
+                if isinstance(e, sqlite3.OperationalError):
+                    if _is_locked_error(e):
+                        log.warning("Database locked while removing feed %s", feed_id)
+                        return False
+                    raise  # Re-raise other operational errors.
+
                 log.exception("Error removing feed %s", feed_id)
                 return False
         finally:
