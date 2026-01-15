@@ -1070,16 +1070,21 @@ class LocalProvider(RSSProvider):
                 )
                 c.execute(
                     """
+                    WITH
+                      urls_to_delete AS (
+                        SELECT url AS id FROM articles WHERE feed_id = ? AND url IS NOT NULL AND url != ''
+                        UNION
+                        SELECT media_url AS id FROM articles WHERE feed_id = ? AND media_url IS NOT NULL AND media_url != ''
+                      ),
+                      retained_urls AS (
+                        SELECT url AS id FROM articles WHERE feed_id != ? AND url IS NOT NULL AND url != ''
+                        UNION
+                        SELECT media_url AS id FROM articles WHERE feed_id != ? AND media_url IS NOT NULL AND media_url != ''
+                      )
                     DELETE FROM playback_state
-                    WHERE id IN (
-                        SELECT url FROM articles WHERE feed_id = ? AND url IS NOT NULL AND url != ''
-                        UNION
-                        SELECT media_url FROM articles WHERE feed_id = ? AND media_url IS NOT NULL AND media_url != ''
-                    ) AND id NOT IN (
-                        SELECT url FROM articles WHERE feed_id != ? AND url IS NOT NULL AND url != ''
-                        UNION
-                        SELECT media_url FROM articles WHERE feed_id != ? AND media_url IS NOT NULL AND media_url != ''
-                    )
+                    WHERE
+                      id IN (SELECT id FROM urls_to_delete)
+                      AND id NOT IN (SELECT id FROM retained_urls)
                     """,
                     (feed_id, feed_id, feed_id, feed_id),
                 )
