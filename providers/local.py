@@ -1113,9 +1113,9 @@ class LocalProvider(RSSProvider):
 
                 if _is_locked_error(e):
                     log.warning("Database locked while removing feed %s", feed_id)
-                    return False
+                else:
+                    log.exception("Error removing feed %s", feed_id)
 
-                log.exception("Error removing feed %s", feed_id)
                 return False
         finally:
             conn.close()
