@@ -36,7 +36,7 @@ def _is_locked_error(error: Exception) -> bool:
     return "locked" in str(error).lower()
 
 
-def _execute_write_op(op_name: str, op: Callable[[sqlite3.Cursor], None]) -> None:
+def _execute_write_op(op_name: str, op: Callable[[sqlite3.Cursor], None]) -> bool:
     conn = get_connection()
     try:
         _configure_conn(conn)
@@ -44,12 +44,13 @@ def _execute_write_op(op_name: str, op: Callable[[sqlite3.Cursor], None]) -> Non
         try:
             op(c)
             conn.commit()
+            return True
         except sqlite3.OperationalError as e:
             # Don't block the GUI thread for long if a refresh is writing.
             # We'll retry on the next timer tick.
             if _is_locked_error(e):
                 LOG.debug("playback_state is locked; skipping %s", op_name)
-                return
+                return False
             raise
     finally:
         conn.close()
@@ -107,9 +108,9 @@ def upsert_playback_state(
     completed: bool = False,
     seek_supported: Optional[bool] = None,
     updated_at: Optional[int] = None,
-) -> None:
+) -> bool:
     if not playback_id:
-        return
+        return True
 
     try:
         pos = max(0, int(position_ms))
@@ -154,22 +155,22 @@ def upsert_playback_state(
             (playback_id, pos, dur, ts, completed_i, seek_i, title),
         )
 
-    _execute_write_op("position write", _op)
+    return _execute_write_op("position write", _op)
 
 
-def delete_playback_state(playback_id: str) -> None:
+def delete_playback_state(playback_id: str) -> bool:
     if not playback_id:
-        return
+        return True
 
     def _op(cur: sqlite3.Cursor) -> None:
         cur.execute("DELETE FROM playback_state WHERE id = ?", (playback_id,))
 
-    _execute_write_op("delete", _op)
+    return _execute_write_op("delete", _op)
 
 
-def set_seek_supported(playback_id: str, seek_supported: bool) -> None:
+def set_seek_supported(playback_id: str, seek_supported: bool) -> bool:
     if not playback_id:
-        return
+        return True
 
     def _op(cur: sqlite3.Cursor) -> None:
         cur.execute(
@@ -177,4 +178,4 @@ def set_seek_supported(playback_id: str, seek_supported: bool) -> None:
             (1 if bool(seek_supported) else 0, int(time.time()), playback_id),
         )
 
-    _execute_write_op("seek_supported update", _op)
+    return _execute_write_op("seek_supported update", _op)
