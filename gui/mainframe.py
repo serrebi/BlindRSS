@@ -3018,15 +3018,20 @@ class MainFrame(wx.Frame):
 
     def _remove_feed_thread(self, feed_id: str, feed_title: str | None = None) -> None:
         success = False
+        error_message = None
         try:
             # Avoid colliding with refresh writes (can block up to busy_timeout and freeze the UI).
             with self._refresh_guard:
                 success = bool(self.provider.remove_feed(feed_id))
-        except Exception:
+        except Exception as e:
             log.exception("Error removing feed %s", feed_id)
-        wx.CallAfter(self._post_remove_feed, feed_id, feed_title, success)
+            try:
+                error_message = str(e) or type(e).__name__
+            except Exception:
+                error_message = "Unknown error"
+        wx.CallAfter(self._post_remove_feed, feed_id, feed_title, success, error_message)
 
-    def _post_remove_feed(self, feed_id: str, feed_title: str | None, success: bool) -> None:
+    def _post_remove_feed(self, feed_id: str, feed_title: str | None, success: bool, error_message: str | None = None) -> None:
         self.SetTitle("BlindRSS")
 
         if not success:
@@ -3034,7 +3039,14 @@ class MainFrame(wx.Frame):
             self._selection_hint = None
             msg = "Could not remove feed."
             if feed_title:
-                msg = f"Could not remove feed '{feed_title}'. It may be busy due to a refresh.\n\nPlease try again."
+                msg = f"Could not remove feed '{feed_title}'."
+            if error_message:
+                low = str(error_message).lower()
+                if "locked" in low or "busy" in low:
+                    msg = f"{msg} It may be busy due to another operation."
+                else:
+                    msg = f"{msg}\n\nError: {error_message}"
+            msg = f"{msg}\n\nPlease try again."
             wx.MessageBox(msg, "Error", wx.ICON_ERROR)
             return
 

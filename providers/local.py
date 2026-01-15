@@ -1071,11 +1071,13 @@ class LocalProvider(RSSProvider):
                 c.execute(
                     """
                     WITH
+                      -- URLs associated with the feed being deleted.
                       urls_to_delete AS (
                         SELECT url AS id FROM articles WHERE feed_id = ? AND url IS NOT NULL AND url != ''
                         UNION
                         SELECT media_url AS id FROM articles WHERE feed_id = ? AND media_url IS NOT NULL AND media_url != ''
                       ),
+                      -- URLs still referenced by other feeds.
                       retained_urls AS (
                         SELECT url AS id FROM articles WHERE feed_id != ? AND url IS NOT NULL AND url != ''
                         UNION
@@ -1103,7 +1105,7 @@ class LocalProvider(RSSProvider):
                 try:
                     conn.rollback()
                 except Exception:
-                    pass  # Ignore rollback errors
+                    log.debug("Error during database rollback while removing feed %s", feed_id, exc_info=True)
 
                 if isinstance(e, sqlite3.OperationalError):
                     if _is_locked_error(e):
