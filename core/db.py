@@ -8,6 +8,140 @@ log = logging.getLogger(__name__)
 DB_FILE = os.path.join(APP_DIR, "rss.db")
 
 
+def _table_exists(cursor: sqlite3.Cursor, name: str) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+        (name,),
+    )
+    return cursor.fetchone() is not None
+
+
+def _chapters_references_old_articles(cursor: sqlite3.Cursor) -> bool:
+    try:
+        cursor.execute("PRAGMA foreign_key_list(chapters)")
+        rows = cursor.fetchall()
+    except sqlite3.Error:
+        return False
+    return any(len(row) > 2 and row[2] == "old_articles" for row in rows)
+
+
+def _migrate_legacy_chapters_foreign_key(conn: sqlite3.Connection) -> None:
+    """Repair legacy schemas where `chapters` references a missing `old_articles` table.
+
+    Older databases used a `chapters.article_id -> old_articles(id)` foreign key.
+    With foreign key enforcement enabled, deletes/updates on chapters can fail with:
+        "no such table: main.old_articles"
+
+    Prefer migrating the FK to `articles(id)` when possible; otherwise drop the FK.
+    """
+
+    cursor = conn.cursor()
+    if not _table_exists(cursor, "chapters"):
+        return
+
+    if not _chapters_references_old_articles(cursor):
+        return
+
+    try:
+        cursor.execute("SAVEPOINT migrate_chapters_old_articles_fk")
+
+        can_add_fk = False
+        try:
+            if _table_exists(cursor, "articles"):
+                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_id_unique ON articles (id)")
+                can_add_fk = True
+        except sqlite3.IntegrityError:
+            can_add_fk = False
+        except sqlite3.Error:
+            can_add_fk = False
+
+        prev_fk_setting = None
+        try:
+            cursor.execute("PRAGMA foreign_keys")
+            row = cursor.fetchone()
+            prev_fk_setting = int(row[0]) if row and row[0] is not None else None
+        except sqlite3.Error:
+            prev_fk_setting = None
+
+        try:
+            cursor.execute("PRAGMA foreign_keys=OFF")
+
+            backup_name = "chapters_old"
+            suffix = 0
+            while _table_exists(cursor, backup_name):
+                suffix += 1
+                backup_name = f"chapters_old_{suffix}"
+
+            log.warning(
+                "Migrating legacy chapters FK old_articles -> %s (backup table: %s)",
+                "articles(id)" if can_add_fk else "none",
+                backup_name,
+            )
+
+            cursor.execute(f"ALTER TABLE chapters RENAME TO {backup_name}")
+
+            if can_add_fk:
+                cursor.execute(
+                    """
+                    CREATE TABLE chapters (
+                        id TEXT PRIMARY KEY,
+                        article_id TEXT,
+                        start REAL,
+                        title TEXT,
+                        href TEXT,
+                        FOREIGN KEY(article_id) REFERENCES articles(id)
+                    )
+                    """
+                )
+                cursor.execute(
+                    f"""
+                    INSERT INTO chapters (id, article_id, start, title, href)
+                    SELECT id, article_id, start, title, href
+                    FROM {backup_name}
+                    WHERE article_id IS NULL OR article_id IN (SELECT id FROM articles)
+                    """
+                )
+            else:
+                cursor.execute(
+                    """
+                    CREATE TABLE chapters (
+                        id TEXT PRIMARY KEY,
+                        article_id TEXT,
+                        start REAL,
+                        title TEXT,
+                        href TEXT
+                    )
+                    """
+                )
+                cursor.execute(
+                    f"""
+                    INSERT INTO chapters (id, article_id, start, title, href)
+                    SELECT id, article_id, start, title, href
+                    FROM {backup_name}
+                    """
+                )
+
+            cursor.execute(f"DROP TABLE {backup_name}")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chapters_article_id_start ON chapters (article_id, start)"
+            )
+        finally:
+            if prev_fk_setting is not None:
+                try:
+                    cursor.execute(f"PRAGMA foreign_keys={prev_fk_setting}")
+                except sqlite3.Error:
+                    pass
+
+        cursor.execute("RELEASE SAVEPOINT migrate_chapters_old_articles_fk")
+    except sqlite3.Error:
+        try:
+            cursor.execute("ROLLBACK TO SAVEPOINT migrate_chapters_old_articles_fk")
+            cursor.execute("RELEASE SAVEPOINT migrate_chapters_old_articles_fk")
+        except sqlite3.Error:
+            pass
+        log.exception("Failed to migrate legacy chapters FK from old_articles; leaving schema unchanged")
+
+
 def init_db():
     conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
     try:
@@ -61,6 +195,8 @@ def init_db():
             FOREIGN KEY(article_id) REFERENCES articles(id)
         )''')
         c.execute("CREATE INDEX IF NOT EXISTS idx_chapters_article_id_start ON chapters (article_id, start)")
+
+        _migrate_legacy_chapters_foreign_key(conn)
 
         c.execute('''CREATE TABLE IF NOT EXISTS categories (
             id TEXT PRIMARY KEY,
