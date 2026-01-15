@@ -3024,7 +3024,6 @@ class MainFrame(wx.Frame):
                 success = bool(self.provider.remove_feed(feed_id))
         except Exception:
             log.exception("Error removing feed %s", feed_id)
-            success = False
         wx.CallAfter(self._post_remove_feed, feed_id, feed_title, success)
 
     def _post_remove_feed(self, feed_id: str, feed_title: str | None, success: bool) -> None:

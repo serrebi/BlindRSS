@@ -1054,7 +1054,7 @@ class LocalProvider(RSSProvider):
         try:
             try:
                 # Don't hang the UI for up to busy_timeout when a refresh is writing.
-                conn.execute(f"PRAGMA busy_timeout={int(_REMOVE_FEED_BUSY_TIMEOUT_MS)}")
+                conn.execute(f"PRAGMA busy_timeout={_REMOVE_FEED_BUSY_TIMEOUT_MS}")
             except sqlite3.Error:
                 pass
 
