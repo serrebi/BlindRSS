@@ -1402,6 +1402,13 @@ class MainFrame(wx.Frame):
         category_deleted: bool,
         category_error: str | None = None,
     ):
+        # Underlying DB rows changed significantly; drop view caches to avoid stale entries.
+        try:
+            with self._view_cache_lock:
+                self.view_cache.clear()
+        except Exception:
+            log.exception("Failed to clear view cache after category removal")
+
         self.refresh_feeds()
         warnings = []
         if not category_deleted:
