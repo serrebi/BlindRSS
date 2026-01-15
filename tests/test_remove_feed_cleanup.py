@@ -124,3 +124,112 @@ def test_local_provider_remove_feed_deletes_dependent_rows():
         finally:
             core.db.DB_FILE = orig_db_file
 
+
+def test_local_provider_remove_feed_preserves_shared_url_playback_state():
+    with tempfile.TemporaryDirectory() as tmp:
+        orig_db_file = core.db.DB_FILE
+        core.db.DB_FILE = os.path.join(tmp, "rss.db")
+        try:
+            core.db.init_db()
+
+            feed_id = str(uuid.uuid4())
+            other_feed_id = str(uuid.uuid4())
+            article_id = str(uuid.uuid4())
+            other_article_id = str(uuid.uuid4())
+
+            shared_media_url = "https://example.com/shared.mp3"
+            article_url = "https://example.com/post/1"
+
+            conn = core.db.get_connection()
+            try:
+                c = conn.cursor()
+                c.execute(
+                    "INSERT INTO feeds (id, url, title, category, icon_url) VALUES (?, ?, ?, ?, ?)",
+                    (feed_id, "https://example.com/rss", "Feed 1", "Uncategorized", ""),
+                )
+                c.execute(
+                    "INSERT INTO feeds (id, url, title, category, icon_url) VALUES (?, ?, ?, ?, ?)",
+                    (other_feed_id, "https://example.com/rss2", "Feed 2", "Uncategorized", ""),
+                )
+                c.execute(
+                    "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, is_favorite, media_url, media_type) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        article_id,
+                        feed_id,
+                        "Episode 1",
+                        article_url,
+                        "content",
+                        "2025-01-01 00:00:00",
+                        "author",
+                        0,
+                        0,
+                        shared_media_url,
+                        "audio/mpeg",
+                    ),
+                )
+                c.execute(
+                    "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, is_favorite, media_url, media_type) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        other_article_id,
+                        other_feed_id,
+                        "Episode 2",
+                        "https://example.com/post/2",
+                        "content",
+                        "2025-01-01 00:00:00",
+                        "author",
+                        0,
+                        0,
+                        shared_media_url,
+                        "audio/mpeg",
+                    ),
+                )
+                c.execute(
+                    "INSERT INTO playback_state (id, position_ms, duration_ms, updated_at, completed, seek_supported, title) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (shared_media_url, 2345, 9999, 1, 0, 1, "Shared"),
+                )
+                c.execute(
+                    "INSERT INTO playback_state (id, position_ms, duration_ms, updated_at, completed, seek_supported, title) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (article_url, 3456, 9999, 1, 0, 1, "Episode 1"),
+                )
+                c.execute(
+                    "INSERT INTO playback_state (id, position_ms, duration_ms, updated_at, completed, seek_supported, title) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (f"article:{article_id}", 1234, 9999, 1, 0, 1, "Episode 1"),
+                )
+                c.execute(
+                    "INSERT INTO playback_state (id, position_ms, duration_ms, updated_at, completed, seek_supported, title) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (f"article:{other_article_id}", 111, 222, 1, 0, 1, "Episode 2"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            provider = LocalProvider(config={})
+            assert provider.remove_feed(feed_id) is True
+
+            conn = core.db.get_connection()
+            try:
+                c = conn.cursor()
+                # Feed-specific keys should be removed.
+                c.execute("SELECT COUNT(*) FROM playback_state WHERE id = ?", (f"article:{article_id}",))
+                assert c.fetchone()[0] == 0
+                c.execute("SELECT COUNT(*) FROM playback_state WHERE id = ?", (article_url,))
+                assert c.fetchone()[0] == 0
+
+                # Shared URL key should remain because it's still referenced by other_feed_id.
+                c.execute("SELECT COUNT(*) FROM playback_state WHERE id = ?", (shared_media_url,))
+                assert c.fetchone()[0] == 1
+
+                c.execute("SELECT COUNT(*) FROM feeds WHERE id = ?", (other_feed_id,))
+                assert c.fetchone()[0] == 1
+                c.execute("SELECT COUNT(*) FROM playback_state WHERE id = ?", (f"article:{other_article_id}",))
+                assert c.fetchone()[0] == 1
+            finally:
+                conn.close()
+        finally:
+            core.db.DB_FILE = orig_db_file

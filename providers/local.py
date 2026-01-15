@@ -1061,18 +1061,27 @@ class LocalProvider(RSSProvider):
             c = conn.cursor()
             try:
                 c.execute("BEGIN IMMEDIATE")
-                # Remove playback state for the feed's articles (both article:<id> and URL-based keys).
+                # Remove playback state for the feed's articles.
+                # - Article ID based keys are safe to delete (unique per article).
+                # - URL based keys may be shared across feeds; delete only when the URL isn't used elsewhere.
+                c.execute(
+                    "DELETE FROM playback_state WHERE id IN (SELECT 'article:' || id FROM articles WHERE feed_id = ?)",
+                    (feed_id,),
+                )
                 c.execute(
                     """
-                    DELETE FROM playback_state WHERE id IN (
-                        SELECT 'article:' || id FROM articles WHERE feed_id = ?
-                        UNION ALL
+                    DELETE FROM playback_state
+                    WHERE id IN (
                         SELECT url FROM articles WHERE feed_id = ? AND url IS NOT NULL AND url != ''
-                        UNION ALL
+                        UNION
                         SELECT media_url FROM articles WHERE feed_id = ? AND media_url IS NOT NULL AND media_url != ''
+                    ) AND id NOT IN (
+                        SELECT url FROM articles WHERE feed_id != ? AND url IS NOT NULL AND url != ''
+                        UNION
+                        SELECT media_url FROM articles WHERE feed_id != ? AND media_url IS NOT NULL AND media_url != ''
                     )
                     """,
-                    (feed_id, feed_id, feed_id),
+                    (feed_id, feed_id, feed_id, feed_id),
                 )
 
                 # Remove dependent chapter rows before deleting articles.
