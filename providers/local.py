@@ -1094,12 +1094,12 @@ class LocalProvider(RSSProvider):
                     log.warning("Database locked while removing feed %s", feed_id)
                     return False
                 raise
-            except Exception as e:
+            except Exception:
                 try:
                     conn.rollback()
                 except Exception:
                     pass
-                log.error("Remove feed error: %s", e)
+                log.exception("Error removing feed %s", feed_id)
                 return False
         finally:
             conn.close()
