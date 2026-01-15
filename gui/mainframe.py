@@ -1313,7 +1313,12 @@ class MainFrame(wx.Frame):
                         if not self.provider.remove_feed(fid):
                             failed.append(fid)
                     except Exception:
-                        log.exception("Failed to remove feed %s while deleting category '%s'", fid, cat_title)
+                        log.warning(
+                            "Failed to remove feed %s while deleting category '%s'",
+                            fid,
+                            cat_title,
+                            exc_info=True,
+                        )
                         failed.append(fid)
                 try:
                     self.provider.delete_category(cat_title)
