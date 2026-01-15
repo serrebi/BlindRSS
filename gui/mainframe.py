@@ -1369,17 +1369,10 @@ class MainFrame(wx.Frame):
                     if not self.provider.remove_feed(fid):
                         failed.append(fid)
                 except Exception:
-                    log.warning(
-                        "Failed to remove feed %s while deleting category '%s'",
-                        fid,
-                        cat_title,
-                        exc_info=True,
-                    )
+                    # The provider logs the detailed error.
                     failed.append(fid)
             try:
                 category_deleted = bool(self.provider.delete_category(cat_title))
-                if not category_deleted:
-                    category_error = None
             except Exception as e:
                 category_deleted = False
                 category_error = str(e) or type(e).__name__
@@ -3104,7 +3097,7 @@ class MainFrame(wx.Frame):
         try:
             success = bool(self.provider.remove_feed(feed_id))
         except Exception as e:
-            log.exception("Error removing feed %s", feed_id)
+            # The provider is responsible for logging the detailed exception.
             error_message = str(e) or type(e).__name__
         wx.CallAfter(self._post_remove_feed, feed_id, feed_title, success, error_message)
 
