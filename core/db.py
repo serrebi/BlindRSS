@@ -269,6 +269,16 @@ def init_db():
             pass
 
         try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_articles_url ON articles (url)")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_articles_media_url ON articles (media_url)")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
             c.execute("ALTER TABLE articles ADD COLUMN is_favorite INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
