@@ -1361,6 +1361,8 @@ class MainFrame(wx.Frame):
 
     def _delete_category_with_feeds_thread(self, cat_title: str, feed_ids: list[str]):
         failed = []
+        category_deleted = True
+        category_error = None
         try:
             # Avoid colliding with refresh writes (can block up to busy_timeout).
             with self._refresh_guard:
@@ -1377,20 +1379,39 @@ class MainFrame(wx.Frame):
                         )
                         failed.append(fid)
                 try:
-                    self.provider.delete_category(cat_title)
-                except Exception:
+                    category_deleted = bool(self.provider.delete_category(cat_title))
+                    if not category_deleted:
+                        category_error = None
+                except Exception as e:
+                    category_deleted = False
+                    category_error = str(e) or type(e).__name__
                     log.exception("Failed to delete category '%s'", cat_title)
         finally:
-            wx.CallAfter(self._post_delete_category_with_feeds, cat_title, failed)
-
-    def _post_delete_category_with_feeds(self, cat_title: str, failed: list[str]):
-        self.refresh_feeds()
-        if failed:
-            wx.MessageBox(
-                f"Deleted category '{cat_title}', but {len(failed)} feed(s) could not be removed.",
-                "Warning",
-                wx.ICON_WARNING,
+            wx.CallAfter(
+                self._post_delete_category_with_feeds,
+                cat_title,
+                failed,
+                category_deleted,
+                category_error,
             )
+
+    def _post_delete_category_with_feeds(
+        self,
+        cat_title: str,
+        failed: list[str],
+        category_deleted: bool,
+        category_error: str | None = None,
+    ):
+        self.refresh_feeds()
+        warnings = []
+        if not category_deleted:
+            warnings.append(f"Category '{cat_title}' could not be deleted.")
+            if category_error:
+                warnings.append(f"Error: {category_error}")
+        if failed:
+            warnings.append(f"{len(failed)} feed(s) could not be removed.")
+        if warnings:
+            wx.MessageBox("\n\n".join(warnings), "Warning", wx.ICON_WARNING)
 
     def refresh_loop(self):
         # If auto-refresh on startup is disabled, wait for one interval before the first check.
@@ -3081,10 +3102,7 @@ class MainFrame(wx.Frame):
                 success = bool(self.provider.remove_feed(feed_id))
         except Exception as e:
             log.exception("Error removing feed %s", feed_id)
-            try:
-                error_message = str(e) or type(e).__name__
-            except Exception:
-                error_message = "Unknown error"
+            error_message = str(e) or type(e).__name__
         wx.CallAfter(self._post_remove_feed, feed_id, feed_title, success, error_message)
 
     def _post_remove_feed(self, feed_id: str, feed_title: str | None, success: bool, error_message: str | None = None) -> None:

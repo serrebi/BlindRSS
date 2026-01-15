@@ -1105,13 +1105,15 @@ class LocalProvider(RSSProvider):
                 try:
                     conn.rollback()
                 except Exception:
-                    log.debug("Error during database rollback while removing feed %s", feed_id, exc_info=True)
+                    log.debug(
+                        "Error during database rollback while removing feed %s",
+                        feed_id,
+                        exc_info=True,
+                    )
 
-                if isinstance(e, sqlite3.OperationalError):
-                    if _is_locked_error(e):
-                        log.warning("Database locked while removing feed %s", feed_id)
-                        return False
-                    raise  # Re-raise other operational errors.
+                if _is_locked_error(e):
+                    log.warning("Database locked while removing feed %s", feed_id)
+                    return False
 
                 log.exception("Error removing feed %s", feed_id)
                 return False
