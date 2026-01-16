@@ -32,6 +32,49 @@ _REFRESH_WORKERS_PER_CPU_MULTIPLIER = 2
 _REFRESH_PER_HOST_MIN_CAP = 2
 _REFRESH_PER_HOST_MAX_CAP = 8
 
+_REMOVE_FEED_BUSY_TIMEOUT_MS = 5000
+
+
+def _is_locked_error(error: Exception) -> bool:
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is not None:
+        try:
+            return int(code) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+        except (TypeError, ValueError):
+            pass
+
+    msg = str(error).lower()
+    return "locked" in msg or "busy" in msg
+
+
+def _is_foreign_key_error(error: Exception) -> bool:
+    if not isinstance(error, sqlite3.IntegrityError):
+        return False
+
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is not None:
+        try:
+            return int(code) == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY
+        except (TypeError, ValueError):
+            pass
+
+    msg = str(error).lower()
+    return "foreign key" in msg
+
+
+def _rollback_and_abort_on_foreign_key(conn: sqlite3.Connection, error: Exception) -> bool:
+    if not _is_foreign_key_error(error):
+        return False
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+    return True
+
+
 class LocalProvider(RSSProvider):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -210,6 +253,9 @@ class LocalProvider(RSSProvider):
                 conn = get_connection()
                 try:
                     c = conn.cursor()
+                    c.execute("SELECT 1 FROM feeds WHERE id = ? LIMIT 1", (feed_id,))
+                    if not c.fetchone():
+                        return
                     c.execute(
                         "UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?",
                         (final_title, None, None, feed_id),
@@ -245,6 +291,11 @@ class LocalProvider(RSSProvider):
 
                             if i % 5 == 0 or i == total_entries - 1:
                                 conn.commit()
+                        except sqlite3.IntegrityError as e:
+                            if _rollback_and_abort_on_foreign_key(conn, e):
+                                return
+                            log.debug(f"Odysee entry parse/insert failed for {feed_url}: {e}")
+                            continue
                         except Exception as e:
                             log.debug(f"Odysee entry parse/insert failed for {feed_url}: {e}")
                             continue
@@ -342,6 +393,9 @@ class LocalProvider(RSSProvider):
                 conn = get_connection()
                 try:
                     c = conn.cursor()
+                    c.execute("SELECT 1 FROM feeds WHERE id = ? LIMIT 1", (feed_id,))
+                    if not c.fetchone():
+                        return
                     # Clear conditional-cache metadata (HTML listing refresh does not use ETag/Last-Modified)
                     c.execute(
                         "UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?",
@@ -378,6 +432,11 @@ class LocalProvider(RSSProvider):
 
                             if i % 5 == 0 or i == total_entries - 1:
                                 conn.commit()
+                        except sqlite3.IntegrityError as e:
+                            if _rollback_and_abort_on_foreign_key(conn, e):
+                                return
+                            log.debug(f"Rumble entry parse/insert failed for {feed_url}: {e}")
+                            continue
                         except Exception as e:
                             log.debug(f"Rumble entry parse/insert failed for {feed_url}: {e}")
                             continue
@@ -465,6 +524,9 @@ class LocalProvider(RSSProvider):
             conn = get_connection()
             try:
                 c = conn.cursor()
+                c.execute("SELECT 1 FROM feeds WHERE id = ? LIMIT 1", (feed_id,))
+                if not c.fetchone():
+                    return
                 
                 final_title = d.feed.get('title', final_title)
                 c.execute("UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?", 
@@ -586,10 +648,19 @@ class LocalProvider(RSSProvider):
                     if not media_url and npr_mod.is_npr_url(url):
                         media_url, media_type = npr_mod.extract_npr_audio(url, timeout_s=feed_timeout)
 
-                    c.execute("INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-                                (article_id, feed_id, title, url, content, date, author, media_url, media_type))
-                    new_items += 1
-                    
+                    try:
+                        c.execute(
+                            "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                            (article_id, feed_id, title, url, content, date, author, media_url, media_type),
+                        )
+                        new_items += 1
+                    except sqlite3.IntegrityError as e:
+                        if _rollback_and_abort_on_foreign_key(conn, e):
+                            status = "deleted"
+                            error_msg = None
+                            return
+                        raise
+
                     chapter_url = None
                     if 'podcast_chapters' in entry:
                         chapters_tag = entry.podcast_chapters
@@ -1030,13 +1101,76 @@ class LocalProvider(RSSProvider):
             conn.close()
 
     def remove_feed(self, feed_id: str) -> bool:
+        if not feed_id:
+            return False
+
         conn = get_connection()
         try:
+            try:
+                # Don't hang the UI for up to busy_timeout when a refresh is writing.
+                conn.execute(f"PRAGMA busy_timeout={_REMOVE_FEED_BUSY_TIMEOUT_MS}")
+            except sqlite3.Error:
+                pass
+
             c = conn.cursor()
+            c.execute("BEGIN IMMEDIATE")
+            # Remove playback state for the feed's articles.
+            # - Article ID based keys are safe to delete (unique per article).
+            # - URL based keys may be shared across feeds; delete only when the URL isn't used elsewhere.
+            c.execute(
+                "DELETE FROM playback_state WHERE id IN (SELECT 'article:' || id FROM articles WHERE feed_id = ?)",
+                (feed_id,),
+            )
+            c.execute(
+                """
+                WITH
+                  -- URLs associated with the feed being deleted.
+                  urls_to_delete AS (
+                    SELECT url AS id FROM articles WHERE feed_id = ? AND url IS NOT NULL AND url != ''
+                    UNION ALL
+                    SELECT media_url AS id FROM articles WHERE feed_id = ? AND media_url IS NOT NULL AND media_url != ''
+                  )
+                DELETE FROM playback_state
+                WHERE
+                  id IN (SELECT id FROM urls_to_delete)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM articles
+                    WHERE feed_id != ?
+                      AND (
+                        (articles.url IS NOT NULL AND articles.url != '' AND articles.url = playback_state.id)
+                        OR (articles.media_url IS NOT NULL AND articles.media_url != '' AND articles.media_url = playback_state.id)
+                      )
+                  )
+                """,
+                (feed_id, feed_id, feed_id),
+            )
+
+            # Remove dependent chapter rows before deleting articles.
+            c.execute(
+                "DELETE FROM chapters WHERE article_id IN (SELECT id FROM articles WHERE feed_id = ?)",
+                (feed_id,),
+            )
             c.execute("DELETE FROM articles WHERE feed_id = ?", (feed_id,))
             c.execute("DELETE FROM feeds WHERE id = ?", (feed_id,))
+            removed = int(c.rowcount or 0)
             conn.commit()
-            return True
+            return removed > 0
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                log.debug(
+                    "Error during database rollback while removing feed %s",
+                    feed_id,
+                    exc_info=True,
+                )
+
+            if _is_locked_error(e):
+                log.warning("Database locked while removing feed %s", feed_id, exc_info=True)
+            else:
+                log.exception("Error removing feed %s", feed_id)
+
+            raise
         finally:
             conn.close()
 
