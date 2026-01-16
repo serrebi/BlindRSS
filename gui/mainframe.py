@@ -36,6 +36,9 @@ class MainFrame(wx.Frame):
         self.provider = provider
         self.config_manager = config_manager
         self._refresh_guard = threading.Lock()
+        # Critical background workers (e.g., destructive DB ops) we may want to wait for during shutdown.
+        self._critical_workers_lock = threading.Lock()
+        self._critical_workers = set()
         self.feed_map = {}
         self.feed_nodes = {}
         self._article_refresh_pending = False
@@ -90,6 +93,32 @@ class MainFrame(wx.Frame):
         wx.CallAfter(self._focus_default_control)
         wx.CallLater(15000, self._maybe_auto_check_updates)
         wx.CallLater(4000, self._check_media_dependencies)
+
+    def _start_critical_worker(self, target, args=(), *, name: str | None = None) -> None:
+        """Start a tracked daemon thread for critical operations (e.g. destructive DB work).
+
+        These threads are allowed to run in the background, but during shutdown we will try to
+        join them briefly to reduce the chance of terminating mid-operation.
+        """
+
+        def _worker():
+            try:
+                target(*args)
+            finally:
+                with self._critical_workers_lock:
+                    self._critical_workers.discard(threading.current_thread())
+
+        t = threading.Thread(target=_worker, daemon=True, name=str(name) if name else None)
+
+        with self._critical_workers_lock:
+            self._critical_workers.add(t)
+
+        try:
+            t.start()
+        except Exception:
+            log.exception("Failed to start critical worker thread")
+            with self._critical_workers_lock:
+                self._critical_workers.discard(t)
 
     def _check_media_dependencies(self):
         try:
@@ -770,6 +799,19 @@ class MainFrame(wx.Frame):
         self.stop_event.set()
         if self.refresh_thread.is_alive():
             self.refresh_thread.join(timeout=1)
+        # Give critical background workers a brief chance to finish cleanly.
+        critical = []
+        try:
+            with self._critical_workers_lock:
+                critical = [t for t in self._critical_workers if t and t.is_alive()]
+        except Exception:
+            log.debug("Failed to snapshot critical worker threads on shutdown", exc_info=True)
+
+        for t in critical:
+            try:
+                t.join(timeout=5)
+            except Exception:
+                log.debug("Failed to join critical worker thread on shutdown", exc_info=True)
         self.Destroy()
 
     def on_iconize(self, event):
@@ -1312,36 +1354,63 @@ class MainFrame(wx.Frame):
             return
 
         self._selection_hint = {"type": "all", "id": "all"}
-        threading.Thread(
-            target=self._delete_category_with_feeds_thread,
+        self._start_critical_worker(
+            self._delete_category_with_feeds_thread,
             args=(cat_title, feed_ids),
-            daemon=True,
-        ).start()
+            name="delete_category_with_feeds",
+        )
 
     def _delete_category_with_feeds_thread(self, cat_title: str, feed_ids: list[str]):
         failed = []
+        category_deleted = True
+        category_error = None
         try:
-            for fid in list(feed_ids or []):
+            for fid in (feed_ids or []):
                 try:
                     if not self.provider.remove_feed(fid):
                         failed.append(fid)
                 except Exception:
+                    # The provider logs the detailed error.
                     failed.append(fid)
             try:
-                self.provider.delete_category(cat_title)
-            except Exception:
-                pass
+                category_deleted = bool(self.provider.delete_category(cat_title))
+            except Exception as e:
+                category_deleted = False
+                category_error = str(e) or type(e).__name__
+                log.exception("Failed to delete category '%s'", cat_title)
         finally:
-            wx.CallAfter(self._post_delete_category_with_feeds, cat_title, failed)
-
-    def _post_delete_category_with_feeds(self, cat_title: str, failed: list[str]):
-        self.refresh_feeds()
-        if failed:
-            wx.MessageBox(
-                f"Deleted category '{cat_title}', but {len(failed)} feed(s) could not be removed.",
-                "Warning",
-                wx.ICON_WARNING,
+            wx.CallAfter(
+                self._post_delete_category_with_feeds,
+                cat_title,
+                failed,
+                category_deleted,
+                category_error,
             )
+
+    def _post_delete_category_with_feeds(
+        self,
+        cat_title: str,
+        failed: list[str],
+        category_deleted: bool,
+        category_error: str | None = None,
+    ):
+        # Underlying DB rows changed significantly; drop view caches to avoid stale entries.
+        try:
+            with self._view_cache_lock:
+                self.view_cache.clear()
+        except Exception:
+            log.exception("Failed to clear view cache after category removal")
+
+        self.refresh_feeds()
+        warnings = []
+        if not category_deleted:
+            warnings.append(f"Category '{cat_title}' could not be deleted.")
+            if category_error:
+                warnings.append(f"Error: {category_error}")
+        if failed:
+            warnings.append(f"{len(failed)} feed(s) could not be removed.")
+        if warnings:
+            wx.MessageBox("\n\n".join(warnings), "Warning", wx.ICON_WARNING)
 
     def refresh_loop(self):
         # If auto-refresh on startup is disabled, wait for one interval before the first check.
@@ -3016,6 +3085,8 @@ class MainFrame(wx.Frame):
             data = self.tree.GetItemData(item)
             if data and data["type"] == "feed":
                 if wx.MessageBox("Are you sure you want to remove this feed?", "Confirm", wx.YES_NO) == wx.YES:
+                    feed_id = data.get("id")
+                    feed_title = self._get_feed_title(feed_id) if feed_id else None
                     # Logic to find the "next" best item to focus (alphabetical neighbor)
                     # Try next sibling first, then previous sibling
                     next_item = self.tree.GetNextSibling(item)
@@ -3030,8 +3101,57 @@ class MainFrame(wx.Frame):
                         if parent.IsOk():
                             self._selection_hint = self.tree.GetItemData(parent)
 
-                    self.provider.remove_feed(data["id"])
-                    self.refresh_feeds()
+                    if feed_title:
+                        self.SetTitle(f"BlindRSS - Removing feed {feed_title}...")
+                    else:
+                        self.SetTitle("BlindRSS - Removing feed...")
+                    self._start_critical_worker(
+                        self._remove_feed_thread,
+                        args=(feed_id, feed_title),
+                        name="remove_feed",
+                    )
+
+    def _remove_feed_thread(self, feed_id: str, feed_title: str | None = None) -> None:
+        success = False
+        error_message = None
+        try:
+            success = bool(self.provider.remove_feed(feed_id))
+        except Exception as e:
+            # The provider is responsible for logging the detailed exception.
+            error_message = str(e) or type(e).__name__
+        wx.CallAfter(self._post_remove_feed, feed_id, feed_title, success, error_message)
+
+    def _post_remove_feed(self, feed_id: str, feed_title: str | None, success: bool, error_message: str | None = None) -> None:
+        self.SetTitle("BlindRSS")
+
+        if not success:
+            # Deletion did not happen - don't force-selection to a neighbor.
+            self._selection_hint = None
+            parts = []
+            if feed_title:
+                parts.append(f"Could not remove feed '{feed_title}'.")
+            else:
+                parts.append("Could not remove feed.")
+
+            if error_message:
+                low = str(error_message).lower()
+                if "locked" in low or "busy" in low:
+                    parts.append("It may be busy due to another operation.")
+                else:
+                    parts.append(f"Error: {error_message}")
+
+            parts.append("Please try again.")
+            wx.MessageBox("\n\n".join(parts), "Error", wx.ICON_ERROR)
+            return
+
+        # Underlying DB rows changed significantly; drop view caches to avoid stale entries.
+        try:
+            with self._view_cache_lock:
+                self.view_cache.clear()
+        except Exception:
+            log.exception("Failed to clear view cache after feed removal")
+
+        self.refresh_feeds()
 
     def on_edit_feed(self, event):
         item = self.tree.GetSelection()
