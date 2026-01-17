@@ -164,8 +164,8 @@ class MainFrame(wx.Frame):
         # Top Right: List (Articles)
         self.list_ctrl = wx.ListCtrl(right_splitter, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         self.list_ctrl.SetName("Articles List")
-        self.list_ctrl.InsertColumn(0, "Author", width=120)
-        self.list_ctrl.InsertColumn(1, "Title", width=350)
+        self.list_ctrl.InsertColumn(0, "Title", width=350)
+        self.list_ctrl.InsertColumn(1, "Author", width=120)
         self.list_ctrl.InsertColumn(2, "Date", width=120)
         self.list_ctrl.InsertColumn(3, "Feed", width=150)
         self.list_ctrl.InsertColumn(4, "Status", width=80)
@@ -346,7 +346,7 @@ class MainFrame(wx.Frame):
 
             self.list_ctrl.Freeze()
             for i, article in enumerate(self.current_articles):
-                idx = self.list_ctrl.InsertItem(i, article.author or "")
+                idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
                 feed_title = ""
                 if feed_id == "all" or feed_id.startswith("category:"):
                     node = self.feed_nodes.get(article.feed_id)
@@ -354,7 +354,7 @@ class MainFrame(wx.Frame):
                     if feed:
                         feed_title = feed.title or ""
                 
-                self.list_ctrl.SetItem(idx, 1, self._get_display_title(article))
+                self.list_ctrl.SetItem(idx, 1, article.author or "")
                 self.list_ctrl.SetItem(idx, 2, utils.humanize_article_date(article.date))
                 self.list_ctrl.SetItem(idx, 3, feed_title)
                 self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
@@ -1793,7 +1793,7 @@ class MainFrame(wx.Frame):
 
         self.list_ctrl.Freeze()
         for i, article in enumerate(self.current_articles):
-            idx = self.list_ctrl.InsertItem(i, article.author or "")
+            idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
             
             feed_title = ""
             if article.feed_id:
@@ -1801,7 +1801,7 @@ class MainFrame(wx.Frame):
                 if feed:
                     feed_title = feed.title or ""
             
-            self.list_ctrl.SetItem(idx, 1, self._get_display_title(article))
+            self.list_ctrl.SetItem(idx, 1, article.author or "")
             self.list_ctrl.SetItem(idx, 2, utils.humanize_article_date(article.date))
             self.list_ctrl.SetItem(idx, 3, feed_title)
             self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
@@ -1914,7 +1914,7 @@ class MainFrame(wx.Frame):
         self.list_ctrl.Freeze()
         self.list_ctrl.DeleteAllItems()
         for i, article in enumerate(self.current_articles):
-            idx = self.list_ctrl.InsertItem(i, article.author or "")
+            idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
             
             feed_title = ""
             if article.feed_id:
@@ -1922,7 +1922,7 @@ class MainFrame(wx.Frame):
                 if feed:
                     feed_title = feed.title or ""
             
-            self.list_ctrl.SetItem(idx, 1, self._get_display_title(article))
+            self.list_ctrl.SetItem(idx, 1, article.author or "")
             self.list_ctrl.SetItem(idx, 2, utils.humanize_article_date(article.date))
             self.list_ctrl.SetItem(idx, 3, feed_title)
             self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
@@ -2251,7 +2251,7 @@ class MainFrame(wx.Frame):
             self.list_ctrl.Freeze()
             self.list_ctrl.DeleteAllItems()
             for i, article in enumerate(self.current_articles):
-                idx = self.list_ctrl.InsertItem(i, article.author or "")
+                idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
                 
                 feed_title = ""
                 if article.feed_id:
@@ -2259,7 +2259,7 @@ class MainFrame(wx.Frame):
                     if feed:
                         feed_title = feed.title or ""
                         
-                self.list_ctrl.SetItem(idx, 1, self._get_display_title(article))
+                self.list_ctrl.SetItem(idx, 1, article.author or "")
                 self.list_ctrl.SetItem(idx, 2, utils.humanize_article_date(article.date))
                 self.list_ctrl.SetItem(idx, 3, feed_title)
                 self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
