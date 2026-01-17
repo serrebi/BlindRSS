@@ -176,6 +176,16 @@ if not exist "%SCRIPT_DIR%bin\\yt-dlp.exe" (
     echo [X] yt-dlp.exe not found in "%SCRIPT_DIR%bin". Build cannot continue.
     exit /b 1
 )
+
+echo [BlindRSS Build] Ensuring Deno binary is present...
+if not exist "%SCRIPT_DIR%bin\\deno.exe" (
+    echo [BlindRSS Build] Downloading Deno...
+    "%VENV_PYTHON%" -c "import pathlib, urllib.request, zipfile, io; url='https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip'; bin_path=pathlib.Path(r'%SCRIPT_DIR%bin'); bin_path.mkdir(parents=True, exist_ok=True); print('Downloading Deno...'); data=urllib.request.urlopen(url).read(); print('Extracting...'); z=zipfile.ZipFile(io.BytesIO(data)); z.extract('deno.exe', bin_path); z.close()"
+)
+if not exist "%SCRIPT_DIR%bin\\deno.exe" (
+    echo [X] deno.exe not found in "%SCRIPT_DIR%bin". Build cannot continue.
+    exit /b 1
+)
 exit /b 0
 
 :compute_next_version

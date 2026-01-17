@@ -22,6 +22,7 @@ binaries = [
     (os.path.join(vlc_path, 'libvlc.dll'), '.'),
     (os.path.join(vlc_path, 'libvlccore.dll'), '.'),
     (os.path.join(bin_path, 'yt-dlp.exe'), 'bin'),
+    (os.path.join(bin_path, 'deno.exe'), 'bin'),
 ]
 hiddenimports = [
     'vlc',
