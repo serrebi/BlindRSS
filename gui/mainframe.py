@@ -2351,7 +2351,7 @@ class MainFrame(wx.Frame):
             return
 
         # Prepare content (Heavy: BeautifulSoup)
-        header = f"Title: {article.title}\n"
+        header = f"{article.title}\n"
         header += f"Date: {utils.humanize_article_date(article.date)}\n"
         header += f"Author: {article.author}\n"
         header += f"Link: {article.url}\n"
@@ -2807,6 +2807,12 @@ class MainFrame(wx.Frame):
                     media_url = article.url
 
                 if not media_url:
+                    # Fallback: if we still have no media URL (and no article URL?), bail.
+                    # But if we have article.url and we reached here, it means we decided it's NOT a media/player item.
+                    # This shouldn't happen if we fall through to "else" below for non-player items.
+                    # However, if we are inside "if _should_play_in_player" but fail to find media, we should open browser.
+                    if article.url:
+                         webbrowser.open(article.url)
                     return
 
                 # Use cached chapters if available
