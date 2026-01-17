@@ -569,6 +569,16 @@ class LocalProvider(RSSProvider):
 
                     url = entry.get('link', '')
                     author = entry.get('author', 'Unknown')
+                    
+                    # BlueSky/Microblog fallback: if author is unknown, try to use feed title
+                    if author == 'Unknown' and final_title:
+                         if final_title.startswith('@'):
+                             # Extract handle from "@handle - Name" format common in BlueSky RSS
+                             parts = final_title.split(' ', 1)
+                             if parts:
+                                 author = parts[0]
+                         else:
+                             author = final_title
 
                     raw_date = entry.get('published') or entry.get('updated') or entry.get('pubDate') or entry.get('date')
                     if not raw_date:
