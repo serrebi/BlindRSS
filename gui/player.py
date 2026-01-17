@@ -6,6 +6,7 @@ import time
 import sqlite3
 import platform
 import logging
+import webbrowser
 from core import utils
 from core import discovery
 from core import playback_state
@@ -1915,11 +1916,15 @@ class PlayerFrame(wx.Frame):
                 except Exception as e:
                     log.exception("yt-dlp resolve failed")
                     _log(f"yt-dlp resolve failed: {e}")
-                    wx.MessageBox(
-                        f"Could not resolve media URL via yt-dlp: {e}",
-                        "Error",
-                        wx.ICON_ERROR,
-                    )
+                    
+                    # Fallback to browser as requested
+                    try:
+                        webbrowser.open(url)
+                    except Exception:
+                        pass
+                    
+                    # Close the player window since we can't play it
+                    wx.CallAfter(self.Close)
                     return
         else:
             self.current_title = title or "Playing Audio..."
