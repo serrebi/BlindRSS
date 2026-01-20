@@ -2207,6 +2207,14 @@ class PlayerFrame(wx.Frame):
                             state_i = None
 
                         opening_states = (vlc.State.Opening, vlc.State.Buffering)
+                        resume_max_attempts = 1
+                        elapsed = 0.0
+                        vlc_reports_unseekable = False
+                        try:
+                            vlc_reports_unseekable = hasattr(self.player, "is_seekable") and (self.player.is_seekable() is False)
+                        except Exception as e:
+                            log.debug("Failed to check VLC seekable flag: %s", e)
+                            vlc_reports_unseekable = False
 
                         # If VLC reports the stream is not seekable, stop trying and remember it.
                         try:
@@ -2215,16 +2223,11 @@ class PlayerFrame(wx.Frame):
                             elapsed = float(now_mono) - float(started_ts) if started_ts else 0.0
 
                             player_stalled = state_i is not None and state_i not in opening_states
-                            try:
-                                vlc_reports_unseekable = hasattr(self.player, "is_seekable") and (self.player.is_seekable() is False)
-                            except Exception as e:
-                                log.debug("Failed to check VLC seekable flag: %s", e)
-                                vlc_reports_unseekable = False
 
                             should_give_up = (
                                 restore_id
                                 and player_stalled
-                                and already_tried >= 3
+                                and already_tried >= resume_max_attempts
                                 and elapsed >= 8.0
                                 and vlc_reports_unseekable
                                 and not self._current_input_looks_seekable()
@@ -2240,9 +2243,11 @@ class PlayerFrame(wx.Frame):
                         except Exception as e:
                             log.debug("Error evaluating seekability during resume restore: %s", e)
 
+                        ready_for_seek = state_i is None or state_i not in opening_states
+
                         if restore_inflight:
                             # Don't spam play() while VLC is Opening/Buffering; load already starts playback.
-                            if state_i in opening_states:
+                            if not ready_for_seek:
                                 pass
                             else:
                                 now_seek = time.monotonic()
@@ -2255,7 +2260,7 @@ class PlayerFrame(wx.Frame):
                                         attempts = int(getattr(self, "_resume_restore_attempts", 0) or 0)
                                     except Exception:
                                         attempts = 0
-                                    if attempts < 3:
+                                    if attempts < resume_max_attempts:
                                         try:
                                             self.player.set_time(int(target_ms))
                                             try:
@@ -2275,7 +2280,7 @@ class PlayerFrame(wx.Frame):
                                         except Exception:
                                             pass
                                     else:
-                                        # After we requested a seek a few times, avoid re-seeking (it can cause audio loops).
+                                        # After the initial resume seek, avoid re-seeking (it can cause audio loops).
                                         # If VLC does not land close enough within a few seconds, give up for this
                                         # session without marking the source as unseekable.
                                         try:
