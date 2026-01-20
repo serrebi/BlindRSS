@@ -253,6 +253,10 @@ class PlayerFrame(wx.Frame):
         self._seek_apply_target_ms = None
         self._seek_apply_calllater = None
         self._seek_input_ts = 0.0  # last seek input timestamp
+        self._seek_apply_reason = None
+        self._seek_apply_reason_ts = 0.0
+        self._seek_log_last_ts = 0.0
+        self._last_vlc_warn_ts = 0.0
 
         try:
             self._seek_apply_debounce_s = float(self.config_manager.get("seek_apply_debounce_s", 0.18) or 0.18)
@@ -1505,6 +1509,11 @@ class PlayerFrame(wx.Frame):
         if self.is_casting:
             return
         try:
+            if hasattr(self.player, "is_seekable") and (self.player.is_seekable() is False):
+                return
+        except Exception:
+            pass
+        try:
             if getattr(self, "_pending_resume_seek_ms", None) is not None:
                 return
         except Exception:
@@ -1595,7 +1604,7 @@ class PlayerFrame(wx.Frame):
                     pass
                 
                 # Seek immediately
-                self._apply_seek_time_ms(int(target_ms), force=True)
+                self._apply_seek_time_ms(int(target_ms), force=True, reason="silence_skip")
                 return
 
         try:
@@ -2143,6 +2152,35 @@ class PlayerFrame(wx.Frame):
             recent_seek_target = None
             recent_seek_ts = 0.0
 
+        try:
+            last_vlc = int(getattr(self, "_last_vlc_time_ms", 0) or 0)
+        except Exception:
+            last_vlc = 0
+        try:
+            allow_back = float(getattr(self, "_pos_allow_backwards_until_ts", 0.0) or 0.0)
+        except Exception:
+            allow_back = 0.0
+        if playing_now and last_vlc > 0 and vlc_cur + 1200 < last_vlc and now_mono > allow_back:
+            if recent_seek_target is None and getattr(self, "_pending_resume_seek_ms", None) is None:
+                try:
+                    last_warn = float(getattr(self, "_last_vlc_warn_ts", 0.0) or 0.0)
+                except Exception:
+                    last_warn = 0.0
+                if (now_mono - last_warn) > 2.0:
+                    skip = False
+                    try:
+                        skip = bool(self.config_manager.get("skip_silence", False))
+                    except Exception:
+                        skip = False
+                    log.warning(
+                        "VLC time jumped backward: prev=%sms cur=%sms delta=%sms skip_silence=%s",
+                        int(last_vlc),
+                        int(vlc_cur),
+                        int(vlc_cur) - int(last_vlc),
+                        skip,
+                    )
+                    self._last_vlc_warn_ts = float(now_mono)
+
         # Simplified logic: Trust our seek target for a few seconds after seeking.
         # Otherwise, trust VLC. This prevents "fighting" where VLC reports old time
         # during buffering and the UI jumps back and forth.
@@ -2328,6 +2366,10 @@ class PlayerFrame(wx.Frame):
 
                     if abs(int(cur) - int(target_ms)) > 1500:
                         try:
+                            try:
+                                self._log_seek_event("resume_restore", int(target_ms), int(cur))
+                            except Exception:
+                                pass
                             self.player.set_time(int(target_ms))
                             try:
                                 ts = time.monotonic()
@@ -2370,7 +2412,10 @@ class PlayerFrame(wx.Frame):
                 pass
 
         try:
-            self._maybe_skip_silence(int(ui_cur))
+            silence_pos = int(vlc_cur)
+            if silence_pos < 0:
+                silence_pos = 0
+            self._maybe_skip_silence(int(silence_pos))
         except Exception:
             pass
 
@@ -2457,7 +2502,7 @@ class PlayerFrame(wx.Frame):
         except Exception:
             log.exception("Error noting user seek on slider seek")
         # Force immediate seek on release
-        self._apply_seek_time_ms(int(target_ms), force=True)
+        self._apply_seek_time_ms(int(target_ms), force=True, reason="slider")
         try:
             self._schedule_resume_save_after_seek(delay_ms=400)
         except Exception:
@@ -2591,7 +2636,7 @@ class PlayerFrame(wx.Frame):
         except Exception:
             log.exception("Error noting user seek on chapter selection")
         try:
-            self._apply_seek_time_ms(int(start_sec * 1000.0), force=True)
+            self._apply_seek_time_ms(int(start_sec * 1000.0), force=True, reason="chapter")
         except Exception:
             log.exception("Error applying seek on chapter selection")
         try:
@@ -2814,6 +2859,10 @@ class PlayerFrame(wx.Frame):
             
             if _should_reapply_seek(target_i, cur, tolerance, retries):
                 try:
+                    self._log_seek_event("seek_guard", int(target_i), int(cur))
+                except Exception:
+                    pass
+                try:
                     self.player.set_time(int(target_i))
                 except Exception:
                     pass
@@ -2838,6 +2887,72 @@ class PlayerFrame(wx.Frame):
             pass
 
 
+    def _log_seek_event(self, reason: str, target_ms: int, cur_ms: int | None = None) -> None:
+        try:
+            now = time.monotonic()
+        except Exception:
+            now = 0.0
+        try:
+            last_ts = float(getattr(self, "_seek_log_last_ts", 0.0) or 0.0)
+        except Exception:
+            last_ts = 0.0
+        if (now - last_ts) < 0.4:
+            return
+
+        try:
+            cur_val = int(cur_ms) if cur_ms is not None else int(self.player.get_time() or 0)
+        except Exception:
+            cur_val = -1
+
+        delta = None
+        try:
+            if cur_val >= 0:
+                delta = int(target_ms) - int(cur_val)
+        except Exception:
+            delta = None
+
+        must_log = reason in ("silence_skip", "seek_guard", "resume_restore")
+        try:
+            if delta is not None and (int(delta) < -1200 or abs(int(delta)) >= 6000):
+                must_log = True
+        except Exception:
+            pass
+        if not must_log:
+            return
+
+        try:
+            self._seek_log_last_ts = float(now)
+        except Exception:
+            pass
+
+        try:
+            playing = bool(self.player.is_playing())
+        except Exception:
+            playing = bool(getattr(self, "is_playing", False))
+
+        skip = False
+        try:
+            skip = bool(self.config_manager.get("skip_silence", False))
+        except Exception:
+            skip = False
+
+        pending = False
+        try:
+            pending = getattr(self, "_pending_resume_seek_ms", None) is not None
+        except Exception:
+            pending = False
+
+        log.info(
+            "Seek event [%s]: cur=%s target=%s delta=%s playing=%s skip_silence=%s pending_resume=%s",
+            reason,
+            cur_val,
+            int(target_ms),
+            delta,
+            playing,
+            skip,
+            pending,
+        )
+
     def _apply_pending_seek(self) -> None:
         try:
             target = self._seek_apply_target_ms
@@ -2850,6 +2965,14 @@ class PlayerFrame(wx.Frame):
         self._seek_apply_calllater = None
         now = time.monotonic()
         self._seek_apply_last_ts = now
+        try:
+            reason = getattr(self, "_seek_apply_reason", None) or "seek_apply"
+        except Exception:
+            reason = "seek_apply"
+        try:
+            self._log_seek_event(str(reason), int(target_i))
+        except Exception:
+            pass
 
         try:
             self._pos_ms = int(target_i)
@@ -2937,7 +3060,7 @@ class PlayerFrame(wx.Frame):
 
     
 
-    def _apply_seek_time_ms(self, target_ms: int, force: bool = False) -> None:
+    def _apply_seek_time_ms(self, target_ms: int, force: bool = False, reason: str | None = None) -> None:
         log.debug("_apply_seek_time_ms target=%s force=%s", target_ms, force)
         if self.is_casting:
             return
@@ -2950,6 +3073,11 @@ class PlayerFrame(wx.Frame):
 
         self._seek_apply_target_ms = int(t)
         now = time.monotonic()
+        try:
+            self._seek_apply_reason = str(reason or "seek")
+            self._seek_apply_reason_ts = float(now)
+        except Exception:
+            pass
 
         try:
             self._seek_input_ts = float(now)
@@ -3150,7 +3278,7 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pass
 
-        self._apply_seek_time_ms(int(target), force=False)
+        self._apply_seek_time_ms(int(target), force=False, reason="seek_relative")
         try:
             self._schedule_resume_save_after_seek()
         except Exception:
