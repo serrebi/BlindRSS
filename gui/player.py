@@ -316,6 +316,8 @@ class PlayerFrame(wx.Frame):
         self._silence_skip_verify_target_ms = None
         self._silence_skip_verify_source_ms = None
         self._silence_skip_verify_attempted = False
+        self._silence_skip_probe_seq = 0
+        self._silence_skip_probe_calllaters = []
         
         # Playback speed handling
         self.playback_speed = float(self.config_manager.get("playback_speed", 1.0))
@@ -723,6 +725,10 @@ class PlayerFrame(wx.Frame):
             self._silence_skip_verify_target_ms = None
             self._silence_skip_verify_source_ms = None
             self._silence_skip_verify_attempted = False
+            try:
+                self._cancel_silence_skip_probes()
+            except Exception:
+                pass
         except Exception:
             log.exception("Error resetting resume state on user seek")
         try:
@@ -1441,6 +1447,10 @@ class PlayerFrame(wx.Frame):
                 self._silence_scan_abort.set()
         except Exception:
             pass
+        try:
+            self._cancel_silence_skip_probes()
+        except Exception:
+            pass
         self._silence_scan_abort = None
         self._silence_scan_thread = None
         self._silence_ranges = []
@@ -1479,6 +1489,20 @@ class PlayerFrame(wx.Frame):
                 merge_gap = int(self.config_manager.get("silence_skip_merge_gap_ms", 200) or 200)
                 vad_aggr = int(self.config_manager.get("silence_vad_aggressiveness", 2) or 2)
                 vad_frame_ms = int(self.config_manager.get("silence_vad_frame_ms", 30) or 30)
+                try:
+                    base_url = getattr(self, "current_url", "") or ""
+                except Exception:
+                    base_url = ""
+                is_remote = base_url.startswith("http") and not ("127.0.0.1" in base_url or "localhost" in base_url)
+                if is_remote:
+                    if int(vad_aggr) > 1:
+                        vad_aggr = 1
+                    if float(threshold_db) > -42.0:
+                        threshold_db = -42.0
+                    if int(min_ms) < 900:
+                        min_ms = 900
+                    if int(merge_gap) > 180:
+                        merge_gap = 180
                 ranges = scan_audio_for_silence(
                     url,
                     window_ms=window_ms,
@@ -1512,6 +1536,145 @@ class PlayerFrame(wx.Frame):
             t = threading.Thread(target=_worker, daemon=True)
             t.start()
             self._silence_scan_thread = t
+        except Exception:
+            pass
+
+    def _cancel_silence_skip_probes(self) -> None:
+        try:
+            calllaters = list(getattr(self, "_silence_skip_probe_calllaters", []) or [])
+        except Exception:
+            calllaters = []
+        for cl in calllaters:
+            try:
+                cl.Stop()
+            except Exception:
+                pass
+        try:
+            self._silence_skip_probe_calllaters = []
+        except Exception:
+            pass
+
+    def _schedule_silence_skip_probes(self, target_ms: int, source_ms: int) -> None:
+        try:
+            self._cancel_silence_skip_probes()
+        except Exception:
+            pass
+        try:
+            seq = int(getattr(self, "_silence_skip_probe_seq", 0) or 0) + 1
+        except Exception:
+            seq = 1
+        try:
+            self._silence_skip_probe_seq = int(seq)
+        except Exception:
+            pass
+
+        delays = (250, 650, 1200, 2500, 4000)
+        for delay_ms in delays:
+            try:
+                cl = wx.CallLater(int(delay_ms), self._silence_skip_probe_tick, int(seq), int(delay_ms), int(target_ms), int(source_ms))
+                self._silence_skip_probe_calllaters.append(cl)
+            except Exception:
+                pass
+
+    def _silence_skip_probe_tick(self, seq: int, delay_ms: int, target_ms: int, source_ms: int) -> None:
+        try:
+            if int(seq) != int(getattr(self, "_silence_skip_probe_seq", 0) or 0):
+                return
+        except Exception:
+            return
+        try:
+            cur = int(self.player.get_time() or 0)
+        except Exception:
+            cur = -1
+        try:
+            delta = int(target_ms) - int(cur)
+        except Exception:
+            delta = None
+        try:
+            state = self.player.get_state()
+        except Exception:
+            state = None
+        try:
+            playing = bool(self.player.is_playing())
+        except Exception:
+            playing = bool(getattr(self, "is_playing", False))
+        try:
+            seekable = self.player.is_seekable() if hasattr(self.player, "is_seekable") else None
+        except Exception:
+            seekable = None
+        try:
+            url = getattr(self, "current_url", "") or ""
+        except Exception:
+            url = ""
+        is_remote = url.startswith("http") and not ("127.0.0.1" in url or "localhost" in url)
+        log.info(
+            "Silence skip probe t+%sms: cur=%s target=%s delta=%s source=%s state=%s playing=%s seekable=%s remote=%s",
+            int(delay_ms),
+            int(cur),
+            int(target_ms),
+            delta,
+            int(source_ms),
+            state,
+            playing,
+            seekable,
+            is_remote,
+        )
+
+    def _start_http_seek_diagnostics(self, url: str, headers: dict | None = None) -> None:
+        if not url:
+            return
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            return
+        host = (parsed.netloc or "").lower()
+        if not host or host in ("127.0.0.1", "localhost"):
+            return
+        try:
+            diag_headers = dict(headers or {})
+        except Exception:
+            diag_headers = {}
+
+        def _worker() -> None:
+            resp = None
+            try:
+                req_headers = dict(diag_headers)
+                req_headers["Range"] = "bytes=0-1"
+                resp = utils.safe_requests_get(url, headers=req_headers, stream=True, timeout=10, allow_redirects=True)
+                status = int(getattr(resp, "status_code", 0) or 0)
+                hdrs = getattr(resp, "headers", {}) or {}
+                accept_ranges = str(hdrs.get("Accept-Ranges", "") or "")
+                content_range = str(hdrs.get("Content-Range", "") or "")
+                content_type = str(hdrs.get("Content-Type", "") or "")
+                content_len = str(hdrs.get("Content-Length", "") or "")
+                final_url = str(getattr(resp, "url", "") or "")
+                low = (final_url or url).lower()
+                is_hls = ".m3u8" in low or "mpegurl" in content_type.lower()
+                log.info(
+                    "HTTP seek probe: url=%s final=%s status=%s accept_ranges=%s content_range=%s content_type=%s content_length=%s hls=%s",
+                    url,
+                    final_url,
+                    status,
+                    accept_ranges,
+                    content_range,
+                    content_type,
+                    content_len,
+                    is_hls,
+                )
+            except Exception as e:
+                log.info("HTTP seek probe failed: url=%s err=%s", url, e)
+            finally:
+                try:
+                    if resp is not None:
+                        resp.close()
+                except Exception:
+                    pass
+
+        try:
+            threading.Thread(target=_worker, daemon=True).start()
         except Exception:
             pass
 
@@ -1574,8 +1737,15 @@ class PlayerFrame(wx.Frame):
         except Exception:
             current_target = None
 
-        # 2. Increase cushion past silence (2000ms for remote)
-        resume_backoff = 2000 if is_remote else 800
+        # 2. Cushion past silence (configurable; keep remote conservative).
+        try:
+            resume_backoff = int(self.config_manager.get("silence_skip_resume_backoff_ms", 800) or 800)
+        except Exception:
+            resume_backoff = 800
+        if resume_backoff < 0:
+            resume_backoff = 0
+        if is_remote and resume_backoff > 800:
+            resume_backoff = 800
         try:
             retrigger_backoff = int(self.config_manager.get("silence_skip_retrigger_backoff_ms", 1400) or 1400)
         except Exception:
@@ -1611,11 +1781,16 @@ class PlayerFrame(wx.Frame):
                     self._silence_skip_last_idx = int(idx)
                     self._silence_skip_last_target_ms = int(target_ms)
                     self._silence_skip_last_seek_ts = float(now)
-                    self._silence_skip_verify_until_ts = float(now) + (2.6 if is_remote else 1.6)
+                    self._silence_skip_verify_until_ts = float(now) + (5.0 if is_remote else 3.0)
                     self._silence_skip_verify_target_ms = int(target_ms)
                     self._silence_skip_verify_source_ms = int(pos_ms)
                     self._silence_skip_verify_attempted = False
                     _log(f"Skipping silence: {pos_ms}ms -> {target_ms}ms")
+                except Exception:
+                    pass
+
+                try:
+                    self._schedule_silence_skip_probes(int(target_ms), int(pos_ms))
                 except Exception:
                     pass
                 
@@ -1654,45 +1829,56 @@ class PlayerFrame(wx.Frame):
             low = url.lower()
             if not (low.startswith('http://') or low.startswith('https://')):
                 return url
+            try:
+                parsed = urlparse(url)
+                host = (parsed.netloc or "").lower()
+                host_name = (parsed.hostname or "").lower()
+            except Exception:
+                host = ""
+                host_name = ""
+            if host_name in ("127.0.0.1", "localhost"):
+                return url
             # HLS playlists often contain relative segment URLs; proxying them through
             # the range cache breaks resolution and also isn't helpful for caching.
             if ".m3u8" in low:
                 return url
-            if not bool(self.config_manager.get('range_cache_enabled', True)):
-                return url
-            apply_all = bool(self.config_manager.get('range_cache_apply_all_hosts', True))
-            hosts = self.config_manager.get('range_cache_hosts', []) or []
+            force_proxy = False
             try:
-                if any(str(h).strip() in ('*', 'all', 'ALL') for h in hosts):
-                    apply_all = True
+                force_proxy = bool(self.config_manager.get("skip_silence", False))
             except Exception:
-                pass
-            try:
-                host = urlparse(url).netloc.lower()
-            except Exception:
-                host = ''
-            if not apply_all:
-                if not host or not hosts:
+                force_proxy = False
+            if not force_proxy:
+                if not bool(self.config_manager.get('range_cache_enabled', True)):
                     return url
-                host_ok = False
-                for h in hosts:
-                    try:
-                        hs = str(h).strip().lower()
-                    except Exception:
-                        continue
-                    if not hs:
-                        continue
-                    if hs.startswith('*.') and host.endswith(hs[1:]):
-                        host_ok = True
-                        break
-                    if host == hs or host.endswith('.' + hs):
-                        host_ok = True
-                        break
-                    if hs in host:
-                        host_ok = True
-                        break
-                if not host_ok:
-                    return url
+                apply_all = bool(self.config_manager.get('range_cache_apply_all_hosts', True))
+                hosts = self.config_manager.get('range_cache_hosts', []) or []
+                try:
+                    if any(str(h).strip() in ('*', 'all', 'ALL') for h in hosts):
+                        apply_all = True
+                except Exception:
+                    pass
+                if not apply_all:
+                    if not host or not hosts:
+                        return url
+                    host_ok = False
+                    for h in hosts:
+                        try:
+                            hs = str(h).strip().lower()
+                        except Exception:
+                            continue
+                        if not hs:
+                            continue
+                        if hs.startswith('*.') and host.endswith(hs[1:]):
+                            host_ok = True
+                            break
+                        if host == hs or host.endswith('.' + hs):
+                            host_ok = True
+                            break
+                        if hs in host:
+                            host_ok = True
+                            break
+                    if not host_ok:
+                        return url
             cache_dir = self.config_manager.get('range_cache_dir', '') or None
             prefetch_kb = int(self.config_manager.get('range_cache_prefetch_kb', 16384) or 16384)
             inline_window_kb = int(self.config_manager.get('range_cache_inline_window_kb', 1024) or 1024)
@@ -2069,7 +2255,28 @@ class PlayerFrame(wx.Frame):
                 self.casting_manager.play(final_url, self.current_title, content_type="audio/mpeg")
             self.is_playing = True
         else:
+            try:
+                low = str(final_url or "").lower()
+                is_hls_hint = ".m3u8" in low
+                log.info(
+                    "Media resolved: input=%s final=%s ytdlp=%s hls_hint=%s",
+                    url,
+                    final_url,
+                    bool(use_ytdlp),
+                    bool(is_hls_hint),
+                )
+            except Exception:
+                pass
+            try:
+                self._start_http_seek_diagnostics(str(final_url), headers=ytdlp_headers)
+            except Exception:
+                pass
             final_url = self._maybe_range_cache_url(final_url, headers=ytdlp_headers)
+            try:
+                proxied = bool(self._last_used_range_proxy)
+                log.info("VLC URL: %s proxied=%s", final_url, proxied)
+            except Exception:
+                pass
             self._last_load_chapters = chapters
             self._last_load_title = self.current_title
             self._start_silence_scan(final_url, int(getattr(self, "_active_load_seq", 0)), headers=ytdlp_headers)
@@ -2229,17 +2436,29 @@ class PlayerFrame(wx.Frame):
                     except Exception:
                         url = ""
                     is_remote = url.startswith("http") and not ("127.0.0.1" in url or "localhost" in url)
-                    threshold = 900 if is_remote else 500
-                    if not verify_attempted and int(vlc_cur) + int(threshold) < int(verify_source):
-                        self._silence_skip_verify_attempted = True
+                    threshold = 1200 if is_remote else 700
+                    target_gap = int(verify_target) - int(vlc_cur)
+                    if target_gap <= int(threshold):
+                        self._silence_skip_verify_until_ts = 0.0
+                        self._silence_skip_verify_target_ms = None
+                        self._silence_skip_verify_source_ms = None
+                        self._silence_skip_verify_attempted = False
+                    elif not verify_attempted:
                         try:
-                            self._log_seek_event("silence_skip_verify", int(verify_target), int(vlc_cur))
+                            last_skip_ts = float(getattr(self, "_silence_skip_last_seek_ts", 0.0) or 0.0)
                         except Exception:
-                            pass
-                        try:
-                            self._apply_seek_time_ms(int(verify_target), force=True, reason="silence_skip_verify")
-                        except Exception:
-                            pass
+                            last_skip_ts = 0.0
+                        min_wait = 0.5 if is_remote else 0.35
+                        if (now_mono - float(last_skip_ts)) >= float(min_wait):
+                            self._silence_skip_verify_attempted = True
+                            try:
+                                self._log_seek_event("silence_skip_verify", int(verify_target), int(vlc_cur))
+                            except Exception:
+                                pass
+                            try:
+                                self._apply_seek_time_ms(int(verify_target), force=True, reason="silence_skip_verify")
+                            except Exception:
+                                pass
 
         # Simplified logic: Trust our seek target for a few seconds after seeking.
         # Otherwise, trust VLC. This prevents "fighting" where VLC reports old time
