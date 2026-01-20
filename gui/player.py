@@ -312,6 +312,10 @@ class PlayerFrame(wx.Frame):
         self._silence_skip_floor_ms = 0
         self._silence_skip_reset_floor = False
         self._silence_skip_pause_until_ts = 0.0
+        self._silence_skip_verify_until_ts = 0.0
+        self._silence_skip_verify_target_ms = None
+        self._silence_skip_verify_source_ms = None
+        self._silence_skip_verify_attempted = False
         
         # Playback speed handling
         self.playback_speed = float(self.config_manager.get("playback_speed", 1.0))
@@ -715,6 +719,10 @@ class PlayerFrame(wx.Frame):
             except Exception:
                 pause_s = 1.2
             self._silence_skip_pause_until_ts = float(time.monotonic()) + float(pause_s)
+            self._silence_skip_verify_until_ts = 0.0
+            self._silence_skip_verify_target_ms = None
+            self._silence_skip_verify_source_ms = None
+            self._silence_skip_verify_attempted = False
         except Exception:
             log.exception("Error resetting resume state on user seek")
         try:
@@ -1443,6 +1451,10 @@ class PlayerFrame(wx.Frame):
         self._silence_skip_last_seek_ts = 0.0
         self._silence_skip_floor_ms = 0
         self._silence_skip_reset_floor = False
+        self._silence_skip_verify_until_ts = 0.0
+        self._silence_skip_verify_target_ms = None
+        self._silence_skip_verify_source_ms = None
+        self._silence_skip_verify_attempted = False
 
     def _start_silence_scan(self, url: str, load_seq: int, headers: dict = None) -> None:
         if not self.config_manager.get("skip_silence", False):
@@ -1599,6 +1611,10 @@ class PlayerFrame(wx.Frame):
                     self._silence_skip_last_idx = int(idx)
                     self._silence_skip_last_target_ms = int(target_ms)
                     self._silence_skip_last_seek_ts = float(now)
+                    self._silence_skip_verify_until_ts = float(now) + (2.6 if is_remote else 1.6)
+                    self._silence_skip_verify_target_ms = int(target_ms)
+                    self._silence_skip_verify_source_ms = int(pos_ms)
+                    self._silence_skip_verify_attempted = False
                     _log(f"Skipping silence: {pos_ms}ms -> {target_ms}ms")
                 except Exception:
                     pass
@@ -2180,6 +2196,50 @@ class PlayerFrame(wx.Frame):
                         skip,
                     )
                     self._last_vlc_warn_ts = float(now_mono)
+
+        try:
+            verify_until = float(getattr(self, "_silence_skip_verify_until_ts", 0.0) or 0.0)
+        except Exception:
+            verify_until = 0.0
+        if verify_until:
+            if now_mono > verify_until:
+                self._silence_skip_verify_until_ts = 0.0
+                self._silence_skip_verify_target_ms = None
+                self._silence_skip_verify_source_ms = None
+                self._silence_skip_verify_attempted = False
+            else:
+                try:
+                    verify_target = getattr(self, "_silence_skip_verify_target_ms", None)
+                    verify_source = getattr(self, "_silence_skip_verify_source_ms", None)
+                except Exception:
+                    verify_target = None
+                    verify_source = None
+                try:
+                    verify_attempted = bool(getattr(self, "_silence_skip_verify_attempted", False))
+                except Exception:
+                    verify_attempted = False
+                if verify_target is None or verify_source is None:
+                    self._silence_skip_verify_until_ts = 0.0
+                    self._silence_skip_verify_target_ms = None
+                    self._silence_skip_verify_source_ms = None
+                    self._silence_skip_verify_attempted = False
+                else:
+                    try:
+                        url = getattr(self, "current_url", "") or ""
+                    except Exception:
+                        url = ""
+                    is_remote = url.startswith("http") and not ("127.0.0.1" in url or "localhost" in url)
+                    threshold = 900 if is_remote else 500
+                    if not verify_attempted and int(vlc_cur) + int(threshold) < int(verify_source):
+                        self._silence_skip_verify_attempted = True
+                        try:
+                            self._log_seek_event("silence_skip_verify", int(verify_target), int(vlc_cur))
+                        except Exception:
+                            pass
+                        try:
+                            self._apply_seek_time_ms(int(verify_target), force=True, reason="silence_skip_verify")
+                        except Exception:
+                            pass
 
         # Simplified logic: Trust our seek target for a few seconds after seeking.
         # Otherwise, trust VLC. This prevents "fighting" where VLC reports old time
@@ -2911,7 +2971,7 @@ class PlayerFrame(wx.Frame):
         except Exception:
             delta = None
 
-        must_log = reason in ("silence_skip", "seek_guard", "resume_restore")
+        must_log = reason in ("silence_skip", "silence_skip_verify", "seek_guard", "resume_restore")
         try:
             if delta is not None and (int(delta) < -1200 or abs(int(delta)) >= 6000):
                 must_log = True
@@ -2982,7 +3042,7 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pass
 
-        if reason_str == "silence_skip":
+        if reason_str.startswith("silence_skip"):
             try:
                 self._seek_guard_target_ms = None
                 self._seek_guard_attempts_left = 0
