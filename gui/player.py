@@ -2969,8 +2969,9 @@ class PlayerFrame(wx.Frame):
             reason = getattr(self, "_seek_apply_reason", None) or "seek_apply"
         except Exception:
             reason = "seek_apply"
+        reason_str = str(reason)
         try:
-            self._log_seek_event(str(reason), int(target_i))
+            self._log_seek_event(reason_str, int(target_i))
         except Exception:
             pass
 
@@ -2981,10 +2982,19 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pass
 
-        try:
-            self._start_seek_guard(int(target_i))
-        except Exception:
-            pass
+        if reason_str == "silence_skip":
+            try:
+                self._seek_guard_target_ms = None
+                self._seek_guard_attempts_left = 0
+                self._seek_guard_reapply_left = 0
+                self._stop_calllater("_seek_guard_calllater", "Failed to cancel seek guard for silence skip")
+            except Exception:
+                pass
+        else:
+            try:
+                self._start_seek_guard(int(target_i))
+            except Exception:
+                pass
 
         try:
             self.player.set_time(target_i)
