@@ -978,6 +978,27 @@ class PlayerFrame(wx.Frame):
         if not self._last_used_range_proxy or not self._last_orig_url:
             return
 
+        # Preserve the best-known position so recovery doesn't jump backwards.
+        try:
+            ui_pos = int(getattr(self, "_pos_ms", 0) or 0)
+        except Exception:
+            ui_pos = 0
+        try:
+            vlc_pos = int(self.player.get_time() or 0)
+        except Exception:
+            vlc_pos = 0
+        resume_ms = max(0, int(max(ui_pos, vlc_pos)))
+        if resume_ms > 0:
+            try:
+                self._pending_resume_seek_ms = int(resume_ms)
+                self._pending_resume_seek_attempts = 0
+                self._pending_resume_paused = not bool(self.player.is_playing())
+                self._resume_restore_inflight = False
+                self._resume_restore_id = None
+                self._resume_restore_target_ms = None
+            except Exception:
+                pass
+
         # First: restart proxy and retry once.
         if self._range_proxy_retry_count == 0:
             self._range_proxy_retry_count = 1

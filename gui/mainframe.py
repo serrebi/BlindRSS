@@ -552,6 +552,17 @@ class MainFrame(wx.Frame):
             log.debug("Could not find focused window: %s", e)
             return None
 
+    def _make_list_activate_event(self, idx: int) -> wx.ListEvent:
+        evt = wx.ListEvent(wx.wxEVT_LIST_ITEM_ACTIVATED, self.list_ctrl.GetId())
+        try:
+            evt.SetEventObject(self.list_ctrl)
+        except Exception:
+            pass
+        try:
+            evt.SetIndex(int(idx))
+        except Exception:
+            pass
+        return evt
 
     def on_char_hook(self, event: wx.KeyEvent) -> None:
         """Global media shortcuts while the main window is focused."""
@@ -566,8 +577,7 @@ class MainFrame(wx.Frame):
                 idx = self.list_ctrl.GetFirstSelected()
                 if idx != wx.NOT_FOUND:
                     try:
-                        evt = wx.ListEvent(wx.EVT_LIST_ITEM_ACTIVATED.type, self.list_ctrl.GetId(), idx=idx)
-                        self.on_article_activate(evt)
+                        self.on_article_activate(self._make_list_activate_event(idx))
                         return
                     except Exception:
                         log.exception("Error activating article on space press")
@@ -934,7 +944,7 @@ class MainFrame(wx.Frame):
         # Bindings for list menu items need to use the current idx or selected article
         # on_article_activate (event) needs an event object, but I can re-create one or just call its core logic
         # For simplicity, pass idx to lambda
-        self.Bind(wx.EVT_MENU, lambda e: self.on_article_activate(event=wx.ListEvent(wx.EVT_LIST_ITEM_ACTIVATED.type, self.list_ctrl.GetId(), idx=idx)), open_item)
+        self.Bind(wx.EVT_MENU, lambda e: self.on_article_activate(event=self._make_list_activate_event(idx)), open_item)
         self.Bind(wx.EVT_MENU, lambda e: self.on_open_in_browser(idx), open_browser_item)
         self.Bind(wx.EVT_MENU, lambda e: self.mark_article_read(idx), mark_read_item)
         self.Bind(wx.EVT_MENU, lambda e: self.mark_article_unread(idx), mark_unread_item)
@@ -961,6 +971,7 @@ class MainFrame(wx.Frame):
                 if feed and feed.url:
                     if wx.TheClipboard.Open():
                         wx.TheClipboard.SetData(wx.TextDataObject(feed.url))
+                        wx.TheClipboard.Flush()
                         wx.TheClipboard.Close()
 
     def on_copy_link(self, idx):
@@ -968,6 +979,7 @@ class MainFrame(wx.Frame):
             article = self.current_articles[idx]
             if wx.TheClipboard.Open():
                 wx.TheClipboard.SetData(wx.TextDataObject(article.url))
+                wx.TheClipboard.Flush()
                 wx.TheClipboard.Close()
 
     def on_detect_audio(self, article):

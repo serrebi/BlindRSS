@@ -720,6 +720,7 @@ class _Entry:
 
                 served_start = req_start
                 served_end = req_end
+                skip_bytes = 0
 
                 cr = r.headers.get("Content-Range", "")
                 parsed = _parse_content_range(cr)
@@ -730,14 +731,11 @@ class _Entry:
                             self.total_length = int(total)
                     except Exception:
                         pass
-                    # Be strict: VLC expects the exact requested start.
-                    if a == req_start:
-                        served_start = a
-                        served_end = min(int(b), req_end)
-                    else:
-                        # If the server doesn't respect the requested start, do not cache this response.
-                        served_start = req_start
-                        served_end = req_end
+                    if a > req_start or b < req_start:
+                        return req_start - 1
+                    if a < req_start:
+                        skip_bytes = int(req_start - a)
+                    served_end = min(int(b), req_end)
 
                 expected_len = (served_end - served_start) + 1
                 if expected_len <= 0:
@@ -748,11 +746,18 @@ class _Entry:
                 tmp_path = os.path.join(self._dir, f"tmp_{time.time()}_{threading.get_ident()}_{served_start}.part")
 
                 first = True
+                remaining_skip = int(skip_bytes)
                 try:
                     with open(tmp_path, "wb") as f:
                         for chunk in r.iter_content(chunk_size=1024 * 1024):
                             if not chunk:
                                 continue
+                            if remaining_skip > 0:
+                                if len(chunk) <= remaining_skip:
+                                    remaining_skip -= len(chunk)
+                                    continue
+                                chunk = chunk[remaining_skip:]
+                                remaining_skip = 0
                             if bytes_written + len(chunk) > expected_len:
                                 chunk = chunk[: max(0, expected_len - bytes_written)]
                             if not chunk:

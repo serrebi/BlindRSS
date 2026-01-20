@@ -103,6 +103,7 @@ def _detect_vad_ranges(
     min_silence_ms: int,
     aggressiveness: int,
     merge_gap_ms: int,
+    threshold_db: float,
 ) -> List[Tuple[int, int]]:
     if webrtcvad is None:
         raise RuntimeError("webrtcvad not available; install the webrtcvad package")
@@ -125,7 +126,10 @@ def _detect_vad_ranges(
             frame = bytes(buf[:frame_bytes])
             del buf[:frame_bytes]
             is_speech = vad.is_speech(frame, sample_rate)
-            if not is_speech:
+            rms = _rms(frame, sample_width=2, channels=1)
+            db = _dbfs(rms)
+            silent = (not is_speech) and (db <= float(threshold_db))
+            if silent:
                 if silence_start is None:
                     silence_start = offset_ms
             else:
@@ -403,6 +407,7 @@ def scan_audio_for_silence(
             min_silence_ms=min_silence_ms,
             aggressiveness=vad_aggressiveness,
             merge_gap_ms=merge_gap_ms,
+            threshold_db=threshold_db,
         )
 
     return detector.finalize()
