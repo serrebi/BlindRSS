@@ -278,6 +278,9 @@ class PlayerFrame(wx.Frame):
         self._seek_guard_attempts_left = 0
         self._seek_guard_reapply_left = 0
         self._seek_guard_calllater = None
+        self._seek_guard_last_cur_ms = None
+        self._seek_guard_last_delta_ms = None
+        self._seek_guard_last_progress_ts = 0.0
 
         # Range-cache proxy recovery state
         self._last_orig_url = None
@@ -304,6 +307,7 @@ class PlayerFrame(wx.Frame):
         self._silence_skip_last_seek_ts = 0.0
         self._silence_skip_floor_ms = 0
         self._silence_skip_reset_floor = False
+        self._silence_skip_pause_until_ts = 0.0
         
         # Playback speed handling
         self.playback_speed = float(self.config_manager.get("playback_speed", 1.0))
@@ -699,6 +703,14 @@ class PlayerFrame(wx.Frame):
             if getattr(self, "_resume_restore_inflight", False) and getattr(self, "_pending_resume_seek_ms", None) is not None:
                 self._reset_auto_resume_state()
             self._silence_skip_reset_floor = True
+            pause_s = 1.2
+            try:
+                url = getattr(self, "current_url", "") or ""
+                if url.startswith("http") and not ("127.0.0.1" in url or "localhost" in url):
+                    pause_s = 2.5
+            except Exception:
+                pause_s = 1.2
+            self._silence_skip_pause_until_ts = float(time.monotonic()) + float(pause_s)
         except Exception:
             log.exception("Error resetting resume state on user seek")
         try:
@@ -1508,8 +1520,20 @@ class PlayerFrame(wx.Frame):
             return
         
         now = time.monotonic()
+        try:
+            pause_until = float(getattr(self, "_silence_skip_pause_until_ts", 0.0) or 0.0)
+            if now < pause_until:
+                return
+        except Exception:
+            pass
         if getattr(self, "_is_dragging_slider", False):
             return
+        try:
+            floor = int(getattr(self, "_silence_skip_floor_ms", 0) or 0)
+            if int(pos_ms) + 500 < int(floor):
+                return
+        except Exception:
+            pass
 
         # 1. Much longer cooldown for remote streams (YouTube DASH is jittery)
         url = getattr(self, "current_url", "") or ""
@@ -2678,6 +2702,10 @@ class PlayerFrame(wx.Frame):
         self._seek_guard_target_ms = int(t)
         self._seek_guard_attempts_left = 10
         self._seek_guard_reapply_left = 3
+        now = time.monotonic()
+        self._seek_guard_last_cur_ms = None
+        self._seek_guard_last_delta_ms = None
+        self._seek_guard_last_progress_ts = float(now)
         try:
             if self._seek_guard_calllater is not None:
                 try:
@@ -2735,6 +2763,47 @@ class PlayerFrame(wx.Frame):
             # to avoid the 'repeating' audio loop caused by constant re-seeks.
             if is_remote and left < 7:
                 self._seek_guard_attempts_left = 0
+                return
+
+            now = time.monotonic()
+            try:
+                last_cur = getattr(self, "_seek_guard_last_cur_ms", None)
+            except Exception:
+                last_cur = None
+            try:
+                last_delta = getattr(self, "_seek_guard_last_delta_ms", None)
+            except Exception:
+                last_delta = None
+            delta = None
+            if cur >= 0:
+                try:
+                    delta = abs(int(cur) - int(target_i))
+                except Exception:
+                    delta = None
+
+            if delta is not None:
+                try:
+                    if last_delta is None or int(delta) + 200 < int(last_delta):
+                        self._seek_guard_last_progress_ts = float(now)
+                except Exception:
+                    pass
+
+            try:
+                self._seek_guard_last_cur_ms = int(cur)
+                if delta is not None:
+                    self._seek_guard_last_delta_ms = int(delta)
+            except Exception:
+                pass
+
+            try:
+                last_progress = float(getattr(self, "_seek_guard_last_progress_ts", 0.0) or 0.0)
+            except Exception:
+                last_progress = 0.0
+            if delta is not None and (now - float(last_progress)) < 0.9:
+                try:
+                    self._seek_guard_calllater = wx.CallLater(500, self._seek_guard_tick)
+                except Exception:
+                    self._seek_guard_calllater = None
                 return
 
             # Limited re-apply: be very conservative with re-seeking.
