@@ -29,12 +29,14 @@ log = logging.getLogger(__name__)
 
 class MainFrame(wx.Frame):
     def __init__(self, provider: RSSProvider, config_manager):
+        start_maximized = bool(config_manager.get("start_maximized", False))
         style = wx.DEFAULT_FRAME_STYLE
-        if config_manager.get("start_maximized", False):
-            style |= wx.MAXIMIZE
         super().__init__(None, title="BlindRSS", size=(1000, 700), style=style)
         self.provider = provider
         self.config_manager = config_manager
+        self._start_maximized = start_maximized
+        if self._start_maximized:
+            self.Maximize(True)
         self._refresh_guard = threading.Lock()
         # Critical background workers (e.g., destructive DB ops) we may want to wait for during shutdown.
         self._critical_workers_lock = threading.Lock()
@@ -90,6 +92,7 @@ class MainFrame(wx.Frame):
         
         # Initial load
         self.refresh_feeds()
+        wx.CallAfter(self._apply_startup_window_state)
         wx.CallAfter(self._focus_default_control)
         wx.CallLater(15000, self._maybe_auto_check_updates)
         wx.CallLater(4000, self._check_media_dependencies)
@@ -216,6 +219,13 @@ class MainFrame(wx.Frame):
             self.tree.SetFocus()
         except Exception:
             pass
+
+    def _apply_startup_window_state(self):
+        start_maximized = bool(getattr(self, "_start_maximized", False))
+        if start_maximized:
+            self.Maximize(True)
+        elif self.IsMaximized():
+            self.Maximize(False)
 
     def _ensure_player_window(self):
         pw = getattr(self, "player_window", None)
