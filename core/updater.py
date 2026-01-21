@@ -303,11 +303,19 @@ def _launch_update_helper(
         if not debug_mode:
             # Invisible execution
             creationflags = 0
+            startupinfo = None
+            breakaway_flag = 0
             if sys.platform == "win32":
-                creationflags = 0x08000000  # CREATE_NO_WINDOW
-            
+                create_no_window = 0x08000000  # CREATE_NO_WINDOW
+                create_new_process_group = 0x00000200
+                breakaway_flag = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+                creationflags = create_no_window | create_new_process_group | breakaway_flag
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+
             cmd = [
-                "cmd",
+                os.environ.get("COMSPEC", "cmd.exe"),
                 "/c",
                 helper_path,
                 str(parent_pid),
@@ -317,19 +325,36 @@ def _launch_update_helper(
             ]
             if temp_root:
                 cmd.append(temp_root)
-            subprocess.Popen(
-                cmd,
-                cwd=helper_cwd,
-                creationflags=creationflags,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True
-            )
+            try:
+                subprocess.Popen(
+                    cmd,
+                    cwd=helper_cwd,
+                    creationflags=creationflags,
+                    startupinfo=startupinfo,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True
+                )
+            except Exception:
+                if sys.platform == "win32" and breakaway_flag:
+                    retry_flags = creationflags & ~breakaway_flag
+                    subprocess.Popen(
+                        cmd,
+                        cwd=helper_cwd,
+                        creationflags=retry_flags,
+                        startupinfo=startupinfo,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        close_fds=True
+                    )
+                else:
+                    raise
         else:
             # Visible window for debugging
             cmd = [
-                "cmd",
+                os.environ.get("COMSPEC", "cmd.exe"),
                 "/c",
                 "start",
                 "",

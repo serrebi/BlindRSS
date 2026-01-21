@@ -4,23 +4,28 @@ import importlib.metadata
 import shutil
 import platform
 import os
-import urllib.request
-import contextlib
 import ctypes
 import time
 import tempfile
+import zipfile
 
 try:
     import winreg
 except Exception:
     winreg = None
 
+def _dependency_log_path():
+    temp_dir = os.environ.get("TEMP", os.environ.get("TMP", tempfile.gettempdir()))
+    return os.path.join(temp_dir, "blindrss_dep_check.log")
+
+def get_dependency_log_path():
+    return _dependency_log_path()
+
 def _log(msg):
     """Write to a persistent log file in temp dir for user diagnostics."""
     try:
         t = time.strftime("%Y-%m-%d %H:%M:%S")
-        temp_dir = os.environ.get("TEMP", os.environ.get("TMP", tempfile.gettempdir()))
-        log_path = os.path.join(temp_dir, "blindrss_dep_check.log")
+        log_path = _dependency_log_path()
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{t}] {msg}\n")
     except:
@@ -42,7 +47,7 @@ def _run_quiet(cmd, timeout=900):
     if platform.system().lower() == "windows":
         creationflags = 0x08000000 # CREATE_NO_WINDOW
     try:
-        subprocess.run(
+        res = subprocess.run(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -52,8 +57,10 @@ def _run_quiet(cmd, timeout=900):
             startupinfo=_get_startup_info(),
             check=False,
         )
+        return res.returncode
     except Exception as e:
         _log(f"Command failed: {e}")
+        return None
 
 def _maybe_add_windows_path():
     """Meticulously find VLC/ffmpeg and add to PATH for this process."""
@@ -93,6 +100,10 @@ def _maybe_add_windows_path():
         r"C:\Program Files (x86)\VideoLAN\VLC",
         r"C:\Program Files\ffmpeg\bin",
         r"C:\Program Files (x86)\ffmpeg\bin",
+        r"C:\Program Files\Gyan\FFmpeg\bin",
+        r"C:\Program Files (x86)\Gyan\FFmpeg\bin",
+        r"C:\Program Files\Gyan\FFmpeg",
+        r"C:\Program Files (x86)\Gyan\FFmpeg",
         r"C:\ffmpeg\bin",
         r"C:\tools\ffmpeg\bin",
         r"C:\ProgramData\chocolatey\bin",
@@ -276,9 +287,128 @@ def has(cmd, version_arg="-version"):
         except: pass
     return False
 
+def _has_winget():
+    if platform.system().lower() != "windows":
+        return False
+    exe = shutil.which("winget") or shutil.which("winget.exe")
+    if exe:
+        return True
+    try:
+        res = subprocess.run(
+            ["winget", "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=0x08000000,
+            startupinfo=_get_startup_info(),
+            timeout=5
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+def _winget_install(package_id, scope=None):
+    if platform.system().lower() != "windows":
+        return False
+    if not _has_winget():
+        _log("Winget not available.")
+        return False
+    cmd = ["winget", "install", "-e", "--id", package_id]
+    cmd += ["--accept-package-agreements", "--accept-source-agreements", "--no-upgrade", "--disable-interactivity"]
+    if scope:
+        cmd += ["--scope", scope]
+    rc = _run_quiet(cmd)
+    if rc == 0:
+        return True
+    _log(f"Winget install failed for {package_id} with rc={rc}")
+    return False
+
+def _download_file(url, dest_path):
+    try:
+        from core import utils
+        resp = utils.safe_requests_get(url, stream=True, timeout=30)
+        resp.raise_for_status()
+        with open(dest_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 512):
+                if chunk:
+                    f.write(chunk)
+        return True
+    except Exception as e:
+        _log(f"Download failed ({url}): {e}")
+        return False
+
+def _install_vlc_ninite():
+    if platform.system().lower() != "windows":
+        return False
+    url = "https://ninite.com/vlc/ninite.exe"
+    temp_dir = tempfile.gettempdir()
+    exe_path = os.path.join(temp_dir, f"BlindRSS_Ninite_VLC_{os.getpid()}.exe")
+    if not _download_file(url, exe_path):
+        return False
+    rc = _run_quiet([exe_path, "/silent"])
+    if rc == 0:
+        return True
+    _log(f"Ninite VLC install failed with rc={rc}")
+    return False
+
+def _install_ffmpeg_fallback():
+    if platform.system().lower() != "windows":
+        return False
+    url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    local_app_data = os.environ.get("LOCALAPPDATA", tempfile.gettempdir())
+    base_dir = os.path.join(local_app_data, "BlindRSS", "ffmpeg")
+    os.makedirs(base_dir, exist_ok=True)
+    zip_path = os.path.join(base_dir, "ffmpeg.zip")
+    if not _download_file(url, zip_path):
+        return False
+    extract_dir = os.path.join(base_dir, "extract")
+    try:
+        if os.path.isdir(extract_dir):
+            shutil.rmtree(extract_dir)
+        os.makedirs(extract_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
+    except Exception as e:
+        _log(f"Failed to extract ffmpeg zip: {e}")
+        return False
+    ffmpeg_dir = None
+    try:
+        for root, _, files in os.walk(extract_dir):
+            if "ffmpeg.exe" in files:
+                ffmpeg_dir = root
+                break
+    except Exception as e:
+        _log(f"Failed to locate ffmpeg.exe: {e}")
+    if not ffmpeg_dir:
+        _log("ffmpeg.exe not found after extraction.")
+        return False
+    _add_bin_to_user_path(ffmpeg_dir)
+    current = os.environ.get("PATH", "")
+    if ffmpeg_dir not in current.split(os.pathsep):
+        os.environ["PATH"] = os.pathsep.join([ffmpeg_dir, current])
+    _log(f"Installed ffmpeg fallback to {ffmpeg_dir}")
+    return True
+
+def _is_ytdlp_available():
+    exe = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
+    if exe and os.path.isfile(exe):
+        return True
+    base_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    bin_dir = os.path.join(base_dir, "bin")
+    local_exe = os.path.join(bin_dir, "yt-dlp.exe")
+    if os.path.isfile(local_exe):
+        return True
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bundled_exe = os.path.join(sys._MEIPASS, "bin", "yt-dlp.exe")
+        if os.path.isfile(bundled_exe):
+            return True
+    return False
+
 def _winget_has_package(package_id):
     """Check if winget thinks the package is already installed."""
     if platform.system().lower() != "windows":
+        return False
+    if not _has_winget():
         return False
     try:
         # Use 'winget list --id <id>' to check for existence
@@ -299,9 +429,9 @@ def _winget_has_package(package_id):
     return False
 
 def check_media_tools_status():
-    """Returns tuple (vlc_missing, ffmpeg_missing)."""
+    """Returns tuple (vlc_missing, ffmpeg_missing, ytdlp_missing)."""
     _maybe_add_windows_path()
-    
+
     vlc_present = has("vlc", "--version")
     if not vlc_present and os.environ.get("PYTHON_VLC_LIB_PATH"):
         if os.path.isfile(os.environ["PYTHON_VLC_LIB_PATH"]):
@@ -309,29 +439,63 @@ def check_media_tools_status():
     if not vlc_present:
         if _winget_has_package("VideoLAN.VLC"):
             vlc_present = True
-            
+
     ff_present = has("ffmpeg", "-version")
     if not ff_present:
         if _winget_has_package("Gyan.FFmpeg"):
             ff_present = True
-            
-    return (not vlc_present, not ff_present)
 
-def install_media_tools(vlc=True, ffmpeg=True):
+    ytdlp_present = _is_ytdlp_available()
+    if not ytdlp_present:
+        if _winget_has_package("yt-dlp.yt-dlp"):
+            ytdlp_present = True
+
+    return (not vlc_present, not ff_present, not ytdlp_present)
+
+def install_media_tools(vlc=True, ffmpeg=True, ytdlp=False):
     """Installs missing tools via winget (Windows only)."""
     if platform.system().lower() != "windows":
         return
 
-    common_flags = ["--accept-package-agreements", "--accept-source-agreements", "--no-upgrade", "--disable-interactivity"]
-    
+    def _winget_install_with_fallback(package_id):
+        if _winget_install(package_id, scope="user"):
+            return True
+        return _winget_install(package_id)
+
+    winget_ok = _has_winget()
+
     if vlc:
-        _log("Installing VLC via winget...")
-        _run_quiet(["winget", "install", "-e", "--id", "VideoLAN.VLC"] + common_flags)
+        if winget_ok:
+            _log("Installing VLC via winget...")
+            if not _winget_install_with_fallback("VideoLAN.VLC"):
+                _log("Winget VLC install failed; trying Ninite.")
+                _install_vlc_ninite()
+        else:
+            _log("Winget unavailable; trying Ninite for VLC.")
+            _install_vlc_ninite()
+
     if ffmpeg:
-        _log("Installing FFmpeg via winget...")
-        _run_quiet(["winget", "install", "-e", "--id", "Gyan.FFmpeg"] + common_flags)
-    
+        if winget_ok:
+            _log("Installing FFmpeg via winget...")
+            if not _winget_install_with_fallback("Gyan.FFmpeg"):
+                _log("Winget FFmpeg install failed; trying fallback download.")
+                _install_ffmpeg_fallback()
+        else:
+            _log("Winget unavailable; trying FFmpeg fallback download.")
+            _install_ffmpeg_fallback()
+
+    if ytdlp:
+        if winget_ok:
+            _log("Installing yt-dlp via winget...")
+            _winget_install_with_fallback("yt-dlp.yt-dlp")
+        _ensure_yt_dlp_cli()
+
     _maybe_add_windows_path()
+
+    for tool in ("vlc", "ffmpeg"):
+        exe = shutil.which(tool) or shutil.which(f"{tool}.exe")
+        if exe:
+            _add_bin_to_user_path(os.path.dirname(exe))
 
 def ensure_media_tools():
     """Robust detection of media tools (Path setup only)."""
@@ -399,8 +563,8 @@ def _ensure_yt_dlp_cli():
     _log("No working yt-dlp CLI found. Downloading standalone...")
     try:
         url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-        with contextlib.closing(urllib.request.urlopen(url, timeout=30)) as r, open(local_exe, "wb") as f:
-            shutil.copyfileobj(r, f)
+        if not _download_file(url, local_exe):
+            raise RuntimeError("yt-dlp download failed")
         _log(f"Downloaded yt-dlp to {local_exe}")
     except Exception as e:
         _log(f"Failed to download yt-dlp: {e}")
@@ -443,7 +607,7 @@ def check_and_install_dependencies():
         'yt-dlp', 'wxpython', 'feedparser', 'requests', 'beautifulsoup4', 
         'python-dateutil', 'mutagen', 'python-vlc',
         'pychromecast', 'async-upnp-client', 'pyatv', 'trafilatura',
-        'webrtcvad', 'brotli', 'html5lib', 'lxml', 'pytest', 'pyinstaller', 'packaging'
+        'webrtcvad', 'brotli', 'html5lib', 'lxml', 'packaging'
     }
     installed = {d.metadata.get("Name", d.name).lower() for d in importlib.metadata.distributions() if d.metadata.get("Name") or d.name}
     missing = required - installed

@@ -2,10 +2,12 @@ import wx
 import copy
 import threading
 import webbrowser
+import time
 from urllib.parse import urlparse
 from core.discovery import discover_feed, is_ytdlp_supported
 from core import utils
 from core.casting import CastingManager
+from core import inoreader_oauth
 
 
 class AddFeedDialog(wx.Dialog):
@@ -315,6 +317,67 @@ class SettingsDialog(wx.Dialog):
             self._provider_panels[name] = (pnl, ctrls)
             pnl.Hide()
 
+        def _add_inoreader_panel(name: str):
+            pnl = wx.Panel(provider_panel)
+            outer = wx.BoxSizer(wx.VERTICAL)
+            fg = wx.FlexGridSizer(cols=2, hgap=8, vgap=8)
+            fg.AddGrowableCol(1, 1)
+            ctrls = {}
+            p_cfg = (config.get("providers") or {}).get(name, {}) if isinstance(config, dict) else {}
+
+            fg.Add(wx.StaticText(pnl, label="Inoreader App ID:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+            app_id_ctrl = wx.TextCtrl(pnl)
+            app_id_ctrl.SetValue(str(p_cfg.get("app_id", "") or ""))
+            fg.Add(app_id_ctrl, 1, wx.EXPAND | wx.ALL, 2)
+            ctrls["app_id"] = app_id_ctrl
+
+            fg.Add(wx.StaticText(pnl, label="Inoreader App Key:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+            app_key_ctrl = wx.TextCtrl(pnl, style=wx.TE_PASSWORD)
+            app_key_ctrl.SetValue(str(p_cfg.get("app_key", "") or ""))
+            fg.Add(app_key_ctrl, 1, wx.EXPAND | wx.ALL, 2)
+            ctrls["app_key"] = app_key_ctrl
+
+            outer.Add(fg, 0, wx.EXPAND | wx.ALL, 2)
+
+            redirect_uri = inoreader_oauth.get_redirect_uri()
+            redirect_lbl = wx.StaticText(pnl, label=f"Redirect URI: {redirect_uri}")
+            outer.Add(redirect_lbl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 2)
+
+            status_lbl = wx.StaticText(pnl, label="")
+            outer.Add(status_lbl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 2)
+
+            btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+            auth_btn = wx.Button(pnl, label="Authorize Inoreader")
+            clear_btn = wx.Button(pnl, label="Clear Authorization")
+            btn_sizer.Add(auth_btn, 0, wx.ALL, 2)
+            btn_sizer.Add(clear_btn, 0, wx.ALL, 2)
+            outer.Add(btn_sizer, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 2)
+
+            pnl.SetSizer(outer)
+            provider_sizer.Add(pnl, 0, wx.EXPAND | wx.ALL, 5)
+            self._provider_panels[name] = (pnl, ctrls)
+            pnl.Hide()
+
+            self._inoreader_app_id_ctrl = app_id_ctrl
+            self._inoreader_app_key_ctrl = app_key_ctrl
+            self._inoreader_status_lbl = status_lbl
+            self._inoreader_authorize_btn = auth_btn
+            self._inoreader_clear_btn = clear_btn
+            self._inoreader_tokens = None
+            self._inoreader_auth_original = {
+                "app_id": str(p_cfg.get("app_id", "") or ""),
+                "app_key": str(p_cfg.get("app_key", "") or ""),
+            }
+
+            has_token = bool((p_cfg.get("token") or "") or (p_cfg.get("refresh_token") or ""))
+            self._set_inoreader_status(
+                "Authorized" if has_token else "Not authorized",
+                ok=has_token,
+            )
+
+            auth_btn.Bind(wx.EVT_BUTTON, self._start_inoreader_authorize)
+            clear_btn.Bind(wx.EVT_BUTTON, self._clear_inoreader_authorization)
+
         _add_simple_info_panel("local", "Local provider uses the feeds you add inside the app (Add Feed / Import OPML).")
         _add_fields_panel("miniflux", [
             ("Miniflux URL:", "url", 0),
@@ -324,9 +387,7 @@ class SettingsDialog(wx.Dialog):
             ("The Old Reader Email:", "email", 0),
             ("The Old Reader Password:", "password", wx.TE_PASSWORD),
         ])
-        _add_fields_panel("inoreader", [
-            ("Inoreader Token:", "token", 0),
-        ])
+        _add_inoreader_panel("inoreader")
         _add_fields_panel("bazqux", [
             ("BazQux Email:", "email", 0),
             ("BazQux Password:", "password", wx.TE_PASSWORD),
@@ -403,6 +464,120 @@ class SettingsDialog(wx.Dialog):
         except Exception:
             pass
 
+    def _set_inoreader_status(self, text: str, ok: bool = False) -> None:
+        lbl = getattr(self, "_inoreader_status_lbl", None)
+        if not lbl:
+            return
+        try:
+            lbl.SetLabel(text)
+        except Exception:
+            return
+        try:
+            color = wx.Colour(0, 128, 0) if ok else wx.Colour(160, 0, 0)
+            lbl.SetForegroundColour(color)
+        except Exception:
+            pass
+
+    def _start_inoreader_authorize(self, event):
+        app_id_ctrl = getattr(self, "_inoreader_app_id_ctrl", None)
+        app_key_ctrl = getattr(self, "_inoreader_app_key_ctrl", None)
+        if not app_id_ctrl or not app_key_ctrl:
+            return
+        app_id = (app_id_ctrl.GetValue() or "").strip()
+        app_key = (app_key_ctrl.GetValue() or "").strip()
+        if not app_id or not app_key:
+            wx.MessageBox("Enter your Inoreader App ID and App Key first.", "Inoreader", wx.ICON_INFORMATION)
+            return
+        btn = getattr(self, "_inoreader_authorize_btn", None)
+        if btn:
+            try:
+                btn.Disable()
+            except Exception:
+                pass
+        self._set_inoreader_status("Waiting for authorization...", ok=False)
+        threading.Thread(
+            target=self._inoreader_oauth_worker,
+            args=(app_id, app_key),
+            daemon=True,
+        ).start()
+
+    def _inoreader_oauth_worker(self, app_id: str, app_key: str) -> None:
+        redirect_uri = inoreader_oauth.get_redirect_uri()
+        try:
+            auth_url, state = inoreader_oauth.create_authorization_url(app_id, redirect_uri)
+            ready_event = threading.Event()
+
+            def _open_browser():
+                try:
+                    ready_event.wait(5)
+                except Exception:
+                    pass
+                webbrowser.open(auth_url)
+
+            threading.Thread(target=_open_browser, daemon=True).start()
+            code = inoreader_oauth.wait_for_oauth_code(state, ready_event=ready_event)
+            token_data = inoreader_oauth.exchange_code_for_tokens(app_id, app_key, code, redirect_uri)
+            access_token = token_data.get("access_token")
+            if not access_token:
+                raise RuntimeError("No access token returned from Inoreader.")
+
+            refresh_token = token_data.get("refresh_token")
+            if not refresh_token:
+                try:
+                    refresh_token = (
+                        (self.config.get("providers") or {})
+                        .get("inoreader", {})
+                        .get("refresh_token", "")
+                    )
+                except Exception:
+                    refresh_token = ""
+
+            expires_in = token_data.get("expires_in", 0)
+            expires_at = 0
+            try:
+                expires_in_int = int(expires_in or 0)
+                if expires_in_int > 0:
+                    expires_at = int(time.time() + max(0, expires_in_int - 60))
+            except Exception:
+                expires_at = 0
+
+            token_payload = {
+                "token": access_token,
+                "refresh_token": refresh_token or "",
+                "token_expires_at": expires_at,
+            }
+            wx.CallAfter(self._on_inoreader_oauth_success, token_payload)
+        except Exception as exc:
+            wx.CallAfter(self._on_inoreader_oauth_error, str(exc))
+
+    def _on_inoreader_oauth_success(self, token_payload: dict) -> None:
+        self._inoreader_tokens = dict(token_payload or {})
+        self._set_inoreader_status("Authorized", ok=True)
+        btn = getattr(self, "_inoreader_authorize_btn", None)
+        if btn:
+            try:
+                btn.Enable()
+            except Exception:
+                pass
+
+    def _on_inoreader_oauth_error(self, message: str) -> None:
+        self._set_inoreader_status("Authorization failed", ok=False)
+        btn = getattr(self, "_inoreader_authorize_btn", None)
+        if btn:
+            try:
+                btn.Enable()
+            except Exception:
+                pass
+        wx.MessageBox(f"Inoreader authorization failed:\n{message}", "Inoreader", wx.ICON_ERROR)
+
+    def _clear_inoreader_authorization(self, event) -> None:
+        self._inoreader_tokens = {
+            "token": "",
+            "refresh_token": "",
+            "token_expires_at": 0,
+        }
+        self._set_inoreader_status("Not authorized", ok=False)
+
     def on_browse_dl_path(self, event):
         dlg = wx.DirDialog(self, "Choose download directory", self.dl_path_ctrl.GetValue(), style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST)
         if dlg.ShowModal() == wx.ID_OK:
@@ -436,6 +611,25 @@ class SettingsDialog(wx.Dialog):
                 except Exception:
                     p_cfg[key] = ""
             providers[name] = p_cfg
+
+        if "inoreader" in providers:
+            p_cfg = providers.get("inoreader", {})
+            tokens = getattr(self, "_inoreader_tokens", None)
+            if tokens is not None:
+                try:
+                    p_cfg.update(tokens)
+                except Exception:
+                    pass
+            else:
+                original = getattr(self, "_inoreader_auth_original", {}) or {}
+                if (
+                    str(p_cfg.get("app_id", "") or "") != str(original.get("app_id", "") or "")
+                    or str(p_cfg.get("app_key", "") or "") != str(original.get("app_key", "") or "")
+                ):
+                    p_cfg["token"] = ""
+                    p_cfg["refresh_token"] = ""
+                    p_cfg["token_expires_at"] = 0
+            providers["inoreader"] = p_cfg
 
         return {
             "refresh_interval": self.refresh_map.get(self.refresh_ctrl.GetStringSelection(), 300),
@@ -979,7 +1173,7 @@ class AboutDialog(wx.Dialog):
         sizer.Add(title_txt, 0, wx.ALIGN_CENTER | wx.TOP, 15)
 
         # Copyright
-        copy_txt = wx.StaticText(self, label="Copyright (c) 2024-2025 serrebi and contributors")
+        copy_txt = wx.StaticText(self, label="Copyright (c) 2024-2026 serrebi and contributors")
         sizer.Add(copy_txt, 0, wx.ALIGN_CENTER | wx.TOP, 10)
 
         sizer.AddSpacer(20)
@@ -1006,4 +1200,3 @@ class AboutDialog(wx.Dialog):
 
 # Backwards-compatible name (menu item was historically called "Search Podcast").
 PodcastSearchDialog = FeedSearchDialog
-

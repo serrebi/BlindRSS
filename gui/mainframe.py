@@ -125,24 +125,47 @@ class MainFrame(wx.Frame):
 
     def _check_media_dependencies(self):
         try:
-            missing_vlc, missing_ffmpeg = dependency_check.check_media_tools_status()
-            if missing_vlc or missing_ffmpeg:
-                msg = "Missing recommended media tools:\n"
-                if missing_vlc: msg += "- VLC Media Player (required for playback)\n"
-                if missing_ffmpeg: msg += "- FFmpeg (required for some podcasts)\n"
-                msg += "\nWould you like to install them automatically (via winget) and add them to PATH?"
+            missing_vlc, missing_ffmpeg, missing_ytdlp = dependency_check.check_media_tools_status()
+            if missing_vlc or missing_ffmpeg or missing_ytdlp:
+                msg = "Missing recommended tools:\n"
+                if missing_vlc:
+                    msg += "- VLC Media Player (required for playback)\n"
+                if missing_ffmpeg:
+                    msg += "- FFmpeg (required for some podcasts)\n"
+                if missing_ytdlp:
+                    msg += "- yt-dlp (required for YouTube and many media sources)\n"
+                msg += "\nWould you like to install them automatically (via winget/Ninite) and add them to PATH?"
                 
                 if wx.MessageBox(msg, "Install Dependencies", wx.YES_NO | wx.ICON_QUESTION) == wx.YES:
                     self.SetStatusText("Installing dependencies...")
                     # Run in thread to avoid freezing
-                    threading.Thread(target=self._install_dependencies_thread, args=(missing_vlc, missing_ffmpeg), daemon=True).start()
+                    threading.Thread(
+                        target=self._install_dependencies_thread,
+                        args=(missing_vlc, missing_ffmpeg, missing_ytdlp),
+                        daemon=True,
+                    ).start()
         except Exception as e:
             log.error(f"Dependency check failed: {e}")
 
-    def _install_dependencies_thread(self, vlc, ffmpeg):
+    def _install_dependencies_thread(self, vlc, ffmpeg, ytdlp):
         try:
-            dependency_check.install_media_tools(vlc=vlc, ffmpeg=ffmpeg)
-            wx.CallAfter(wx.MessageBox, "Dependencies installed. Please restart the application.", "Success", wx.ICON_INFORMATION)
+            dependency_check.install_media_tools(vlc=vlc, ffmpeg=ffmpeg, ytdlp=ytdlp)
+            missing_vlc, missing_ffmpeg, missing_ytdlp = dependency_check.check_media_tools_status()
+            if missing_vlc or missing_ffmpeg or missing_ytdlp:
+                log_path = dependency_check.get_dependency_log_path()
+                wx.CallAfter(
+                    wx.MessageBox,
+                    f"Some dependencies are still missing.\n\nSee log: {log_path}",
+                    "Install Incomplete",
+                    wx.ICON_WARNING,
+                )
+            else:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    "Dependencies installed and PATH updated. A restart is recommended.",
+                    "Success",
+                    wx.ICON_INFORMATION,
+                )
         except Exception as e:
             wx.CallAfter(wx.MessageBox, f"Installation failed: {e}", "Error", wx.ICON_ERROR)
 

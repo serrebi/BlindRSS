@@ -1,44 +1,260 @@
 import requests
 import logging
+import time
+import threading
+from email.utils import parsedate_to_datetime
 from typing import List, Dict, Any
 from .base import RSSProvider
 from core.models import Feed, Article
 from core import utils
+from core import inoreader_oauth
 
 log = logging.getLogger(__name__)
+
+class RateLimitError(RuntimeError):
+    def __init__(self, retry_after: int | None, message: str):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 class InoreaderProvider(RSSProvider):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
+        self.config = config
         self.conf = config.get("providers", {}).get("inoreader", {})
         self.base_url = "https://www.inoreader.com/reader/api/0"
-        self.token = self.conf.get("token", "")
+        self.token = (self.conf.get("token") or "").strip()
+        self.app_id = (self.conf.get("app_id") or "").strip()
+        self.app_key = (self.conf.get("app_key") or "").strip()
+        self.refresh_token = (self.conf.get("refresh_token") or "").strip()
+        self.token_expires_at = self._parse_timestamp(self.conf.get("token_expires_at"))
+        self._rate_limit_lock = threading.Lock()
+        self._rate_limit_until = 0.0
+        self._cache_lock = threading.Lock()
+        self._feeds_cache = None
+        self._categories_cache = None
+        self._feeds_cache_time = 0.0
+        self._categories_cache_time = 0.0
+        self._cache_ttl_s = 60
+        self._force_next_fetch = False
 
     def get_name(self) -> str:
         return "Inoreader"
 
+    def _parse_timestamp(self, value) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
     def _headers(self):
         h = utils.HEADERS.copy()
+        if self.app_id:
+            h["AppId"] = self.app_id
+        if self.app_key:
+            h["AppKey"] = self.app_key
         if self.token:
             h["Authorization"] = f"Bearer {self.token}"
         return h
 
-    def refresh(self, progress_cb=None) -> bool:
+    def _cache_is_fresh(self, cache_time: float) -> bool:
+        if self._cache_ttl_s <= 0:
+            return False
+        return (time.time() - cache_time) < self._cache_ttl_s
+
+    def _build_categories_from_feeds(self, feeds: List[Feed]) -> List[str]:
+        categories = []
+        seen = set()
+        for feed in feeds:
+            cat = feed.category or "Uncategorized"
+            if cat not in seen:
+                categories.append(cat)
+                seen.add(cat)
+        return sorted(categories, key=lambda c: c.lower())
+
+    def _set_feed_cache(self, feeds: List[Feed]) -> None:
+        now = time.time()
+        with self._cache_lock:
+            self._feeds_cache = list(feeds)
+            self._feeds_cache_time = now
+            self._categories_cache = self._build_categories_from_feeds(feeds)
+            self._categories_cache_time = now
+            self._force_next_fetch = False
+
+    def _set_categories_cache(self, categories: List[str]) -> None:
+        now = time.time()
+        with self._cache_lock:
+            self._categories_cache = list(categories)
+            self._categories_cache_time = now
+
+    def _get_cached_feeds(self, allow_stale: bool = False) -> List[Feed] | None:
+        with self._cache_lock:
+            if self._feeds_cache is None:
+                return None
+            if not allow_stale:
+                if self._force_next_fetch or not self._cache_is_fresh(self._feeds_cache_time):
+                    return None
+            return list(self._feeds_cache)
+
+    def _get_cached_categories(self, allow_stale: bool = False) -> List[str] | None:
+        with self._cache_lock:
+            if self._categories_cache is None:
+                return None
+            if not allow_stale and not self._cache_is_fresh(self._categories_cache_time):
+                return None
+            return list(self._categories_cache)
+
+    def _mark_cache_dirty(self) -> None:
+        self._force_next_fetch = True
+
+    def _parse_retry_after(self, value: str | None) -> int | None:
+        if not value:
+            return None
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            try:
+                dt = parsedate_to_datetime(value)
+                if dt is None:
+                    return None
+                delta = dt.timestamp() - time.time()
+                return max(0, int(delta))
+            except Exception:
+                return None
+
+    def _apply_rate_limit(self, wait_s: int) -> None:
+        if wait_s <= 0:
+            return
+        with self._rate_limit_lock:
+            until = time.time() + wait_s
+            if until > self._rate_limit_until:
+                self._rate_limit_until = until
+
+    def _respect_rate_limit(self, allow_sleep: bool) -> None:
+        with self._rate_limit_lock:
+            wait_s = max(0.0, self._rate_limit_until - time.time())
+        if wait_s <= 0:
+            return
+        if not allow_sleep:
+            retry_after = int(wait_s)
+            raise RateLimitError(retry_after, f"Inoreader rate limit active. Retry in {retry_after}s.")
+        time.sleep(wait_s)
+
+    def _request(self, method: str, url: str, *, params=None, data=None, **kwargs):
+        allow_sleep = threading.current_thread() is not threading.main_thread()
+        self._respect_rate_limit(allow_sleep)
+        headers = kwargs.pop("headers", None)
+        req_headers = self._headers()
+        if headers:
+            req_headers.update(headers)
+        resp = requests.request(method, url, headers=req_headers, params=params, data=data, **kwargs)
+        if resp.status_code == 429:
+            retry_after = self._parse_retry_after(resp.headers.get("Retry-After")) or 30
+            self._apply_rate_limit(retry_after)
+            if allow_sleep:
+                self._respect_rate_limit(True)
+                resp = requests.request(method, url, headers=req_headers, params=params, data=data, **kwargs)
+                if resp.status_code == 429:
+                    retry_after = self._parse_retry_after(resp.headers.get("Retry-After")) or retry_after
+                    self._apply_rate_limit(retry_after)
+                    raise RateLimitError(retry_after, f"Inoreader rate limit active. Retry in {retry_after}s.")
+            else:
+                raise RateLimitError(retry_after, f"Inoreader rate limit active. Retry in {retry_after}s.")
+        resp.raise_for_status()
+        return resp
+
+    def _update_provider_config(self, data: Dict[str, Any]) -> None:
+        try:
+            self.conf.update(data)
+        except Exception:
+            pass
+        if hasattr(self.config, "update_provider_config"):
+            try:
+                self.config.update_provider_config("inoreader", data)
+                return
+            except Exception:
+                pass
+        if isinstance(self.config, dict):
+            providers = self.config.setdefault("providers", {})
+            if isinstance(providers, dict):
+                p_cfg = providers.setdefault("inoreader", {})
+                if isinstance(p_cfg, dict):
+                    p_cfg.update(data)
+
+    def _set_tokens(self, access_token: str | None, refresh_token: str | None, expires_in: Any) -> None:
+        if access_token is not None:
+            self.token = str(access_token or "")
+        if refresh_token is not None:
+            self.refresh_token = str(refresh_token or "")
+        expires_at = 0
+        try:
+            expires_in_int = int(expires_in or 0)
+            if expires_in_int > 0:
+                expires_at = int(time.time() + max(0, expires_in_int - 60))
+        except Exception:
+            expires_at = 0
+        self.token_expires_at = expires_at
+        self._update_provider_config({
+            "token": self.token or "",
+            "refresh_token": self.refresh_token or "",
+            "token_expires_at": int(self.token_expires_at or 0),
+        })
+
+    def _has_app_credentials(self) -> bool:
+        return bool(self.app_id and self.app_key)
+
+    def _token_is_stale(self) -> bool:
+        if not self.token:
+            return True
+        if not self.token_expires_at:
+            return False
+        return time.time() >= float(self.token_expires_at) - 60
+    
+    def _has_required_auth(self) -> bool:
+        if not self._has_app_credentials():
+            return False
+        if not self._token_is_stale():
+            return True
+        if self.refresh_token:
+            try:
+                data = inoreader_oauth.refresh_access_token(
+                    self.app_id,
+                    self.app_key,
+                    self.refresh_token,
+                )
+                access_token = data.get("access_token")
+                new_refresh = data.get("refresh_token", self.refresh_token)
+                expires_in = data.get("expires_in", 0)
+                if access_token:
+                    self._set_tokens(access_token, new_refresh, expires_in)
+                    return True
+            except Exception as e:
+                log.error(f"Inoreader Refresh Token Error: {e}")
+                return False
+        return bool(self.token)
+
+    def refresh(self, progress_cb=None, force: bool = False) -> bool:
+        if force:
+            self._mark_cache_dirty()
         return True
 
     def get_feeds(self) -> List[Feed]:
-        if not self.token: return []
+        if not self._has_required_auth():
+            return []
+
+        cached = self._get_cached_feeds(allow_stale=False)
+        if cached is not None:
+            return cached
+
         try:
-            resp = requests.get(f"{self.base_url}/subscription/list", headers=self._headers(), params={"output": "json"})
-            resp.raise_for_status()
+            resp = self._request("get", f"{self.base_url}/subscription/list", params={"output": "json"})
             data = resp.json()
-            
+
             feeds = []
             for sub in data.get("subscriptions", []):
                 cat = "Uncategorized"
                 if sub.get("categories"):
                     cat = sub["categories"][0]["label"]
-                
+
                 feeds.append(Feed(
                     id=sub["id"],
                     title=sub["title"],
@@ -46,13 +262,24 @@ class InoreaderProvider(RSSProvider):
                     category=cat,
                     icon_url=sub.get("iconUrl", "")
                 ))
+            self._set_feed_cache(feeds)
             return feeds
+        except RateLimitError as e:
+            cached = self._get_cached_feeds(allow_stale=True)
+            if cached is not None:
+                log.warning(f"Inoreader Feeds Rate Limit: {e}")
+                return cached
+            raise
         except Exception as e:
+            cached = self._get_cached_feeds(allow_stale=True)
+            if cached is not None:
+                log.error(f"Inoreader Feeds Error (cached): {e}")
+                return cached
             log.error(f"Inoreader Feeds Error: {e}")
-            return []
+            raise
 
     def get_articles(self, feed_id: str) -> List[Article]:
-        if not self.token: return []
+        if not self._has_required_auth(): return []
         try:
             real_feed_id = feed_id
             params = {"output": "json", "n": 50}
@@ -63,12 +290,20 @@ class InoreaderProvider(RSSProvider):
             elif feed_id.startswith("read:"):
                 real_feed_id = feed_id[5:]
                 params["it"] = "user/-/state/com.google/read"
-            elif feed_id.startswith("favorites:") or feed_id.startswith("starred:"):
-                real_feed_id = "user/-/state/com.google/starred"
 
-            url = f"{self.base_url}/stream/contents/{real_feed_id}"
-            resp = requests.get(url, headers=self._headers(), params=params)
-            resp.raise_for_status()
+            if real_feed_id == "all":
+                stream_id = "user/-/state/com.google/reading-list"
+            elif real_feed_id.startswith("category:"):
+                label = real_feed_id.split(":", 1)[1]
+                stream_id = f"user/-/label/{label}"
+            elif real_feed_id.startswith("favorites:") or real_feed_id.startswith("starred:"):
+                stream_id = "user/-/state/com.google/starred"
+            else:
+                stream_id = real_feed_id
+
+            url = f"{self.base_url}/stream/contents"
+            params["s"] = stream_id
+            resp = self._request("get", url, params=params)
             data = resp.json()
             
             items = data.get("items", [])
@@ -140,9 +375,9 @@ class InoreaderProvider(RSSProvider):
         return []
 
     def mark_read(self, article_id: str) -> bool:
-        if not self.token: return False
+        if not self._has_required_auth(): return False
         try:
-            requests.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
+            self._request("post", f"{self.base_url}/edit-tag", data={
                 "i": article_id,
                 "a": "user/-/state/com.google/read"
             })
@@ -152,9 +387,9 @@ class InoreaderProvider(RSSProvider):
             return False
 
     def mark_unread(self, article_id: str) -> bool:
-        if not self.token: return False
+        if not self._has_required_auth(): return False
         try:
-            requests.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
+            self._request("post", f"{self.base_url}/edit-tag", data={
                 "i": article_id,
                 "r": "user/-/state/com.google/read"
             })
@@ -167,10 +402,10 @@ class InoreaderProvider(RSSProvider):
         return True
 
     def set_favorite(self, article_id: str, is_favorite: bool) -> bool:
-        if not self.token: return False
+        if not self._has_required_auth(): return False
         try:
             action = "a" if is_favorite else "r"
-            requests.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
+            self._request("post", f"{self.base_url}/edit-tag", data={
                 "i": article_id,
                 action: "user/-/state/com.google/starred"
             })
@@ -180,9 +415,9 @@ class InoreaderProvider(RSSProvider):
             return False
 
     def toggle_favorite(self, article_id: str):
-        if not self.token: return None
+        if not self._has_required_auth(): return None
         try:
-            resp = requests.get(f"{self.base_url}/stream/items/ids", headers=self._headers(), params={"i": article_id, "output": "json"})
+            resp = self._request("get", f"{self.base_url}/stream/items/ids", params={"i": article_id, "output": "json"})
             if resp.ok:
                 items = resp.json().get("items", [])
                 if items:
@@ -196,7 +431,7 @@ class InoreaderProvider(RSSProvider):
         return None
 
     def add_feed(self, url: str, category: str = None) -> bool:
-        if not self.token: return False
+        if not self._has_required_auth(): return False
         from core.discovery import get_ytdlp_feed_url, discover_feed
         real_url = get_ytdlp_feed_url(url) or discover_feed(url) or url
         try:
@@ -207,20 +442,21 @@ class InoreaderProvider(RSSProvider):
             if category:
                 data["t"] = category
             
-            resp = requests.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data=data)
-            resp.raise_for_status()
+            self._request("post", f"{self.base_url}/subscription/edit", data=data)
+            self._mark_cache_dirty()
             return True
         except Exception as e:
             log.error(f"Inoreader Add Feed Error: {e}")
             return False
 
     def remove_feed(self, feed_id: str) -> bool:
-        if not self.token: return False
+        if not self._has_required_auth(): return False
         try:
-            requests.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data={
+            self._request("post", f"{self.base_url}/subscription/edit", data={
                 "s": feed_id,
                 "ac": "unsubscribe"
             })
+            self._mark_cache_dirty()
             return True
         except Exception as e:
             log.error(f"Inoreader Remove Feed Error: {e}")
@@ -233,7 +469,7 @@ class InoreaderProvider(RSSProvider):
         return False
 
     def update_feed(self, feed_id: str, title: str = None, url: str = None, category: str = None) -> bool:
-        if not self.token:
+        if not self._has_required_auth():
             return False
         data = {"s": feed_id, "ac": "edit"}
         if title is not None:
@@ -255,17 +491,30 @@ class InoreaderProvider(RSSProvider):
                     data["a"] = f"user/-/label/{category}"
 
         try:
-            resp = requests.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data=data)
+            resp = self._request("post", f"{self.base_url}/subscription/edit", data=data)
+            if resp.ok:
+                self._mark_cache_dirty()
             return resp.ok
         except Exception as e:
             log.error(f"Inoreader Update Feed Error: {e}")
             return False
 
     def get_categories(self) -> List[str]:
-        if not self.token: return []
+        if not self._has_required_auth():
+            return []
+
+        cached = self._get_cached_categories(allow_stale=False)
+        if cached is not None:
+            return cached
+
+        feeds_cached = self._get_cached_feeds(allow_stale=True)
+        if feeds_cached is not None:
+            cats = self._build_categories_from_feeds(feeds_cached)
+            self._set_categories_cache(cats)
+            return cats
+
         try:
-            resp = requests.get(f"{self.base_url}/tag/list", headers=self._headers(), params={"output": "json"})
-            resp.raise_for_status()
+            resp = self._request("get", f"{self.base_url}/tag/list", params={"output": "json"})
             data = resp.json()
             cats = []
             for tag in data.get("tags", []):
@@ -273,35 +522,51 @@ class InoreaderProvider(RSSProvider):
                 if tag_id.startswith("user/") and "/label/" in tag_id:
                     label = tag_id.split("/label/", 1)[1]
                     cats.append(label)
-            return sorted(cats)
+            cats = sorted(cats, key=lambda c: c.lower())
+            self._set_categories_cache(cats)
+            return cats
+        except RateLimitError as e:
+            cached = self._get_cached_categories(allow_stale=True)
+            if cached is not None:
+                log.warning(f"Inoreader Get Categories Rate Limit: {e}")
+                return cached
+            raise
         except Exception as e:
+            cached = self._get_cached_categories(allow_stale=True)
+            if cached is not None:
+                log.error(f"Inoreader Get Categories Error (cached): {e}")
+                return cached
             log.error(f"Inoreader Get Categories Error: {e}")
-            return []
+            raise
 
     def add_category(self, title: str) -> bool:
+        self._mark_cache_dirty()
         return True
 
     def rename_category(self, old_title: str, new_title: str) -> bool:
-        if not self.token: return False
+        if not self._has_required_auth(): return False
         try:
             source = f"user/-/label/{old_title}"
             dest = f"user/-/label/{new_title}"
-            resp = requests.post(f"{self.base_url}/rename-tag", headers=self._headers(), data={
+            resp = self._request("post", f"{self.base_url}/rename-tag", data={
                 "s": source,
                 "dest": dest
             })
+            if resp.ok:
+                self._mark_cache_dirty()
             return resp.ok
         except Exception as e:
             log.error(f"Inoreader Rename Category Error: {e}")
             return False
 
     def delete_category(self, title: str) -> bool:
-        if not self.token: return False
+        if not self._has_required_auth(): return False
         try:
             tag = f"user/-/label/{title}"
-            requests.post(f"{self.base_url}/disable-tag", headers=self._headers(), data={
+            self._request("post", f"{self.base_url}/disable-tag", data={
                 "s": tag
             })
+            self._mark_cache_dirty()
             return True
         except Exception as e:
             log.error(f"Inoreader Delete Category Error: {e}")

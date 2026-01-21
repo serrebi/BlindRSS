@@ -89,7 +89,11 @@ DEFAULT_CONFIG = {
             "api_key": ""
         },
         "inoreader": {
-            "token": ""
+            "token": "",
+            "app_id": "",
+            "app_key": "",
+            "refresh_token": "",
+            "token_expires_at": 0
         },
         "bazqux": {
             "email": "",

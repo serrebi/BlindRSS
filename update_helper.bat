@@ -30,7 +30,7 @@ if not defined BLINDRSS_UPDATE_HELPER_RELOCATED (
         for /f %%T in ('powershell -NoProfile -InputFormat None -Command "(Get-Date).ToString(\"yyyyMMddHHmmss\")"') do set "HSTAMP=%%T"
         set "TMP_HELPER=%TEMP%\BlindRSS_update_helper_!HSTAMP!_!RANDOM!.bat"
         copy /Y "%~f0" "!TMP_HELPER!" >nul 2>nul
-        start "" "!TMP_HELPER!" "%PID%" "%INSTALL_DIR%" "%STAGING_DIR%" "%EXE_NAME%"
+        start "" /b "!TMP_HELPER!" "%PID%" "%INSTALL_DIR%" "%STAGING_DIR%" "%EXE_NAME%" "%TEMP_ROOT%"
         exit /b 0
     )
 )
@@ -94,7 +94,7 @@ echo [BlindRSS Update] Restoring user data...
 call :restore_user_data "%BACKUP_DIR%" "%INSTALL_DIR%"
 
 echo [BlindRSS Update] Launching app...
-start "" "%INSTALL_DIR%\%EXE_NAME%"
+start "" /b "%INSTALL_DIR%\%EXE_NAME%"
 call :cleanup_success "%BACKUP_DIR%" "%STAGING_DIR%" "%TEMP_ROOT%"
 exit /b 0
 
@@ -103,7 +103,7 @@ echo [BlindRSS Update] Update failed. Restoring backup...
 if exist "%BACKUP_DIR%" (
     robocopy "%BACKUP_DIR%" "%INSTALL_DIR%" /E /MOVE /R:3 /W:1 /NFL /NDL
 )
-start "" "%INSTALL_DIR%\%EXE_NAME%"
+start "" /b "%INSTALL_DIR%\%EXE_NAME%"
 powershell -NoProfile -InputFormat None -Command "param([string]$log) try { Add-Type -AssemblyName PresentationFramework | Out-Null; $msg = 'BlindRSS update failed.' + \"`n`n\" + 'Log file:' + \"`n\" + $log; [System.Windows.MessageBox]::Show($msg, 'BlindRSS Update', 'OK', 'Error') | Out-Null } catch { }" "%LOG_FILE%" >nul 2>nul
 exit /b 1
 
