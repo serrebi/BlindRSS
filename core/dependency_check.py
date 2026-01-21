@@ -62,8 +62,52 @@ def _run_quiet(cmd, timeout=900):
         _log(f"Command failed: {e}")
         return None
 
+def _normalize_path_entry(path):
+    if not path:
+        return ""
+    try:
+        expanded = os.path.expandvars(str(path)).strip().strip('"')
+        return os.path.normcase(os.path.abspath(expanded))
+    except Exception:
+        return str(path).strip().strip('"').lower()
+
+def _add_bin_to_process_path(bin_dir):
+    if not bin_dir:
+        return
+    try:
+        bin_dir = os.path.abspath(bin_dir)
+    except Exception:
+        return
+    current = os.environ.get("PATH", "")
+    parts = [p.strip().strip('"') for p in current.split(os.pathsep) if p.strip()]
+    norm_parts = [_normalize_path_entry(p) for p in parts]
+    norm_bin = _normalize_path_entry(bin_dir)
+    if norm_bin in norm_parts:
+        return
+    os.environ["PATH"] = os.pathsep.join([bin_dir] + parts)
+
+def _broadcast_env_change():
+    if platform.system().lower() != "windows":
+        return
+    try:
+        hwnd_broadcast = 0xFFFF
+        wm_settingchange = 0x001A
+        smto_abortifhung = 0x0002
+        result = ctypes.c_ulong()
+        ctypes.windll.user32.SendMessageTimeoutW(
+            hwnd_broadcast,
+            wm_settingchange,
+            0,
+            "Environment",
+            smto_abortifhung,
+            5000,
+            ctypes.byref(result),
+        )
+    except Exception as e:
+        _log(f"Failed to broadcast env change: {e}")
+
 def _maybe_add_windows_path():
-    """Meticulously find VLC/ffmpeg and add to PATH for this process."""
+    """Meticulously find VLC/ffmpeg/yt-dlp and add to PATH for this process."""
     if platform.system().lower() != "windows":
         return
     if winreg is None:
@@ -93,6 +137,16 @@ def _maybe_add_windows_path():
                         to_add_front.append(scripts)
                         candidates.add(scripts)
             except: pass
+        candidates.update([
+            os.path.join(local_app_data, r"Programs\ffmpeg\bin"),
+            os.path.join(local_app_data, r"Programs\FFmpeg\bin"),
+            os.path.join(local_app_data, r"Programs\Gyan\FFmpeg\bin"),
+            os.path.join(local_app_data, r"Programs\VideoLAN\VLC"),
+            os.path.join(local_app_data, r"Programs\VLC"),
+            os.path.join(local_app_data, r"Programs\yt-dlp"),
+            os.path.join(local_app_data, r"Programs\yt-dlp\bin"),
+            os.path.join(local_app_data, r"Microsoft\WindowsApps"),
+        ])
 
     # 1. Common hardcoded paths
     candidates.update([
@@ -196,11 +250,16 @@ def _maybe_add_windows_path():
         if os.path.isdir(winget_root):
             try:
                 for d in os.listdir(winget_root):
-                    if "vlc" in d.lower() or "ffmpeg" in d.lower():
+                    if "vlc" in d.lower() or "ffmpeg" in d.lower() or "yt-dlp" in d.lower():
                         base = os.path.join(winget_root, d)
                         candidates.add(base)
                         for root, dirs, files in os.walk(base):
-                            if "ffmpeg.exe" in files or "vlc.exe" in files or "libvlc.dll" in files:
+                            if (
+                                "ffmpeg.exe" in files
+                                or "vlc.exe" in files
+                                or "libvlc.dll" in files
+                                or "yt-dlp.exe" in files
+                            ):
                                 candidates.add(root)
                                 break
             except: pass
@@ -241,6 +300,172 @@ def _maybe_add_windows_path():
                         os.add_dll_directory(p)
                     except: pass
                 break
+
+def _collect_tool_candidates(tool_name):
+    tool = str(tool_name).lower().replace(".exe", "")
+    dirs = set()
+    search_roots = set()
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    program_files = os.environ.get("ProgramFiles", "")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
+    program_w6432 = os.environ.get("ProgramW6432", "")
+    user_p = os.environ.get("USERPROFILE", "")
+    choco_root = os.environ.get("ChocolateyInstall", r"C:\ProgramData\chocolatey")
+
+    if user_p:
+        dirs.update([
+            os.path.join(user_p, r"scoop\shims"),
+            os.path.join(user_p, r"scoop\apps\ffmpeg\current\bin"),
+            os.path.join(user_p, r"scoop\apps\vlc\current"),
+        ])
+
+    if tool == "vlc":
+        for base in (program_w6432, program_files, program_files_x86):
+            if base:
+                dirs.add(os.path.join(base, "VideoLAN", "VLC"))
+        if local_app_data:
+            dirs.add(os.path.join(local_app_data, "Programs", "VideoLAN", "VLC"))
+            dirs.add(os.path.join(local_app_data, "Programs", "VLC"))
+        dirs.update([
+            r"C:\Program Files\VideoLAN\VLC",
+            r"C:\Program Files (x86)\VideoLAN\VLC",
+            r"C:\Program Files\Common Files\VLC",
+            r"C:\vlc",
+            r"D:\vlc",
+        ])
+        if choco_root:
+            dirs.add(os.path.join(choco_root, "lib", "vlc", "tools"))
+            dirs.add(os.path.join(choco_root, "bin"))
+
+    if tool == "ffmpeg":
+        for base in (program_w6432, program_files, program_files_x86):
+            if base:
+                dirs.add(os.path.join(base, "Gyan", "FFmpeg", "bin"))
+                dirs.add(os.path.join(base, "FFmpeg", "bin"))
+                dirs.add(os.path.join(base, "ffmpeg", "bin"))
+        if local_app_data:
+            dirs.add(os.path.join(local_app_data, "Programs", "ffmpeg", "bin"))
+            dirs.add(os.path.join(local_app_data, "Programs", "FFmpeg", "bin"))
+            dirs.add(os.path.join(local_app_data, "Programs", "Gyan", "FFmpeg", "bin"))
+            search_roots.add(os.path.join(local_app_data, "BlindRSS", "ffmpeg", "extract"))
+        dirs.update([
+            r"C:\Program Files\Gyan\FFmpeg\bin",
+            r"C:\Program Files (x86)\Gyan\FFmpeg\bin",
+            r"C:\Program Files\ffmpeg\bin",
+            r"C:\Program Files (x86)\ffmpeg\bin",
+            r"C:\ffmpeg\bin",
+            r"C:\tools\ffmpeg\bin",
+            r"D:\ffmpeg\bin",
+        ])
+        if choco_root:
+            dirs.add(os.path.join(choco_root, "bin"))
+            dirs.add(os.path.join(choco_root, "lib", "ffmpeg", "tools", "ffmpeg", "bin"))
+
+    if tool == "yt-dlp":
+        base_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        dirs.add(os.path.join(base_dir, "bin"))
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            dirs.add(os.path.join(sys._MEIPASS, "bin"))
+        if local_app_data:
+            dirs.add(os.path.join(local_app_data, "Programs", "yt-dlp"))
+            dirs.add(os.path.join(local_app_data, "Programs", "yt-dlp", "bin"))
+            dirs.add(os.path.join(local_app_data, "Microsoft", "WinGet", "Links"))
+            dirs.add(os.path.join(local_app_data, "Microsoft", "WindowsApps"))
+        if choco_root:
+            dirs.add(os.path.join(choco_root, "bin"))
+
+    if local_app_data:
+        winget_root = os.path.join(local_app_data, "Microsoft", "WinGet", "Packages")
+        if os.path.isdir(winget_root):
+            search_roots.add(winget_root)
+
+    return dirs, search_roots
+
+def _find_executable_path(exe_name, extra_dirs=None):
+    exe_base = str(exe_name).strip()
+    if not exe_base:
+        return None
+    exe_file = exe_base if exe_base.lower().endswith(".exe") else f"{exe_base}.exe"
+
+    try:
+        _maybe_add_windows_path()
+    except Exception:
+        pass
+
+    exe = shutil.which(exe_base) or shutil.which(exe_file)
+    if exe and os.path.isfile(exe):
+        return exe
+
+    if platform.system().lower() == "windows":
+        try:
+            res = subprocess.run(
+                ["where", exe_base],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                creationflags=0x08000000,
+                startupinfo=_get_startup_info(),
+                timeout=5
+            )
+            if res.returncode == 0 and res.stdout:
+                first_found = res.stdout.splitlines()[0].strip()
+                if os.path.isfile(first_found):
+                    return first_found
+        except Exception:
+            pass
+
+    candidates, search_roots = _collect_tool_candidates(exe_base)
+    if extra_dirs:
+        for d in extra_dirs:
+            if d:
+                candidates.add(d)
+
+    for d in candidates:
+        if not d:
+            continue
+        try:
+            d_abs = os.path.abspath(d)
+        except Exception:
+            d_abs = d
+        exe_path = os.path.join(d_abs, exe_file)
+        if os.path.isfile(exe_path):
+            return exe_path
+
+    for root in search_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        try:
+            for cur_root, _, files in os.walk(root):
+                if exe_file in files:
+                    return os.path.join(cur_root, exe_file)
+        except Exception:
+            continue
+
+    return None
+
+def _set_vlc_lib_path(vlc_dir):
+    if not vlc_dir:
+        return
+    dll = os.path.join(vlc_dir, "libvlc.dll")
+    if os.path.isfile(dll):
+        os.environ["PYTHON_VLC_LIB_PATH"] = dll
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(vlc_dir)
+            except Exception:
+                pass
+
+def _ensure_tool_on_path(tool_name):
+    exe_path = _find_executable_path(tool_name)
+    if not exe_path:
+        return False
+    bin_dir = os.path.dirname(exe_path)
+    _add_bin_to_process_path(bin_dir)
+    _add_bin_to_user_path(bin_dir)
+    if str(tool_name).lower().startswith("vlc"):
+        _set_vlc_lib_path(bin_dir)
+    return True
 
 def _should_check_updates(marker_name):
     """Throttles specific checks to once every 24 hours."""
@@ -390,19 +615,7 @@ def _install_ffmpeg_fallback():
     return True
 
 def _is_ytdlp_available():
-    exe = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
-    if exe and os.path.isfile(exe):
-        return True
-    base_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    bin_dir = os.path.join(base_dir, "bin")
-    local_exe = os.path.join(bin_dir, "yt-dlp.exe")
-    if os.path.isfile(local_exe):
-        return True
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        bundled_exe = os.path.join(sys._MEIPASS, "bin", "yt-dlp.exe")
-        if os.path.isfile(bundled_exe):
-            return True
-    return False
+    return _find_executable_path("yt-dlp") is not None
 
 def _winget_has_package(package_id):
     """Check if winget thinks the package is already installed."""
@@ -432,21 +645,33 @@ def check_media_tools_status():
     """Returns tuple (vlc_missing, ffmpeg_missing, ytdlp_missing)."""
     _maybe_add_windows_path()
 
-    vlc_present = has("vlc", "--version")
-    if not vlc_present and os.environ.get("PYTHON_VLC_LIB_PATH"):
-        if os.path.isfile(os.environ["PYTHON_VLC_LIB_PATH"]):
+    vlc_exe = _find_executable_path("vlc")
+    if vlc_exe:
+        vlc_present = True
+        _add_bin_to_process_path(os.path.dirname(vlc_exe))
+        _set_vlc_lib_path(os.path.dirname(vlc_exe))
+    else:
+        vlc_present = False
+        if os.environ.get("PYTHON_VLC_LIB_PATH") and os.path.isfile(os.environ["PYTHON_VLC_LIB_PATH"]):
             vlc_present = True
-    if not vlc_present:
-        if _winget_has_package("VideoLAN.VLC"):
+        if not vlc_present and _winget_has_package("VideoLAN.VLC"):
             vlc_present = True
 
-    ff_present = has("ffmpeg", "-version")
-    if not ff_present:
+    ffmpeg_exe = _find_executable_path("ffmpeg")
+    if ffmpeg_exe:
+        ff_present = True
+        _add_bin_to_process_path(os.path.dirname(ffmpeg_exe))
+    else:
+        ff_present = False
         if _winget_has_package("Gyan.FFmpeg"):
             ff_present = True
 
-    ytdlp_present = _is_ytdlp_available()
-    if not ytdlp_present:
+    ytdlp_exe = _find_executable_path("yt-dlp")
+    if ytdlp_exe:
+        ytdlp_present = True
+        _add_bin_to_process_path(os.path.dirname(ytdlp_exe))
+    else:
+        ytdlp_present = False
         if _winget_has_package("yt-dlp.yt-dlp"):
             ytdlp_present = True
 
@@ -492,10 +717,12 @@ def install_media_tools(vlc=True, ffmpeg=True, ytdlp=False):
 
     _maybe_add_windows_path()
 
-    for tool in ("vlc", "ffmpeg"):
-        exe = shutil.which(tool) or shutil.which(f"{tool}.exe")
-        if exe:
-            _add_bin_to_user_path(os.path.dirname(exe))
+    if vlc:
+        _ensure_tool_on_path("vlc")
+    if ffmpeg:
+        _ensure_tool_on_path("ffmpeg")
+    if ytdlp:
+        _ensure_tool_on_path("yt-dlp")
 
 def ensure_media_tools():
     """Robust detection of media tools (Path setup only)."""
@@ -583,12 +810,19 @@ def _add_bin_to_user_path(bin_dir):
         if winreg is None:
             return
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
-            try: existing, _ = winreg.QueryValueEx(key, "PATH")
-            except: existing = ""
-            if bin_dir in str(existing).split(os.pathsep): return
+            try:
+                existing, _ = winreg.QueryValueEx(key, "PATH")
+            except:
+                existing = ""
+            existing_parts = [p for p in str(existing).split(os.pathsep) if p]
+            norm_existing = {_normalize_path_entry(p) for p in existing_parts}
+            norm_bin = _normalize_path_entry(bin_dir)
+            if norm_bin in norm_existing:
+                return
             new_path = os.pathsep.join([str(existing), bin_dir]) if existing else bin_dir
             winreg.SetValueEx(key, "PATH", 0, winreg.REG_EXPAND_SZ, new_path)
             _log(f"Added {bin_dir} to user PATH registry.")
+            _broadcast_env_change()
     except Exception as e:
         _log(f"Failed to add to user PATH registry: {e}")
 
