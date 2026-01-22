@@ -175,6 +175,7 @@ class MainFrame(wx.Frame):
         dlg.Destroy()
 
     def init_ui(self):
+        self.CreateStatusBar()
         # Main Splitter: Tree vs Content Area
         splitter = wx.SplitterWindow(self)
         
