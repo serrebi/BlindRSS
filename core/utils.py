@@ -356,14 +356,23 @@ def get_chapters_batch(article_ids: list) -> dict:
         conn.close()
 
 
-def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None, allow_id3: bool = True):
+def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None, allow_id3: bool = True, cursor=None):
     """
     Fetches chapters from chapter_url (JSON) or media_url (ID3 tags).
     Stores them in DB linked to article_id.
     Returns list of chapter dicts.
     """
     # Check DB first
-    existing = get_chapters_from_db(article_id)
+    # Note: get_chapters_from_db opens its own connection. 
+    # If we are in a transaction (cursor provided), we should probably use that cursor or skip this check if we know it's a fresh insert.
+    # But for simplicity, we can just query using the provided cursor if available.
+    if cursor:
+        cursor.execute("SELECT start, title, href FROM chapters WHERE article_id = ? ORDER BY start", (article_id,))
+        rows = cursor.fetchall()
+        existing = [{"start": r[0], "title": r[1], "href": r[2]} for r in rows]
+    else:
+        existing = get_chapters_from_db(article_id)
+        
     if existing:
         return existing
 
@@ -376,9 +385,14 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
             resp.raise_for_status()
             data = resp.json()
             chapters = data.get("chapters", [])
-            conn = get_connection()
-            try:
+            
+            if cursor:
+                c = cursor
+            else:
+                conn = get_connection()
                 c = conn.cursor()
+                
+            try:
                 for ch in chapters:
                     ch_id = str(uuid.uuid4())
                     start = ch.get("startTime") or ch.get("start_time") or 0
@@ -387,9 +401,13 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
                     c.execute("INSERT OR REPLACE INTO chapters (id, article_id, start, title, href) VALUES (?, ?, ?, ?, ?)",
                               (ch_id, article_id, float(start), title_ch, href))
                     chapters_out.append({"start": float(start), "title": title_ch, "href": href})
-                conn.commit()
+                
+                if not cursor:
+                    conn.commit()
             finally:
-                conn.close()
+                if not cursor:
+                    conn.close()
+
             if chapters_out:
                 return chapters_out
         except Exception as e:
@@ -466,9 +484,14 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
                 return chapters_out
 
             id3 = ID3(BytesIO(tag_bytes))
-            conn = get_connection()
-            try:
+            
+            if cursor:
+                c = cursor
+            else:
+                conn = get_connection()
                 c = conn.cursor()
+            
+            try:
                 for frame in id3.getall("CHAP"):
                     ch_id = str(uuid.uuid4())
                     start = frame.start_time / 1000.0 if frame.start_time else 0
@@ -485,9 +508,11 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
                     )
                     chapters_out.append({"start": float(start), "title": title_ch, "href": href})
 
-                conn.commit()
+                if not cursor:
+                    conn.commit()
             finally:
-                conn.close()
+                if not cursor:
+                    conn.close()
         except ImportError:
             log.info("mutagen not installed, skipping ID3 chapter parse.")
         except ID3Error as e:

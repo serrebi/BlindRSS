@@ -531,7 +531,10 @@ class LocalProvider(RSSProvider):
                 final_title = d.feed.get('title', final_title)
                 c.execute("UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?", 
                           (final_title, new_etag, new_last_modified, feed_id))
-                conn.commit()
+                
+                # Pre-fetch existing articles to avoid N+1 SELECTs
+                c.execute("SELECT id, date FROM articles WHERE feed_id = ?", (feed_id,))
+                existing_articles = {row[0]: row[1] or "" for row in c.fetchall()}
                 
                 total_entries = len(d.entries)
                 for i, entry in enumerate(d.entries):
@@ -593,15 +596,10 @@ class LocalProvider(RSSProvider):
                         url
                     )
 
-                    c.execute("SELECT date FROM articles WHERE id = ?", (article_id,))
-                    row = c.fetchone()
-                    if row:
-                        existing_date = row[0] or ""
+                    existing_date = existing_articles.get(article_id)
+                    if existing_date is not None:
                         if existing_date != date:
                                 c.execute("UPDATE articles SET date = ? WHERE id = ?", (date, article_id))
-                                # Commit updates occasionally too
-                                if i % 5 == 0 or i == total_entries - 1:
-                                    conn.commit()
                         continue
 
                     media_url = None
@@ -684,11 +682,10 @@ class LocalProvider(RSSProvider):
                         if key and key in chapter_map:
                             chapter_url = chapter_map[key]
 
-                    utils.fetch_and_store_chapters(article_id, media_url, media_type, chapter_url, allow_id3=False)
+                    utils.fetch_and_store_chapters(article_id, media_url, media_type, chapter_url, allow_id3=False, cursor=c)
 
-                    # Commit every 5 items to save progress incrementally
-                    if i % 5 == 0 or i == total_entries - 1:
-                        conn.commit()
+                # Commit once at the end
+                conn.commit()
             finally:
                 conn.close()
         except Exception as e:
