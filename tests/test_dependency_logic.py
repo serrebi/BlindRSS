@@ -1,0 +1,140 @@
+import unittest
+import sys
+import os
+import platform
+from unittest.mock import MagicMock, patch, call
+
+# Mock winreg before importing dependency_check
+sys.modules['winreg'] = MagicMock()
+import core.dependency_check as dep_check
+
+class TestDependencyLogic(unittest.TestCase):
+    def setUp(self):
+        dep_check._log = MagicMock()
+        self.mock_winreg = sys.modules['winreg']
+        self.mock_winreg.HKEY_CURRENT_USER = 1
+        self.mock_winreg.KEY_READ = 1
+        self.mock_winreg.KEY_SET_VALUE = 2
+        self.mock_winreg.REG_EXPAND_SZ = 3
+        self.mock_winreg.REG_SZ = 4
+    
+    @patch('core.dependency_check.platform.system', return_value='windows')
+    def test_add_bin_to_user_path_append(self, mock_platform):
+        mock_key = MagicMock()
+        self.mock_winreg.OpenKey.return_value.__enter__.return_value = mock_key
+        existing_path = r"C:\Existing\Path"
+        self.mock_winreg.QueryValueEx.return_value = (existing_path, self.mock_winreg.REG_SZ)
+        new_bin = r"C:\New\Bin"
+        dep_check._add_bin_to_user_path(new_bin)
+        expected_path = existing_path + os.pathsep + new_bin
+        self.mock_winreg.SetValueEx.assert_called_with(
+            mock_key, "PATH", 0, self.mock_winreg.REG_SZ, expected_path
+        )
+
+    @patch('core.dependency_check.platform.system', return_value='windows')
+    def test_add_bin_to_user_path_empty(self, mock_platform):
+        mock_key = MagicMock()
+        self.mock_winreg.OpenKey.return_value.__enter__.return_value = mock_key
+        self.mock_winreg.QueryValueEx.side_effect = OSError("Not found")
+        new_bin = r"C:\New\Bin"
+        dep_check._add_bin_to_user_path(new_bin)
+        self.mock_winreg.SetValueEx.assert_called_with(
+            mock_key, "PATH", 0, self.mock_winreg.REG_EXPAND_SZ, str(new_bin)
+        )
+
+    @patch('core.dependency_check.platform.system', return_value='windows')
+    def test_add_bin_to_user_path_already_exists(self, mock_platform):
+        mock_key = MagicMock()
+        self.mock_winreg.OpenKey.return_value.__enter__.return_value = mock_key
+        existing_path = r"C:\Existing\Path;C:\New\Bin"
+        self.mock_winreg.QueryValueEx.return_value = (existing_path, self.mock_winreg.REG_SZ)
+        self.mock_winreg.QueryValueEx.side_effect = None
+        new_bin = r"C:\New\Bin"
+        dep_check._add_bin_to_user_path(new_bin)
+        self.mock_winreg.SetValueEx.assert_not_called()
+
+    @patch('core.dependency_check.platform.system', return_value='windows')
+    @patch('core.dependency_check._has_winget')
+    @patch('core.dependency_check._winget_install')
+    @patch('core.dependency_check._wait_for_executable')
+    @patch('core.dependency_check._ensure_tool_on_path')
+    @patch('core.dependency_check._maybe_add_windows_path')
+    def test_install_media_tools_winget_success(self, mock_mawp, mock_etop, mock_wait, mock_install, mock_has_winget, mock_platform):
+        mock_has_winget.return_value = True
+        mock_install.return_value = True
+        mock_wait.return_value = True # Executable found after install
+
+        dep_check.install_media_tools(vlc=True, ffmpeg=True, ytdlp=True)
+
+        # Verify winget calls
+        mock_install.assert_any_call("VideoLAN.VLC", scope="user")
+        mock_install.assert_any_call("Gyan.FFmpeg", scope="user")
+        mock_install.assert_any_call("yt-dlp.yt-dlp", scope="user")
+        
+        # Verify wait calls
+        mock_wait.assert_any_call("vlc")
+        mock_wait.assert_any_call("ffmpeg")
+        mock_wait.assert_any_call("yt-dlp")
+
+        # Verify path registration
+        mock_etop.assert_any_call("vlc")
+        mock_etop.assert_any_call("ffmpeg")
+        mock_etop.assert_any_call("yt-dlp")
+
+    @patch('core.dependency_check.platform.system', return_value='windows')
+    @patch('core.dependency_check._has_winget')
+    @patch('core.dependency_check._winget_install')
+    @patch('core.dependency_check._wait_for_executable')
+    @patch('core.dependency_check._install_vlc_fallback')
+    @patch('core.dependency_check._install_ffmpeg_fallback')
+    @patch('core.dependency_check._ensure_yt_dlp_cli')
+    @patch('core.dependency_check._ensure_tool_on_path')
+    @patch('core.dependency_check._maybe_add_windows_path')
+    def test_install_media_tools_fallback_on_fail(self, mock_mawp, mock_etop, mock_dlp_cli, mock_ff_fb, mock_vlc_fb, mock_wait, mock_install, mock_has_winget, mock_platform):
+        mock_has_winget.return_value = True
+        # Fail winget installs
+        mock_install.return_value = False
+        # Let fallback installs behave as checks - they return True if they ran (we mock them)
+        mock_wait.return_value = True
+
+        dep_check.install_media_tools(vlc=True, ffmpeg=True, ytdlp=True)
+
+        mock_vlc_fb.assert_called_once()
+        mock_ff_fb.assert_called_once()
+        mock_dlp_cli.assert_called_once()
+        
+        # Verify path registration still happens
+        mock_etop.assert_any_call("vlc")
+        mock_etop.assert_any_call("ffmpeg")
+        mock_etop.assert_any_call("yt-dlp")
+
+    @patch('core.dependency_check.platform.system', return_value='windows')
+    @patch('core.dependency_check._has_winget')
+    @patch('core.dependency_check._winget_install')
+    @patch('core.dependency_check._wait_for_executable')
+    @patch('core.dependency_check._install_vlc_fallback')
+    @patch('core.dependency_check._install_ffmpeg_fallback')
+    @patch('core.dependency_check._ensure_yt_dlp_cli')
+    def test_install_media_tools_winget_success_but_exe_missing(self, mock_dlp_cli, mock_ff_fb, mock_vlc_fb, mock_wait, mock_install, mock_has_winget, mock_platform):
+        mock_has_winget.return_value = True
+        mock_install.return_value = True
+        # Executable NOT found after winget install
+        mock_wait.return_value = False
+
+        # We need to control the wait side effect to return True after fallback called?
+        # The logic is: winget -> success -> wait(vlc) -> False -> fallback
+        # The wait is called AGAIN after fallback in the main flow.
+        # So we can set side_effect for wait: [False (winget fail), True (fallback success), False, True, False, True]
+        # vlc: wait->False, fallback called, wait->True
+        # ffmpeg: wait->False, fallback called, wait->True
+        # ytdlp: wait->False, fallback called, wait->True
+        mock_wait.side_effect = [False, True, False, True, False, True]
+
+        dep_check.install_media_tools(vlc=True, ffmpeg=True, ytdlp=True)
+
+        mock_vlc_fb.assert_called_once()
+        mock_ff_fb.assert_called_once()
+        mock_dlp_cli.assert_called_once()
+
+if __name__ == '__main__':
+    unittest.main()

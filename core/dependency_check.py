@@ -41,26 +41,40 @@ def _get_startup_info():
     return si
 
 def _run_quiet(cmd, timeout=900):
-    """Run command quietly; swallow errors."""
+    """Run command and log output to persistent log file."""
     _log(f"Running command: {' '.join(cmd)}")
     creationflags = 0
     if platform.system().lower() == "windows":
         creationflags = 0x08000000 # CREATE_NO_WINDOW
+    
+    out_file = tempfile.TemporaryFile(mode='w+')
     try:
         res = subprocess.run(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=out_file,
+            stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             timeout=timeout,
             creationflags=creationflags,
             startupinfo=_get_startup_info(),
             check=False,
+            text=True,
+            encoding='utf-8', 
+            errors='replace'
         )
+        out_file.seek(0)
+        output = out_file.read()
+        if output.strip():
+            _log(f"Output:\n{output}")
+            
+        if res.returncode != 0:
+            _log(f"Command failed with rc={res.returncode}")
         return res.returncode
     except Exception as e:
-        _log(f"Command failed: {e}")
+        _log(f"Command execution failed: {e}")
         return None
+    finally:
+        out_file.close()
 
 def _normalize_path_entry(path):
     if not path:
@@ -562,18 +576,25 @@ def _download_file(url, dest_path):
         _log(f"Download failed ({url}): {e}")
         return False
 
-def _install_vlc_ninite():
+def _install_vlc_fallback():
     if platform.system().lower() != "windows":
         return False
-    url = "https://ninite.com/vlc/ninite.exe"
+    # Use a specific version to ensure stability and a predictable URL. 
+    # VLC 3.0.21 is a recent stable release for 64-bit Windows.
+    url = "https://get.videolan.org/vlc/3.0.21/win64/vlc-3.0.21-win64.exe"
     temp_dir = tempfile.gettempdir()
-    exe_path = os.path.join(temp_dir, f"BlindRSS_Ninite_VLC_{os.getpid()}.exe")
+    exe_path = os.path.join(temp_dir, f"BlindRSS_VLC_Install_{os.getpid()}.exe")
+    _log(f"Downloading VLC from {url}...")
     if not _download_file(url, exe_path):
         return False
-    rc = _run_quiet([exe_path, "/silent"])
+    
+    # Run silently
+    # /S = Silent, /L=1033 = English
+    _log("Running VLC installer silently...")
+    rc = _run_quiet([exe_path, "/L=1033", "/S"])
     if rc == 0:
         return True
-    _log(f"Ninite VLC install failed with rc={rc}")
+    _log(f"VLC install failed with rc={rc}")
     return False
 
 def _install_ffmpeg_fallback():
@@ -677,6 +698,15 @@ def check_media_tools_status():
 
     return (not vlc_present, not ff_present, not ytdlp_present)
 
+def _wait_for_executable(tool_name, timeout=30):
+    """Polls for the executable to appear on the system."""
+    start = time.time()
+    while (time.time() - start) < timeout:
+        if _find_executable_path(tool_name):
+            return True
+        time.sleep(1)
+    return False
+
 def install_media_tools(vlc=True, ffmpeg=True, ytdlp=False):
     """Installs missing tools via winget (Windows only)."""
     if platform.system().lower() != "windows":
@@ -693,11 +723,18 @@ def install_media_tools(vlc=True, ffmpeg=True, ytdlp=False):
         if winget_ok:
             _log("Installing VLC via winget...")
             if not _winget_install_with_fallback("VideoLAN.VLC"):
-                _log("Winget VLC install failed; trying Ninite.")
-                _install_vlc_ninite()
+                _log("Winget VLC install failed; trying direct download.")
+                _install_vlc_fallback()
+            elif not _wait_for_executable("vlc"):
+                 _log("Winget reported success but VLC not found; trying direct download.")
+                 _install_vlc_fallback()
         else:
-            _log("Winget unavailable; trying Ninite for VLC.")
-            _install_vlc_ninite()
+            _log("Winget unavailable; trying direct download for VLC.")
+            _install_vlc_fallback()
+        
+        # Final check for VLC
+        if not _wait_for_executable("vlc"):
+            _log("VLC installation verification failed.")
 
     if ffmpeg:
         if winget_ok:
@@ -705,15 +742,35 @@ def install_media_tools(vlc=True, ffmpeg=True, ytdlp=False):
             if not _winget_install_with_fallback("Gyan.FFmpeg"):
                 _log("Winget FFmpeg install failed; trying fallback download.")
                 _install_ffmpeg_fallback()
+            elif not _wait_for_executable("ffmpeg"):
+                 _log("Winget reported success but FFmpeg not found; trying fallback download.")
+                 _install_ffmpeg_fallback()
         else:
             _log("Winget unavailable; trying FFmpeg fallback download.")
             _install_ffmpeg_fallback()
+            
+        # Final check for FFmpeg
+        if not _wait_for_executable("ffmpeg"):
+             _log("FFmpeg installation verification failed.")
 
     if ytdlp:
         if winget_ok:
             _log("Installing yt-dlp via winget...")
-            _winget_install_with_fallback("yt-dlp.yt-dlp")
-        _ensure_yt_dlp_cli()
+            if not _winget_install_with_fallback("yt-dlp.yt-dlp"):
+                 _log("Winget yt-dlp install failed; ensuring standalone binary.")
+                 _ensure_yt_dlp_cli()
+            elif not _wait_for_executable("yt-dlp"):
+                 _log("Winget reported success but yt-dlp not found; ensuring standalone binary.")
+                 _ensure_yt_dlp_cli()
+            else:
+                 _ensure_yt_dlp_cli() 
+        else:
+            _log("Winget unavailable; ensuring standalone yt-dlp binary.")
+            _ensure_yt_dlp_cli()
+            
+        # Final check for yt-dlp
+        if not _wait_for_executable("yt-dlp"):
+             _log("yt-dlp installation verification failed.")
 
     _maybe_add_windows_path()
 
@@ -811,16 +868,26 @@ def _add_bin_to_user_path(bin_dir):
             return
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
             try:
-                existing, _ = winreg.QueryValueEx(key, "PATH")
-            except:
+                existing, type_id = winreg.QueryValueEx(key, "PATH")
+            except Exception:
                 existing = ""
+                type_id = winreg.REG_EXPAND_SZ
+
             existing_parts = [p for p in str(existing).split(os.pathsep) if p]
             norm_existing = {_normalize_path_entry(p) for p in existing_parts}
             norm_bin = _normalize_path_entry(bin_dir)
+            
             if norm_bin in norm_existing:
                 return
-            new_path = os.pathsep.join([str(existing), bin_dir]) if existing else bin_dir
-            winreg.SetValueEx(key, "PATH", 0, winreg.REG_EXPAND_SZ, new_path)
+
+            # Append to end
+            new_path_str = os.pathsep.join(existing_parts + [str(bin_dir)])
+            
+            # Preserve type if it was REG_SZ, otherwise default to REG_EXPAND_SZ
+            if type_id not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+                type_id = winreg.REG_EXPAND_SZ
+
+            winreg.SetValueEx(key, "PATH", 0, type_id, new_path_str)
             _log(f"Added {bin_dir} to user PATH registry.")
             _broadcast_env_change()
     except Exception as e:
