@@ -252,6 +252,8 @@ def scan_audio_for_silence(
     vad_frame_ms: int = 30,
     merge_gap_ms: int = 200,
     headers: Optional[dict] = None,
+    threads: Optional[int] = None,
+    low_priority: bool = False,
 ) -> List[Tuple[int, int]]:
     """
     Use ffmpeg to decode an arbitrary URL/file to PCM and detect silent spans.
@@ -282,6 +284,13 @@ def scan_audio_for_silence(
         "-loglevel",
         "error",
     ]
+    if threads is not None:
+        try:
+            tcount = int(threads)
+        except Exception:
+            tcount = None
+        if tcount is not None and tcount > 0:
+            cmd.extend(["-threads", str(tcount)])
 
     # Only pass HTTP header options for HTTP(S) URLs; local files/formats reject them.
     source_str = str(source).strip()
@@ -320,11 +329,28 @@ def scan_audio_for_silence(
     import platform
     creationflags = 0
     startupinfo = None
+    preexec_fn = None
     if platform.system().lower() == "windows":
         creationflags = 0x08000000 # CREATE_NO_WINDOW
+        if low_priority:
+            creationflags |= 0x00004000 # BELOW_NORMAL_PRIORITY_CLASS
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0 # SW_HIDE
+    else:
+        if low_priority:
+            try:
+                import os
+
+                def _nice() -> None:
+                    try:
+                        os.nice(10)
+                    except Exception:
+                        pass
+
+                preexec_fn = _nice
+            except Exception:
+                preexec_fn = None
 
     proc = subprocess.Popen(
         cmd, 
@@ -332,7 +358,8 @@ def scan_audio_for_silence(
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
         creationflags=creationflags,
-        startupinfo=startupinfo
+        startupinfo=startupinfo,
+        preexec_fn=preexec_fn,
     )
     use_vad = (detection_mode == "vad")
     if use_vad and webrtcvad is None:
@@ -348,25 +375,42 @@ def scan_audio_for_silence(
             min_silence_ms=min_silence_ms,
             threshold_db=threshold_db,
         )
+    aborted = False
     try:
         assert proc.stdout is not None
-        pcm_stream: List[bytes] | List[bytes]  # type: ignore
-        pcm_stream = []
         stderr_data = b""
-        while True:
-            if abort_event is not None and getattr(abort_event, "is_set", lambda: False)():
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                return []
-            chunk = proc.stdout.read(4096)
-            if not chunk:
-                break
-            if use_vad:
-                pcm_stream.append(chunk)
-            else:
+
+        def _pcm_iter():
+            nonlocal aborted
+            while True:
+                if abort_event is not None and getattr(abort_event, "is_set", lambda: False)():
+                    aborted = True
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    return
+                chunk = proc.stdout.read(4096)
+                if not chunk:
+                    return
+                yield chunk
+
+        ranges: List[Tuple[int, int]]
+        if use_vad:
+            ranges = _detect_vad_ranges(
+                _pcm_iter(),
+                sample_rate=sample_rate,
+                frame_ms=vad_frame_ms,
+                min_silence_ms=min_silence_ms,
+                aggressiveness=vad_aggressiveness,
+                merge_gap_ms=merge_gap_ms,
+                threshold_db=threshold_db,
+            )
+        else:
+            for chunk in _pcm_iter():
                 detector.feed(chunk)
+            ranges = detector.finalize()
+
         # Drain stderr to avoid blocking on wait
         try:
             if proc.stderr:
@@ -389,6 +433,9 @@ def scan_audio_for_silence(
                 proc.stderr.close()
         except Exception:
             pass
+    if aborted:
+        return []
+
     if proc.returncode not in (0, None):
         details = ""
         try:
@@ -399,15 +446,4 @@ def scan_audio_for_silence(
             raise RuntimeError(f"ffmpeg exited with code {proc.returncode}: {details}")
         raise RuntimeError(f"ffmpeg exited with code {proc.returncode}")
 
-    if use_vad:
-        return _detect_vad_ranges(
-            pcm_stream,
-            sample_rate=sample_rate,
-            frame_ms=vad_frame_ms,
-            min_silence_ms=min_silence_ms,
-            aggressiveness=vad_aggressiveness,
-            merge_gap_ms=merge_gap_ms,
-            threshold_db=threshold_db,
-        )
-
-    return detector.finalize()
+    return ranges

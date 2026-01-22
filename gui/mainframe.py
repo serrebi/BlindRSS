@@ -253,6 +253,17 @@ class MainFrame(wx.Frame):
     def _ensure_player_window(self):
         pw = getattr(self, "player_window", None)
         if pw:
+            try:
+                if getattr(pw, "_shutdown_done", False) or not bool(getattr(pw, "initialized", True)):
+                    try:
+                        pw.Destroy()
+                    except Exception:
+                        pass
+                    self.player_window = None
+                    pw = None
+            except Exception:
+                pass
+        if pw:
             return pw
         try:
             pw = PlayerFrame(self, self.config_manager)
@@ -2867,12 +2878,15 @@ class MainFrame(wx.Frame):
                 if not pw:
                     return
 
-                # If the selected episode is already loaded in the player, toggle play/pause
-                # instead of restarting it.
+                # If the selected episode is already loaded in the player, pause/resume it
+                # (and reload if VLC is in a stopped/ended state) instead of always restarting.
                 try:
                     if pw.is_current_media(getattr(article, "id", None), media_url):
                         try:
-                            pw.toggle_play_pause()
+                            if pw.is_audio_playing():
+                                pw.pause()
+                            else:
+                                pw.resume_or_reload_current()
                         except Exception:
                             log.exception("Error toggling play/pause for current article")
                         return
@@ -3122,12 +3136,33 @@ class MainFrame(wx.Frame):
         dlg.Destroy()
         
     def _add_feed_thread(self, url, cat):
-        success = self.provider.add_feed(url, cat)
-        wx.CallAfter(self._post_add_feed, success)
+        success = False
+        refresh_ran = False
+        try:
+            success = self.provider.add_feed(url, cat)
+            if success:
+                try:
+                    # Update tree quickly so the new feed appears right away.
+                    wx.CallAfter(self.refresh_feeds)
+                except Exception:
+                    pass
+                try:
+                    # Force a refresh so the newly added feed has content immediately.
+                    refresh_ran = bool(self._run_refresh(block=True, force=True))
+                except Exception:
+                    log.exception("Failed to refresh feeds after add")
+                    refresh_ran = False
+        except Exception:
+            log.exception("Error adding feed")
+            success = False
+            refresh_ran = False
+        wx.CallAfter(self._post_add_feed, success, refresh_ran)
 
-    def _post_add_feed(self, success):
+    def _post_add_feed(self, success, refresh_ran: bool = False):
         self.SetTitle("BlindRSS")
-        self.refresh_feeds() # Refresh regardless of success to be safe/consistent
+        if not refresh_ran:
+            # Refresh regardless of success to be safe/consistent
+            self.refresh_feeds()
         if not success:
              wx.MessageBox("Failed to add feed.", "Error", wx.ICON_ERROR)
 

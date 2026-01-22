@@ -148,7 +148,7 @@ class CastDialog(wx.Dialog):
 
 class PlayerFrame(wx.Frame):
     def __init__(self, parent, config_manager):
-        super().__init__(parent, title="Audio Player", size=(500, 200), style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+        super().__init__(parent, title="Audio Player", size=(520, 260), style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
         self.config_manager = config_manager
         
         # Casting
@@ -180,30 +180,9 @@ class PlayerFrame(wx.Frame):
         file_cache_ms = max(500, cache_ms)
         self.instance = None
         self.player = None
+        self.event_manager = None
         self.initialized = False
-        
-        try:
-            self.instance = vlc.Instance(
-                '--no-video',
-                '--input-fast-seek',
-                '--aout=directsound',
-                f'--network-caching={cache_ms}',
-                f'--file-caching={file_cache_ms}',
-                '--http-reconnect'
-            )
-            self.player = self.instance.media_player_new()
-            self.event_manager = self.player.event_manager()
-            try:
-                self.event_manager.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._on_vlc_error)
-            except Exception:
-                pass
-            self.initialized = True
-        except Exception as e:
-            wx.CallAfter(wx.MessageBox, 
-                f"VLC could not be initialized: {e}\n\n"
-                "Please ensure VLC media player is installed (64-bit version recommended).",
-                "VLC Error", wx.OK | wx.ICON_ERROR)
-            self.initialized = False
+        self._init_vlc()
         
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_timer, self.timer)
@@ -332,6 +311,8 @@ class PlayerFrame(wx.Frame):
                 self.config_manager.set("seek_forward_ms", int(self.seek_forward_ms))
             except Exception:
                 pass
+        self._volume_slider_updating = False
+        self._current_use_ytdlp = False
 
         self.init_ui()
         self.Bind(wx.EVT_CLOSE, self.on_close)
@@ -348,6 +329,53 @@ class PlayerFrame(wx.Frame):
     # ---------------------------------------------------------------------
     # Window helpers
     # ---------------------------------------------------------------------
+
+    def _init_vlc(self) -> bool:
+        cache_ms = int(self.config_manager.get("vlc_network_caching_ms", 500))
+        if cache_ms < 0:
+            cache_ms = 0
+        file_cache_ms = max(500, cache_ms)
+        try:
+            self.instance = vlc.Instance(
+                "--no-video",
+                "--input-fast-seek",
+                "--aout=directsound",
+                f"--network-caching={cache_ms}",
+                f"--file-caching={file_cache_ms}",
+                "--http-reconnect",
+            )
+            self.player = self.instance.media_player_new()
+            self.event_manager = self.player.event_manager()
+            try:
+                self.event_manager.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._on_vlc_error)
+            except Exception:
+                pass
+            self.initialized = True
+            return True
+        except Exception as e:
+            try:
+                self.instance = None
+                self.player = None
+                self.event_manager = None
+            except Exception:
+                pass
+            self.initialized = False
+            wx.CallAfter(
+                wx.MessageBox,
+                f"VLC could not be initialized: {e}\n\n"
+                "Please ensure VLC media player is installed (64-bit version recommended).",
+                "VLC Error",
+                wx.OK | wx.ICON_ERROR,
+            )
+            return False
+
+    def _ensure_vlc_ready(self) -> bool:
+        try:
+            if self.initialized and self.player is not None and self.instance is not None:
+                return True
+        except Exception:
+            pass
+        return self._init_vlc()
 
     def _current_position_ms(self) -> int:
         """
@@ -1097,7 +1125,17 @@ class PlayerFrame(wx.Frame):
             media.add_option(':http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
         except Exception:
             pass
-        self.player.set_media(media)
+        try:
+            self.player.set_media(media)
+        except OSError:
+            log.exception("VLC set_media failed; reinitializing player")
+            if not self._init_vlc():
+                return
+            try:
+                self.player.set_media(media)
+            except Exception:
+                log.exception("VLC set_media failed after reinit")
+                return
         def _do_play():
             try:
                 if int(getattr(self, '_active_load_seq', 0)) != int(load_seq):
@@ -1116,10 +1154,7 @@ class PlayerFrame(wx.Frame):
             except Exception:
                 pass
             self.is_playing = True
-            try:
-                self.play_btn.SetLabel('Pause')
-            except Exception:
-                pass
+            self._set_play_button_label(True)
 
         try:
             wx.CallLater(50, _do_play)
@@ -1216,6 +1251,19 @@ class PlayerFrame(wx.Frame):
         btn_sizer.Add(self.cast_btn, 0, wx.ALL, 5)
         
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER)
+
+        # Volume
+        volume_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        volume_lbl = wx.StaticText(panel, label="Volume")
+        volume_sizer.Add(volume_lbl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        self.volume_slider = wx.Slider(panel, value=int(getattr(self, "volume", 100)), minValue=0, maxValue=100, style=wx.SL_HORIZONTAL)
+        self.volume_slider.SetName("Volume")
+        self.volume_slider.Bind(wx.EVT_SCROLL_THUMBTRACK, self.on_volume_slider)
+        self.volume_slider.Bind(wx.EVT_SCROLL_CHANGED, self.on_volume_slider)
+        volume_sizer.Add(self.volume_slider, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        self.volume_value_lbl = wx.StaticText(panel, label=f"{int(getattr(self, 'volume', 100))}%")
+        volume_sizer.Add(self.volume_value_lbl, 0, wx.ALIGN_CENTER_VERTICAL)
+        sizer.Add(volume_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
         
         # Chapters
         self.chapter_choice = wx.ComboBox(panel, style=wx.CB_READONLY)
@@ -1482,6 +1530,14 @@ class PlayerFrame(wx.Frame):
 
         def _worker() -> None:
             try:
+                try:
+                    base_rate = int(self.config_manager.get("silence_scan_sample_rate", 16000) or 16000)
+                except Exception:
+                    base_rate = 16000
+                try:
+                    remote_rate = int(self.config_manager.get("silence_scan_remote_sample_rate", 8000) or 8000)
+                except Exception:
+                    remote_rate = 8000
                 window_ms = int(self.config_manager.get("silence_skip_window_ms", 30) or 30)
                 min_ms = int(self.config_manager.get("silence_skip_min_ms", 600) or 600)
                 threshold_db = float(self.config_manager.get("silence_skip_threshold_db", -42.0) or -42.0)
@@ -1503,8 +1559,18 @@ class PlayerFrame(wx.Frame):
                         min_ms = 900
                     if int(merge_gap) > 180:
                         merge_gap = 180
+                sample_rate = int(remote_rate) if is_remote else int(base_rate)
+                try:
+                    threads = int(self.config_manager.get("silence_scan_threads", 1 if is_remote else 2))
+                except Exception:
+                    threads = 1 if is_remote else 2
+                try:
+                    low_priority = bool(self.config_manager.get("silence_scan_low_priority", True))
+                except Exception:
+                    low_priority = True
                 ranges = scan_audio_for_silence(
                     url,
+                    sample_rate=sample_rate,
                     window_ms=window_ms,
                     min_silence_ms=min_ms,
                     threshold_db=threshold_db,
@@ -1514,6 +1580,8 @@ class PlayerFrame(wx.Frame):
                     merge_gap_ms=merge_gap,
                     abort_event=abort_evt,
                     headers=headers,
+                    threads=threads,
+                    low_priority=low_priority,
                 )
                 if abort_evt.is_set():
                     return
@@ -1950,13 +2018,18 @@ class PlayerFrame(wx.Frame):
             return url
 
     def load_media(self, url, use_ytdlp=False, chapters=None, title=None, article_id=None):
-        if not self.initialized and not self.is_casting:
-            wx.MessageBox("VLC is not initialized. Playback is unavailable.", "Error", wx.OK | wx.ICON_ERROR)
-            return
+        if not self.is_casting:
+            if not self._ensure_vlc_ready():
+                wx.MessageBox("VLC is not initialized. Playback is unavailable.", "Error", wx.OK | wx.ICON_ERROR)
+                return
         _log(f"load_media: {url} (ytdlp={use_ytdlp})")
         log.debug("load_media url=%s is_casting=%s", url, self.is_casting)
         if not url:
             return
+        try:
+            self._current_use_ytdlp = bool(use_ytdlp)
+        except Exception:
+            self._current_use_ytdlp = False
 
         try:
             if article_id is not None:
@@ -2286,7 +2359,7 @@ class PlayerFrame(wx.Frame):
             self.update_chapters(chapters)
 
     def toggle_play_pause(self) -> None:
-        if self.is_playing:
+        if self.is_audio_playing():
             self.pause()
         else:
             self.play()
@@ -2348,6 +2421,21 @@ class PlayerFrame(wx.Frame):
             playing_now = bool(self.player.is_playing())
         except Exception:
             playing_now = False
+        try:
+            state = None
+            try:
+                state = self.player.get_state()
+            except Exception:
+                state = None
+            if state in (vlc.State.Ended, vlc.State.Stopped, vlc.State.Error):
+                if bool(getattr(self, "is_playing", False)):
+                    self.is_playing = False
+                    self._set_play_button_label(False)
+            elif playing_now and not bool(getattr(self, "is_playing", False)):
+                self.is_playing = True
+                self._set_play_button_label(True)
+        except Exception:
+            pass
 
         now_mono = time.monotonic()
         try:
@@ -2827,6 +2915,19 @@ class PlayerFrame(wx.Frame):
         step = int(getattr(self, 'seek_forward_ms', 10000) or 10000)
         self.seek_relative_ms(int(step))
 
+    def on_volume_slider(self, event):
+        try:
+            if getattr(self, "_volume_slider_updating", False):
+                event.Skip()
+                return
+        except Exception:
+            pass
+        try:
+            val = int(self.volume_slider.GetValue())
+        except Exception:
+            return
+        self.set_volume_percent(val, persist=True)
+
     def on_speed_select(self, event):
         idx = self.speed_combo.GetSelection()
         if idx != wx.NOT_FOUND:
@@ -2936,6 +3037,32 @@ class PlayerFrame(wx.Frame):
     def has_media_loaded(self) -> bool:
         return bool(getattr(self, "current_url", None))
 
+    def _set_play_button_label(self, playing: bool) -> None:
+        try:
+            if getattr(self, "play_btn", None):
+                self.play_btn.SetLabel("Pause" if playing else "Play")
+        except Exception:
+            pass
+
+    def _update_volume_ui(self, percent: int) -> None:
+        try:
+            self._volume_slider_updating = True
+        except Exception:
+            pass
+        try:
+            if getattr(self, "volume_slider", None):
+                if int(self.volume_slider.GetValue()) != int(percent):
+                    self.volume_slider.SetValue(int(percent))
+            if getattr(self, "volume_value_lbl", None):
+                self.volume_value_lbl.SetLabel(f"{int(percent)}%")
+        except Exception:
+            pass
+        finally:
+            try:
+                self._volume_slider_updating = False
+            except Exception:
+                pass
+
     def is_current_media(self, article_id: object | None, media_url: str | None) -> bool:
         """Returns True if the given article_id/media_url matches what's currently loaded."""
         try:
@@ -2954,6 +3081,53 @@ class PlayerFrame(wx.Frame):
             return False
 
         return False
+
+    def reload_current_media(self) -> bool:
+        if not self.has_media_loaded():
+            return False
+        url = getattr(self, "current_url", None)
+        if not url:
+            return False
+        try:
+            use_ytdlp = bool(getattr(self, "_current_use_ytdlp", False))
+        except Exception:
+            use_ytdlp = False
+        chapters = getattr(self, "_last_load_chapters", None)
+        title = getattr(self, "_last_load_title", None) or getattr(self, "current_title", None)
+        article_id = getattr(self, "current_article_id", None)
+        try:
+            self.load_media(url, use_ytdlp=use_ytdlp, chapters=chapters, title=title, article_id=article_id)
+            return True
+        except Exception:
+            log.exception("Failed to reload current media")
+            return False
+
+    def resume_or_reload_current(self) -> None:
+        if not self.has_media_loaded():
+            return
+        if self.is_casting:
+            try:
+                self.casting_manager.resume()
+                self.is_playing = True
+                self._set_play_button_label(True)
+            except Exception:
+                pass
+            return
+        state = None
+        try:
+            state = self.player.get_state()
+        except Exception:
+            state = None
+        should_reload = False
+        try:
+            if state in (vlc.State.Ended, vlc.State.Stopped, vlc.State.Error):
+                should_reload = True
+        except Exception:
+            should_reload = False
+        if should_reload:
+            if self.reload_current_media():
+                return
+        self.play()
 
     def is_audio_playing(self) -> bool:
         """Return True only when audio is actively playing."""
@@ -3005,6 +3179,10 @@ class PlayerFrame(wx.Frame):
                 self.config_manager.set("volume", percent)
             except Exception:
                 pass
+        try:
+            self._update_volume_ui(int(percent))
+        except Exception:
+            pass
 
     def adjust_volume(self, delta_percent: int) -> None:
         cur = int(getattr(self, "volume", 100))
@@ -3577,12 +3755,15 @@ class PlayerFrame(wx.Frame):
         log.debug("play called")
         if not self.has_media_loaded():
             return
+        if not self.is_casting and not self._ensure_vlc_ready():
+            return
         if self.is_casting:
             try:
                 self.casting_manager.resume()
             except Exception:
                 pass
             self.is_playing = True
+            self._set_play_button_label(True)
         else:
             try:
                 try:
@@ -3601,6 +3782,11 @@ class PlayerFrame(wx.Frame):
                     pass
                 self.player.play()
                 self.is_playing = True
+                try:
+                    self.player.audio_set_volume(int(getattr(self, "volume", 100)))
+                except Exception:
+                    pass
+                self._set_play_button_label(True)
                 if not self.timer.IsRunning():
                     interval = 500
                     try:
@@ -3616,6 +3802,8 @@ class PlayerFrame(wx.Frame):
         log.debug("pause called")
         if not self.has_media_loaded():
             return
+        if not self.is_casting and not self._ensure_vlc_ready():
+            return
         try:
             self._persist_playback_position(force=True)
         except Exception:
@@ -3624,6 +3812,7 @@ class PlayerFrame(wx.Frame):
             try:
                 self.casting_manager.pause()
                 self.is_playing = False
+                self._set_play_button_label(False)
             except Exception:
                 pass
         else:
@@ -3632,12 +3821,20 @@ class PlayerFrame(wx.Frame):
                     self.player.set_pause(1)
                 except Exception:
                     # Fallback to toggle pause
-                    self.player.pause()
+                    try:
+                        self.player.pause()
+                    except OSError:
+                        log.warning("VLC pause failed; reinitializing player")
+                        self._init_vlc()
+                        return
                 self.is_playing = False
+                self._set_play_button_label(False)
             except Exception:
                 log.exception("Failed to pause player")
 
     def stop(self) -> None:
+        if not self.is_casting and not self._ensure_vlc_ready():
+            return
         try:
             self._persist_playback_position(force=True)
         except Exception:
@@ -3665,6 +3862,7 @@ class PlayerFrame(wx.Frame):
 
         self._cancel_silence_scan()
         self.is_playing = False
+        self._set_play_button_label(False)
 
         try:
             self.slider.SetValue(0)
@@ -3767,12 +3965,25 @@ class PlayerFrame(wx.Frame):
                 self.player.release()
             except Exception:
                 log.exception("Error releasing VLC player during shutdown")
+            try:
+                self.player = None
+            except Exception:
+                pass
 
         if getattr(self, "instance", None) is not None:
             try:
                 self.instance.release()
             except Exception:
                 log.exception("Error releasing VLC instance during shutdown")
+            try:
+                self.instance = None
+            except Exception:
+                pass
+        try:
+            self.event_manager = None
+            self.initialized = False
+        except Exception:
+            pass
 
         try:
             if getattr(self, "casting_manager", None) is not None:
