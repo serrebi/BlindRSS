@@ -633,18 +633,6 @@ class MainFrame(wx.Frame):
                 self.on_delete_article()
                 return
 
-        if key == ord('M') or key == ord('m'):
-            focus = self._get_focused_window()
-            if focus == self.list_ctrl:
-                idx = self.list_ctrl.GetFirstSelected()
-                if idx != wx.NOT_FOUND and 0 <= idx < len(self.current_articles):
-                    article = self.current_articles[idx]
-                    if article.is_read:
-                        self.mark_article_unread(idx)
-                    else:
-                        self.mark_article_read(idx)
-                return
-
         if event.ControlDown() and not event.ShiftDown() and not event.AltDown() and not event.MetaDown():
             pw = getattr(self, "player_window", None)
             playing = False
@@ -962,7 +950,7 @@ class MainFrame(wx.Frame):
         open_item = menu.Append(wx.ID_ANY, "Open Article")
         open_browser_item = menu.Append(wx.ID_ANY, "Open in Browser")
         menu.AppendSeparator()
-        mark_read_item = menu.Append(wx.ID_ANY, "Mark as Read\tM")
+        mark_read_item = menu.Append(wx.ID_ANY, "Mark as Read")
         mark_unread_item = menu.Append(wx.ID_ANY, "Mark as Unread")
         menu.AppendSeparator()
         copy_item = menu.Append(wx.ID_ANY, "Copy Link")
