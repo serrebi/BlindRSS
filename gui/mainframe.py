@@ -616,7 +616,7 @@ class MainFrame(wx.Frame):
         except Exception:
             key = None
 
-        if key == wx.WXK_SPACE:
+        if key == wx.WXK_SPACE and not event.AltDown():
             focus = self._get_focused_window()
             if focus == self.list_ctrl:
                 idx = self.list_ctrl.GetFirstSelected()
