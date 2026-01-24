@@ -251,10 +251,6 @@ class SettingsDialog(wx.Dialog):
         self.min_tray_chk.SetValue(config.get("minimize_to_tray", True))        
         general_sizer.Add(self.min_tray_chk, 0, wx.ALL, 5)
 
-        self.hide_read_chk = wx.CheckBox(general_panel, label="Hide read articles from list")
-        self.hide_read_chk.SetValue(bool(config.get("hide_read_articles", False)))
-        general_sizer.Add(self.hide_read_chk, 0, wx.ALL, 5)
-
         self.start_maximized_chk = wx.CheckBox(general_panel, label="Always start maximized")
         self.start_maximized_chk.SetValue(bool(config.get("start_maximized", False)))
         general_sizer.Add(self.start_maximized_chk, 0, wx.ALL, 5)
@@ -652,7 +648,6 @@ class SettingsDialog(wx.Dialog):
             "article_retention": self.art_retention_ctrl.GetValue(),
             "close_to_tray": self.close_tray_chk.GetValue(),
             "minimize_to_tray": self.min_tray_chk.GetValue(),
-            "hide_read_articles": self.hide_read_chk.GetValue(),
             "start_maximized": self.start_maximized_chk.GetValue(),
             "debug_mode": self.debug_mode_chk.GetValue(),
             "refresh_on_startup": self.refresh_startup_chk.GetValue(),

@@ -75,8 +75,6 @@ class MainFrame(wx.Frame):
         self._refresh_progress_pending = {}
         self._refresh_progress_flush_scheduled = False
 
-        self.hide_read = bool(self.config_manager.get("hide_read_articles", False))
-
         self.init_ui()
         self.init_menus()
         self.init_shortcuts()
@@ -238,16 +236,6 @@ class MainFrame(wx.Frame):
 
         # Store article objects for the list
         self.current_articles = []
-
-    def _apply_hide_read_filter(self, feed_id):
-        if not self.hide_read:
-            return feed_id
-        if not feed_id:
-            return feed_id
-        # Don't prefix if already prefixed with state
-        if feed_id.startswith("unread:") or feed_id.startswith("read:") or feed_id.startswith("favorites:") or feed_id.startswith("fav:"):
-            return feed_id
-        return f"unread:{feed_id}"
 
     def _focus_default_control(self):
         """Ensure keyboard focus lands on the tree after the frame is visible."""
@@ -1770,8 +1758,6 @@ class MainFrame(wx.Frame):
         if not feed_id:
             return
 
-        feed_id = self._apply_hide_read_filter(feed_id)
-
         have_articles = bool(getattr(self, "current_articles", None))
         same_view = (feed_id == getattr(self, "current_feed_id", None))
 
@@ -1793,8 +1779,6 @@ class MainFrame(wx.Frame):
         feed_id = self._get_feed_id_from_tree_item(item)
         if not feed_id:
             return
-        
-        feed_id = self._apply_hide_read_filter(feed_id)
         
         # If the feed hasn't changed (e.g. during a tree refresh where items are recreated),
         # don't reset the view. The update logic (_reload_selected_articles) handles merging new items.
@@ -3388,12 +3372,6 @@ class MainFrame(wx.Frame):
                     self.config_manager.set(k, v)
             except Exception:
                 pass
-
-            # Update runtime hide_read state
-            new_hide_read = bool(data.get("hide_read_articles", False))
-            if self.hide_read != new_hide_read:
-                self.hide_read = new_hide_read
-                self._reload_selected_articles()
 
             # Apply playback speed immediately if the player exists
             if "playback_speed" in data:
