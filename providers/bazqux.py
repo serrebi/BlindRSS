@@ -182,10 +182,13 @@ class BazQuxProvider(RSSProvider):
                 chapters = chapters_map.get(article_id, [])
                 
                 is_fav = False
+                is_read_flag = False
                 for cat in item.get("categories", []):
-                    if "starred" in cat:
-                        is_fav = True
-                        break
+                    if "com.google" in cat:
+                        if cat.endswith("/starred"):
+                            is_fav = True
+                        if cat.endswith("/read"):
+                            is_read_flag = True
 
                 articles.append(Article(
                     id=article_id,
@@ -195,19 +198,12 @@ class BazQuxProvider(RSSProvider):
                     content=content,
                     date=date,
                     author=item.get("author", "Unknown"),
-                    is_read=False, 
+                    is_read=is_read_flag, 
                     is_favorite=is_fav,
                     media_url=media_url,
                     media_type=media_type,
                     chapters=chapters
                 ))
-                
-                is_read_flag = False
-                for cat in item.get("categories", []):
-                    if "read" in cat and "com.google" in cat:
-                        is_read_flag = True
-                        break
-                articles[-1].is_read = is_read_flag
 
             return articles
         except Exception as e:
