@@ -129,13 +129,21 @@ class BazQuxProvider(RSSProvider):
                 params["c"] = continuation
             
             # Handle status prefixes
+            filter_unread = False
+            filter_favorites = False
+            filter_read = False
+            
             if feed_id.startswith("unread:"):
+                filter_unread = True
                 real_feed_id = feed_id[7:]
                 params["xt"] = "user/-/state/com.google/read"
             elif feed_id.startswith("read:"):
+                filter_read = True
                 real_feed_id = feed_id[5:]
-                params["it"] = "user/-/state/com.google/read"
+                # We can use 'it' param, OR just query the read stream directly if it's 'all'
+                # params["it"] = "user/-/state/com.google/read" 
             elif feed_id.startswith("favorites:") or feed_id.startswith("starred:"):
+                filter_favorites = True
                 real_feed_id = "user/-/state/com.google/starred"
                 if ":" in feed_id:
                      suffix = feed_id.split(":", 1)[1]
@@ -143,10 +151,15 @@ class BazQuxProvider(RSSProvider):
 
             # Handle special IDs
             if real_feed_id == "all":
-                real_feed_id = "user/-/state/com.google/reading-list"
+                if filter_read:
+                    real_feed_id = "user/-/state/com.google/read"
+                else:
+                    real_feed_id = "user/-/state/com.google/reading-list"
             elif real_feed_id.startswith("category:"):
                 cat_name = real_feed_id.split(":", 1)[1]
                 real_feed_id = f"user/-/label/{cat_name}"
+                if filter_read:
+                    params["it"] = "user/-/state/com.google/read"
 
             url = f"{self.base_url}/stream/contents/{real_feed_id}"
             resp = self.session.get(url, headers=self._headers(), params=params)
@@ -189,6 +202,14 @@ class BazQuxProvider(RSSProvider):
                             is_fav = True
                         if cat.endswith("/read"):
                             is_read_flag = True
+
+                # Client-side safety filter
+                if filter_unread and is_read_flag:
+                    continue
+                if filter_read and not is_read_flag:
+                    continue
+                if filter_favorites and not is_fav:
+                    continue
 
                 articles.append(Article(
                     id=article_id,
