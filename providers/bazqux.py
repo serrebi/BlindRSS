@@ -15,6 +15,9 @@ class BazQuxProvider(RSSProvider):
         self.password = self.conf.get("password", "")
         self.token = None
         self.base_url = "https://www.bazqux.com/reader/api/0"
+        self.session = requests.Session()
+        self.session.headers.update(utils.HEADERS)
+        self._categories_cache = set()
 
     def get_name(self) -> str:
         return "BazQux"
@@ -22,13 +25,25 @@ class BazQuxProvider(RSSProvider):
     def _login(self):
         if self.token: return True
         try:
-            resp = requests.post("https://www.bazqux.com/accounts/ClientLogin", data={
+            # Login usually requires a clean session or specific headers, 
+            # but reusing session is fine as long as we handle Auth header manually later.
+            resp = self.session.post("https://www.bazqux.com/accounts/ClientLogin", data={
                 "Email": self.email,
                 "Passwd": self.password,
                 "service": "reader",
                 "output": "json"
-            }, headers=utils.HEADERS)
+            })
             resp.raise_for_status()
+            
+            # Try parsing as JSON first
+            try:
+                data = resp.json()
+                if "Auth" in data:
+                    self.token = data["Auth"]
+                    return True
+            except ValueError:
+                pass # Not JSON, try line-based
+            
             for line in resp.text.splitlines():
                 if line.startswith("Auth="):
                     self.token = line.split("=", 1)[1]
@@ -39,45 +54,81 @@ class BazQuxProvider(RSSProvider):
             return False
 
     def _headers(self):
-        h = utils.HEADERS.copy()
+        # We return a dict of headers to overlay on the session.
+        # utils.HEADERS is already in session, but we need Authorization.
+        h = {}
         if self.token:
             h["Authorization"] = f"GoogleLogin auth={self.token}"
         return h
 
-    def refresh(self, progress_cb=None) -> bool:
+    def refresh(self, progress_cb=None, force: bool = False) -> bool:
+        if not self.email or not self.password:
+            log.warning("BazQux credentials missing.")
+            return False
         return self._login()
 
     def get_feeds(self) -> List[Feed]:
         if not self._login(): return []
         try:
-            resp = requests.get(f"{self.base_url}/subscription/list", headers=self._headers(), params={"output": "json"})
+            # Fetch subscriptions
+            resp = self.session.get(f"{self.base_url}/subscription/list", headers=self._headers(), params={"output": "json"})
             resp.raise_for_status()
             data = resp.json()
             
+            # Fetch unread counts (quick follow-up on same connection)
+            unread_map = {}
+            try:
+                # API: /unread-count?output=json
+                uc_resp = self.session.get(f"{self.base_url}/unread-count", headers=self._headers(), params={"output": "json"})
+                if uc_resp.ok:
+                    uc_data = uc_resp.json()
+                    # format: {"unreadcounts": [{"id": "feed/...", "count": 123, "newestItemTimestampUsec": ...}, ...]}
+                    for entry in uc_data.get("unreadcounts", []):
+                        fid = entry.get("id", "")
+                        if fid.startswith("feed/"):
+                            # our Feed IDs preserve the "feed/" prefix in this provider?
+                            # In get_feeds below: id=sub["id"] which is "feed/..."
+                            # So we key by the full ID.
+                            unread_map[fid] = entry.get("count", 0)
+            except Exception as e:
+                log.warning(f"BazQux Unread Count Error: {e}")
+
             feeds = []
+            self._categories_cache = set()
+
             for sub in data.get("subscriptions", []):
                 cat = "Uncategorized"
                 if sub.get("categories"):
                     cat = sub["categories"][0]["label"]
+                    self._categories_cache.add(cat)
                 
-                feeds.append(Feed(
-                    id=sub["id"],
+                # 'id' is typically "feed/http://..."
+                feed_url = sub.get("url", sub["id"].replace("feed/", "", 1))
+                feed_id = sub["id"]
+
+                f = Feed(
+                    id=feed_id,
                     title=sub["title"],
-                    url=sub["url"],
+                    url=feed_url,
                     category=cat,
                     icon_url=""
-                ))
+                )
+                f.unread_count = unread_map.get(feed_id, 0)
+                feeds.append(f)
             return feeds
         except Exception as e:
             log.error(f"BazQux Feeds Error: {e}")
             return []
 
-    def get_articles(self, feed_id: str) -> List[Article]:
+    def _fetch_articles(self, feed_id: str, count: int = 50, continuation: str = None) -> List[Article]:
         if not self._login(): return []
         try:
             real_feed_id = feed_id
-            params = {"output": "json", "n": 50}
+            params = {"output": "json", "n": count}
+            if continuation:
+                params["c"] = continuation
             
+            # Handle status prefixes
             if feed_id.startswith("unread:"):
                 real_feed_id = feed_id[7:]
                 params["xt"] = "user/-/state/com.google/read"
@@ -86,18 +137,19 @@ class BazQuxProvider(RSSProvider):
                 params["it"] = "user/-/state/com.google/read"
             elif feed_id.startswith("favorites:") or feed_id.startswith("starred:"):
                 real_feed_id = "user/-/state/com.google/starred"
-                # If we want to support favorites WITHIN a feed, we'd need intersection (unsupported easily in simple API?)
-                # Usually favorites view is global.
-                # If suffix is not 'all', we might want to filter?
-                # Google Reader API supports stream ids.
                 if ":" in feed_id:
                      suffix = feed_id.split(":", 1)[1]
-                     if suffix != "all":
-                         # If we really wanted to, we could try intersection, but let's stick to global starred for now
-                         pass
+                     pass
+
+            # Handle special IDs
+            if real_feed_id == "all":
+                real_feed_id = "user/-/state/com.google/reading-list"
+            elif real_feed_id.startswith("category:"):
+                cat_name = real_feed_id.split(":", 1)[1]
+                real_feed_id = f"user/-/label/{cat_name}"
 
             url = f"{self.base_url}/stream/contents/{real_feed_id}"
-            resp = requests.get(url, headers=self._headers(), params=params)
+            resp = self.session.get(url, headers=self._headers(), params=params)
             resp.raise_for_status()
             data = resp.json()
             
@@ -143,19 +195,13 @@ class BazQuxProvider(RSSProvider):
                     content=content,
                     date=date,
                     author=item.get("author", "Unknown"),
-                    is_read=False, # We usually rely on 'read' tag presence? 
-                    # Wait, existing code hardcoded is_read=False!
-                    # We should fix that too while we are here.
-                    # Usually 'read' tag presence indicates read.
-                    # params xt=read excludes read items, so they are unread.
-                    # params it=read includes read items.
-                    # Let's check for "user/-/state/com.google/read" in categories.
+                    is_read=False, 
                     is_favorite=is_fav,
                     media_url=media_url,
                     media_type=media_type,
                     chapters=chapters
                 ))
-                # Fix is_read logic in same loop
+                
                 is_read_flag = False
                 for cat in item.get("categories", []):
                     if "read" in cat and "com.google" in cat:
@@ -168,13 +214,25 @@ class BazQuxProvider(RSSProvider):
             log.error(f"BazQux Articles Error: {e}")
             return []
 
+    def get_articles(self, feed_id: str) -> List[Article]:
+        return self._fetch_articles(feed_id, count=50)
+
+    def get_articles_page(self, feed_id: str, offset: int = 0, limit: int = 200) -> tuple[List[Article], int | None]:
+        count = offset + limit
+        articles = self._fetch_articles(feed_id, count=count)
+        total = None
+        if len(articles) < count:
+            total = len(articles)
+        sliced_articles = articles[offset:offset + limit]
+        return sliced_articles, total
+
     def get_article_chapters(self, article_id: str) -> List[Dict]:
         return utils.get_chapters_from_db(article_id)
 
     def mark_read(self, article_id: str) -> bool:
         if not self._login(): return False
         try:
-            requests.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
+            self.session.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
                 "i": article_id,
                 "a": "user/-/state/com.google/read"
             })
@@ -186,7 +244,7 @@ class BazQuxProvider(RSSProvider):
     def mark_unread(self, article_id: str) -> bool:
         if not self._login(): return False
         try:
-            requests.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
+            self.session.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
                 "i": article_id,
                 "r": "user/-/state/com.google/read"
             })
@@ -202,7 +260,7 @@ class BazQuxProvider(RSSProvider):
         if not self._login(): return False
         try:
             action = "a" if is_favorite else "r"
-            requests.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
+            self.session.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
                 "i": article_id,
                 action: "user/-/state/com.google/starred"
             })
@@ -212,24 +270,8 @@ class BazQuxProvider(RSSProvider):
             return False
 
     def toggle_favorite(self, article_id: str):
-        # We can't easily toggle atomically without knowing state, but UI typically calls this 
-        # when it thinks it knows the state.
-        # Ideally we should check state or return None to force UI to re-read.
-        # But for now, let's assume we can't toggle blindly without a check.
-        # Actually, MainFrame usually calls toggle and expects boolean new state.
-        # If we return None, it might do nothing.
-        # Let's just return None and let UI handle it? No, UI expects bool.
-        # We can fetch the item tags?
-        # Simpler: just don't implement toggle if we can't do it cheap, or fetch it.
-        # Base class default returns None.
-        # Let's implement it by fetching item?
-        # Or better: The UI calling this usually knows the current state and *could* call set_favorite.
-        # But MainFrame calls toggle_favorite.
-        # Let's implement it by checking.
-        # BUT Google Reader API doesn't have a cheap single-item fetch that gives tags easily without stream?
-        # /stream/items/ids?i=...
         try:
-            resp = requests.get(f"{self.base_url}/stream/items/ids", headers=self._headers(), params={"i": article_id, "output": "json"})
+            resp = self.session.get(f"{self.base_url}/stream/items/ids", headers=self._headers(), params={"i": article_id, "output": "json"})
             if resp.ok:
                 items = resp.json().get("items", [])
                 if items:
@@ -254,7 +296,7 @@ class BazQuxProvider(RSSProvider):
             if category:
                 data["t"] = category
             
-            resp = requests.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data=data)
+            resp = self.session.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data=data)
             resp.raise_for_status()
             return True
         except Exception as e:
@@ -264,7 +306,7 @@ class BazQuxProvider(RSSProvider):
     def remove_feed(self, feed_id: str) -> bool:
         if not self._login(): return False
         try:
-            requests.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data={
+            self.session.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data={
                 "s": feed_id,
                 "ac": "unsubscribe"
             })
@@ -302,16 +344,19 @@ class BazQuxProvider(RSSProvider):
                     data["a"] = f"user/-/label/{category}"
 
         try:
-            resp = requests.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data=data)
+            resp = self.session.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data=data)
             return resp.ok
         except Exception as e:
             log.error(f"BazQux Update Feed Error: {e}")
             return False
 
     def get_categories(self) -> List[str]:
+        if self._categories_cache:
+            return sorted(list(self._categories_cache))
+            
         if not self._login(): return []
         try:
-            resp = requests.get(f"{self.base_url}/tag/list", headers=self._headers(), params={"output": "json"})
+            resp = self.session.get(f"{self.base_url}/tag/list", headers=self._headers(), params={"output": "json"})
             resp.raise_for_status()
             data = resp.json()
             cats = []
@@ -321,14 +366,13 @@ class BazQuxProvider(RSSProvider):
                 if tag_id.startswith("user/") and "/label/" in tag_id:
                     label = tag_id.split("/label/", 1)[1]
                     cats.append(label)
+                    self._categories_cache.add(label)
             return sorted(cats)
         except Exception as e:
             log.error(f"BazQux Get Categories Error: {e}")
             return []
 
     def add_category(self, title: str) -> bool:
-        # Google Reader API doesn't support empty categories.
-        # They are created when a feed is assigned to them.
         return True
 
     def rename_category(self, old_title: str, new_title: str) -> bool:
@@ -336,12 +380,10 @@ class BazQuxProvider(RSSProvider):
         try:
             # Try /rename-tag endpoint
             user_id = "-" # usually works as wildcard for current user
-            # Find user ID prefix? usually user/0/label/... or user/-/label/...
-            # Let's try standard 'user/-/label/'
             source = f"user/-/label/{old_title}"
             dest = f"user/-/label/{new_title}"
             
-            resp = requests.post(f"{self.base_url}/rename-tag", headers=self._headers(), data={
+            resp = self.session.post(f"{self.base_url}/rename-tag", headers=self._headers(), data={
                 "s": source,
                 "dest": dest
             })
@@ -354,7 +396,7 @@ class BazQuxProvider(RSSProvider):
         if not self._login(): return False
         try:
             tag = f"user/-/label/{title}"
-            requests.post(f"{self.base_url}/disable-tag", headers=self._headers(), data={
+            self.session.post(f"{self.base_url}/disable-tag", headers=self._headers(), data={
                 "s": tag
             })
             return True
