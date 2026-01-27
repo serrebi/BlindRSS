@@ -1,7 +1,6 @@
 import wx
 import vlc
 import threading
-import socket
 import time
 import sqlite3
 import platform
@@ -297,7 +296,15 @@ class PlayerFrame(wx.Frame):
         self._silence_skip_verify_attempted = False
         self._silence_skip_probe_seq = 0
         self._silence_skip_probe_calllaters = []
-        
+
+        # Status + async load tracking (avoid blocking UI during media resolve)
+        self._status_text = ""
+        self._last_status_state = None
+        self._last_status_update_ts = 0.0
+        self._load_start_ts = 0.0
+        self._silence_scan_pending = False
+        self._silence_scan_pending_info = None
+
         # Playback speed handling
         self.playback_speed = float(self.config_manager.get("playback_speed", 1.0))
         # Media key settings
@@ -376,6 +383,39 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pass
         return self._init_vlc()
+
+    def _set_status(self, text: str) -> None:
+        """Update the status label without spamming screen readers."""
+        try:
+            new_text = str(text or "")
+        except Exception:
+            new_text = ""
+
+        try:
+            if new_text == str(getattr(self, "_status_text", "") or ""):
+                return
+        except Exception:
+            pass
+
+        def _apply() -> None:
+            try:
+                if getattr(self, "status_lbl", None):
+                    self.status_lbl.SetLabel(new_text)
+            except Exception:
+                pass
+            try:
+                self._status_text = new_text
+                self._last_status_update_ts = float(time.monotonic())
+            except Exception:
+                pass
+
+        try:
+            if wx.IsMainThread():
+                _apply()
+            else:
+                wx.CallAfter(_apply)
+        except Exception:
+            pass
 
     def _current_position_ms(self) -> int:
         """
@@ -1192,6 +1232,11 @@ class PlayerFrame(wx.Frame):
         # Title
         self.title_lbl = wx.StaticText(panel, label="No Track Loaded")
         sizer.Add(self.title_lbl, 0, wx.ALL | wx.CENTER, 5)
+
+        # Status (helps screen readers during connect/buffer)
+        self.status_lbl = wx.StaticText(panel, label="")
+        self.status_lbl.SetName("Playback Status")
+        sizer.Add(self.status_lbl, 0, wx.ALL | wx.CENTER, 2)
         
         # Slider
         self.slider = wx.Slider(panel, value=0, minValue=0, maxValue=1000)
@@ -1513,6 +1558,70 @@ class PlayerFrame(wx.Frame):
         self._silence_skip_verify_target_ms = None
         self._silence_skip_verify_source_ms = None
         self._silence_skip_verify_attempted = False
+        self._silence_scan_pending = False
+        self._silence_scan_pending_info = None
+
+    def _queue_silence_scan(self, url: str, load_seq: int, headers: dict | None = None) -> None:
+        if not self.config_manager.get("skip_silence", False):
+            return
+        if not url or self.is_casting:
+            return
+        try:
+            self._silence_scan_pending = True
+            self._silence_scan_pending_info = (str(url), int(load_seq), dict(headers or {}))
+        except Exception:
+            self._silence_scan_pending = False
+            self._silence_scan_pending_info = None
+
+    def _maybe_start_pending_silence_scan(self, playing_now: bool) -> None:
+        if not playing_now:
+            return
+        if self.is_casting:
+            return
+        try:
+            if not bool(getattr(self, "_silence_scan_pending", False)):
+                return
+        except Exception:
+            return
+
+        try:
+            delay_s = float(self.config_manager.get("silence_scan_delay_s", 4.0) or 4.0)
+        except Exception:
+            delay_s = 4.0
+        try:
+            if (time.monotonic() - float(getattr(self, "_load_start_ts", 0.0) or 0.0)) < float(delay_s):
+                return
+        except Exception:
+            pass
+
+        try:
+            info = getattr(self, "_silence_scan_pending_info", None)
+        except Exception:
+            info = None
+        if not info:
+            self._silence_scan_pending = False
+            self._silence_scan_pending_info = None
+            return
+        try:
+            url, load_seq, headers = info
+        except Exception:
+            self._silence_scan_pending = False
+            self._silence_scan_pending_info = None
+            return
+        try:
+            if int(load_seq) != int(getattr(self, "_active_load_seq", 0) or 0):
+                self._silence_scan_pending = False
+                self._silence_scan_pending_info = None
+                return
+        except Exception:
+            pass
+
+        self._silence_scan_pending = False
+        self._silence_scan_pending_info = None
+        try:
+            self._start_silence_scan(str(url), int(load_seq), headers=headers)
+        except Exception:
+            pass
 
     def _start_silence_scan(self, url: str, load_seq: int, headers: dict = None) -> None:
         if not self.config_manager.get("skip_silence", False):
@@ -1981,31 +2090,8 @@ class PlayerFrame(wx.Frame):
             proxied = proxy.proxify(url, headers=req_headers)
             log.debug("Proxy URL generated: %s", proxied)
             try:
-                pu = urlparse(proxied)
-                if pu.hostname in ("127.0.0.1", "localhost") and pu.port:
-                    deadline = time.time() + 3.0
-                    ok = False
-                    last_err = None
-                    while time.time() < deadline:
-                        try:
-                            s = socket.create_connection((pu.hostname, int(pu.port)), timeout=0.5)
-                            ok = True
-                            try:
-                                s.close()
-                            except Exception:
-                                pass
-                            break
-                        except Exception as e:
-                            last_err = e
-                            ok = False
-                            time.sleep(0.1)
-                    if not ok:
-                        if last_err is not None:
-                            log.debug("Proxy connection check failed: %s", last_err)
-                        log.debug("Proxy skipped - connection check timed out")
-                        self._last_used_range_proxy = False
-                        self._last_vlc_url = url
-                        return url
+                if hasattr(proxy, "is_ready") and (proxy.is_ready() is False):
+                    log.debug("Proxy not ready yet; proceeding without blocking")
             except Exception as e:
                 log.debug("Proxy connection check error: %s", e)
                 pass
@@ -2017,96 +2103,43 @@ class PlayerFrame(wx.Frame):
             log.debug("_maybe_range_cache_url exception: %s", e)
             return url
 
-    def load_media(self, url, use_ytdlp=False, chapters=None, title=None, article_id=None):
-        if not self.is_casting:
-            if not self._ensure_vlc_ready():
-                wx.MessageBox("VLC is not initialized. Playback is unavailable.", "Error", wx.OK | wx.ICON_ERROR)
+    def _handle_media_load_error(self, load_seq: int, url: str, error_msg: str | None = None, open_browser: bool = False) -> None:
+        try:
+            if int(load_seq) != int(getattr(self, "_active_load_seq", 0) or 0):
                 return
-        _log(f"load_media: {url} (ytdlp={use_ytdlp})")
-        log.debug("load_media url=%s is_casting=%s", url, self.is_casting)
-        if not url:
+        except Exception:
             return
         try:
-            self._current_use_ytdlp = bool(use_ytdlp)
+            if error_msg:
+                _log(str(error_msg))
         except Exception:
-            self._current_use_ytdlp = False
+            pass
+        try:
+            self._set_status("Failed to load media")
+        except Exception:
+            pass
+        if open_browser and url:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        try:
+            self.Close()
+        except Exception:
+            pass
 
-        try:
-            if article_id is not None:
-                self.current_article_id = str(article_id)
-            else:
-                self.current_article_id = None
-        except Exception:
-            log.exception("Error updating current_article_id")
-            self.current_article_id = None
-
-        # Persist the previous item's position before switching to the new one.
-        try:
-            self._persist_playback_position(force=True)
-        except Exception:
-            log.exception("Failed to persist playback position on media load")
-        try:
-            self._cancel_scheduled_resume_save()
-            self._stop_calllater("_seek_apply_calllater", "Error handling seek apply calllater on media load")
-        except Exception:
-            log.exception("Error during media load cleanup")
-        finally:
-            self._stopped_needs_resume = False
-            
-        self.current_url = url
-        try:
-            self._set_resume_ids(str(url), article_id)
-        except Exception:
-            log.exception("Failed to set resume IDs, falling back to URL-based ID")
-            self._resume_id = str(url)
-            self._resume_fallback_id = None
-        self._resume_restore_inflight = False
-        self._resume_restore_id = None
-        self._resume_restore_target_ms = None
-        try:
-            self._pending_resume_seek_ms = None
-            self._pending_resume_seek_attempts = 0
-            self._pending_resume_paused = False
-        except Exception:
-            pass
-        try:
-            self._load_seq += 1
-            self._active_load_seq = self._load_seq
-        except Exception:
-            pass
-        self._cancel_silence_scan()
-
-        try:
-            self._pos_ms = 0
-            self._pos_ts = time.monotonic()
-            self._pos_allow_backwards_until_ts = 0.0
-            self._pos_last_timer_ts = 0.0
-            self._last_vlc_time_ms = 0
-            self._seek_target_ms = None
-            self._seek_target_ts = 0.0
-        except Exception:
-            pass
-        try:
-            self._seek_guard_target_ms = None
-            self._seek_guard_attempts_left = 0
-            self._seek_guard_reapply_left = 0
-            if getattr(self, '_seek_guard_calllater', None) is not None:
-                try:
-                    self._seek_guard_calllater.Stop()
-                except Exception:
-                    pass
-                self._seek_guard_calllater = None
-        except Exception:
-            pass
-        
-        self.slider.SetValue(0)
-        self.current_time_lbl.SetLabel("00:00")
-        self.total_time_lbl.SetLabel("00:00")
-        self.chapter_choice.Clear()
-        self.chapter_choice.Disable()
-        
+    def _resolve_media_worker(
+        self,
+        load_seq: int,
+        url: str,
+        use_ytdlp: bool,
+        title: str | None,
+        chapters,
+    ) -> None:
         final_url = url
         ytdlp_headers = {}
+        resolved_title = title or "Playing Audio..."
+
         if use_ytdlp:
             rumble_handled = False
             try:
@@ -2116,7 +2149,7 @@ class PlayerFrame(wx.Frame):
                     resolved = rumble_mod.resolve_rumble_media(url)
                     final_url = resolved.media_url
                     ytdlp_headers = resolved.headers or {}
-                    self.current_title = resolved.title or title or 'Media Stream'
+                    resolved_title = resolved.title or title or "Media Stream"
                     rumble_handled = True
             except Exception as e:
                 try:
@@ -2241,30 +2274,78 @@ class PlayerFrame(wx.Frame):
                         raise RuntimeError("No media URL found in yt-dlp info")
 
                     ytdlp_headers = info.get('http_headers', {})
-                    self.current_title = info.get('title', title or 'Media Stream')
+                    resolved_title = info.get('title', title or 'Media Stream')
                 except Exception as e:
                     log.exception("yt-dlp resolve failed")
-                    _log(f"yt-dlp resolve failed: {e}")
-                    
-                    # Fallback to browser as requested
-                    try:
-                        webbrowser.open(url)
-                    except Exception:
-                        pass
-                    
-                    # Close the player window since we can't play it
-                    wx.CallAfter(self.Close)
+                    wx.CallAfter(self._handle_media_load_error, int(load_seq), url, f"yt-dlp resolve failed: {e}", True)
                     return
         else:
-            self.current_title = title or "Playing Audio..."
+            resolved_title = title or "Playing Audio..."
             try:
                 maxr = int(self.config_manager.get('http_max_redirects', 30))
             except Exception:
                 maxr = 30
-            final_url = utils.resolve_final_url(final_url, max_redirects=maxr)
+            should_resolve = True
+            try:
+                low = str(final_url or "").lower()
+                if low:
+                    try:
+                        path = urlparse(low).path or low
+                    except Exception:
+                        path = low
+                    if path.endswith(_SEEKABLE_EXTENSIONS):
+                        should_resolve = False
+            except Exception:
+                should_resolve = True
+
+            if should_resolve:
+                final_url = utils.resolve_final_url(final_url, max_redirects=maxr)
             final_url = utils.normalize_url_for_vlc(final_url)
-                
-        self.title_lbl.SetLabel(self.current_title)
+
+        try:
+            if int(load_seq) != int(getattr(self, "_active_load_seq", 0) or 0):
+                return
+        except Exception:
+            return
+
+        try:
+            wx.CallAfter(
+                self._finish_media_load,
+                int(load_seq),
+                url,
+                final_url,
+                dict(ytdlp_headers or {}),
+                resolved_title,
+                chapters,
+                bool(use_ytdlp),
+            )
+        except Exception:
+            pass
+
+    def _finish_media_load(
+        self,
+        load_seq: int,
+        input_url: str,
+        final_url: str,
+        ytdlp_headers: dict,
+        resolved_title: str,
+        chapters,
+        use_ytdlp: bool,
+    ) -> None:
+        try:
+            if int(load_seq) != int(getattr(self, "_active_load_seq", 0) or 0):
+                return
+        except Exception:
+            return
+
+        try:
+            self.current_title = resolved_title or "Playing Audio..."
+        except Exception:
+            self.current_title = "Playing Audio..."
+        try:
+            self.title_lbl.SetLabel(self.current_title)
+        except Exception:
+            pass
 
         # Apply local resume state (if any) before starting playback.
         try:
@@ -2310,7 +2391,7 @@ class PlayerFrame(wx.Frame):
 
         if self.is_casting:
             try:
-                start_ms = getattr(self, "_pending_resume_seek_ms", None)       
+                start_ms = getattr(self, "_pending_resume_seek_ms", None)
             except Exception:
                 start_ms = None
             if start_ms is not None and int(start_ms) > 0:
@@ -2327,13 +2408,14 @@ class PlayerFrame(wx.Frame):
             else:
                 self.casting_manager.play(final_url, self.current_title, content_type="audio/mpeg")
             self.is_playing = True
+            self._set_status("Playing")
         else:
             try:
                 low = str(final_url or "").lower()
                 is_hls_hint = ".m3u8" in low
                 log.info(
                     "Media resolved: input=%s final=%s ytdlp=%s hls_hint=%s",
-                    url,
+                    input_url,
                     final_url,
                     bool(use_ytdlp),
                     bool(is_hls_hint),
@@ -2341,7 +2423,8 @@ class PlayerFrame(wx.Frame):
             except Exception:
                 pass
             try:
-                self._start_http_seek_diagnostics(str(final_url), headers=ytdlp_headers)
+                if bool(self.config_manager.get("debug_mode", False)):
+                    self._start_http_seek_diagnostics(str(final_url), headers=ytdlp_headers)
             except Exception:
                 pass
             final_url = self._maybe_range_cache_url(final_url, headers=ytdlp_headers)
@@ -2352,11 +2435,134 @@ class PlayerFrame(wx.Frame):
                 pass
             self._last_load_chapters = chapters
             self._last_load_title = self.current_title
-            self._start_silence_scan(final_url, int(getattr(self, "_active_load_seq", 0)), headers=ytdlp_headers)
-            self._load_vlc_url(final_url, load_seq=int(getattr(self,'_active_load_seq',0)))
-        
+            self._queue_silence_scan(final_url, int(getattr(self, "_active_load_seq", 0)), headers=ytdlp_headers)
+            self._set_status("Buffering...")
+            self._load_vlc_url(final_url, load_seq=int(getattr(self, "_active_load_seq", 0)))
+
         if chapters:
             self.update_chapters(chapters)
+
+    def load_media(self, url, use_ytdlp=False, chapters=None, title=None, article_id=None):
+        if not self.is_casting:
+            if not self._ensure_vlc_ready():
+                wx.MessageBox("VLC is not initialized. Playback is unavailable.", "Error", wx.OK | wx.ICON_ERROR)
+                return
+        _log(f"load_media: {url} (ytdlp={use_ytdlp})")
+        log.debug("load_media url=%s is_casting=%s", url, self.is_casting)
+        if not url:
+            return
+        try:
+            self._current_use_ytdlp = bool(use_ytdlp)
+        except Exception:
+            self._current_use_ytdlp = False
+
+        try:
+            if article_id is not None:
+                self.current_article_id = str(article_id)
+            else:
+                self.current_article_id = None
+        except Exception:
+            log.exception("Error updating current_article_id")
+            self.current_article_id = None
+
+        # Persist the previous item's position before switching to the new one.
+        try:
+            self._persist_playback_position(force=True)
+        except Exception:
+            log.exception("Failed to persist playback position on media load")
+        try:
+            self._cancel_scheduled_resume_save()
+            self._stop_calllater("_seek_apply_calllater", "Error handling seek apply calllater on media load")
+        except Exception:
+            log.exception("Error during media load cleanup")
+        finally:
+            self._stopped_needs_resume = False
+            
+        self.current_url = url
+        try:
+            self._set_resume_ids(str(url), article_id)
+        except Exception:
+            log.exception("Failed to set resume IDs, falling back to URL-based ID")
+            self._resume_id = str(url)
+            self._resume_fallback_id = None
+        self._resume_restore_inflight = False
+        self._resume_restore_id = None
+        self._resume_restore_target_ms = None
+        try:
+            self._pending_resume_seek_ms = None
+            self._pending_resume_seek_attempts = 0
+            self._pending_resume_paused = False
+        except Exception:
+            pass
+        try:
+            self._load_seq += 1
+            self._active_load_seq = self._load_seq
+        except Exception:
+            pass
+        self._cancel_silence_scan()
+
+        try:
+            self._pos_ms = 0
+            self._pos_ts = time.monotonic()
+            self._pos_allow_backwards_until_ts = 0.0
+            self._pos_last_timer_ts = 0.0
+            self._last_vlc_time_ms = 0
+            self._seek_target_ms = None
+            self._seek_target_ts = 0.0
+        except Exception:
+            pass
+        try:
+            self._seek_guard_target_ms = None
+            self._seek_guard_attempts_left = 0
+            self._seek_guard_reapply_left = 0
+            if getattr(self, '_seek_guard_calllater', None) is not None:
+                try:
+                    self._seek_guard_calllater.Stop()
+                except Exception:
+                    pass
+                self._seek_guard_calllater = None
+        except Exception:
+            pass
+        
+        self.slider.SetValue(0)
+        self.current_time_lbl.SetLabel("00:00")
+        self.total_time_lbl.SetLabel("00:00")
+        self.chapter_choice.Clear()
+        self.chapter_choice.Disable()
+
+        try:
+            self.current_title = title or "Loading media..."
+        except Exception:
+            self.current_title = "Loading media..."
+        try:
+            self.title_lbl.SetLabel(self.current_title)
+        except Exception:
+            pass
+
+        self._set_status("Connecting...")
+        try:
+            self._load_start_ts = float(time.monotonic())
+        except Exception:
+            pass
+
+        try:
+            t = threading.Thread(
+                target=self._resolve_media_worker,
+                args=(int(getattr(self, "_active_load_seq", 0)), str(url), bool(use_ytdlp), title, chapters),
+                daemon=True,
+            )
+            t.start()
+        except Exception:
+            try:
+                self._resolve_media_worker(
+                    int(getattr(self, "_active_load_seq", 0)),
+                    str(url),
+                    bool(use_ytdlp),
+                    title,
+                    chapters,
+                )
+            except Exception:
+                pass
 
     def toggle_play_pause(self) -> None:
         if self.is_audio_playing():
@@ -2385,6 +2591,29 @@ class PlayerFrame(wx.Frame):
     def on_stop(self, event):
         self.stop()
             
+    def _update_status_from_state(self, state, playing_now: bool) -> None:
+        try:
+            if not self.has_media_loaded():
+                return
+        except Exception:
+            pass
+
+        status = None
+        try:
+            if state in (vlc.State.Opening, vlc.State.Buffering):
+                status = "Buffering..."
+            elif playing_now:
+                status = "Playing"
+            elif state == vlc.State.Paused:
+                status = "Paused"
+            elif state in (vlc.State.Ended, vlc.State.Stopped, vlc.State.Error):
+                status = "Stopped"
+        except Exception:
+            status = None
+
+        if status is not None:
+            self._set_status(status)
+
     def on_timer(self, event):
         if self.is_casting:
             try:
@@ -2434,6 +2663,16 @@ class PlayerFrame(wx.Frame):
             elif playing_now and not bool(getattr(self, "is_playing", False)):
                 self.is_playing = True
                 self._set_play_button_label(True)
+        except Exception:
+            pass
+
+        try:
+            self._update_status_from_state(state, playing_now)
+        except Exception:
+            pass
+
+        try:
+            self._maybe_start_pending_silence_scan(bool(playing_now))
         except Exception:
             pass
 
@@ -3764,6 +4003,7 @@ class PlayerFrame(wx.Frame):
                 pass
             self.is_playing = True
             self._set_play_button_label(True)
+            self._set_status("Playing")
         else:
             try:
                 try:
@@ -3787,6 +4027,7 @@ class PlayerFrame(wx.Frame):
                 except Exception:
                     pass
                 self._set_play_button_label(True)
+                self._set_status("Playing")
                 if not self.timer.IsRunning():
                     interval = 500
                     try:
@@ -3813,6 +4054,7 @@ class PlayerFrame(wx.Frame):
                 self.casting_manager.pause()
                 self.is_playing = False
                 self._set_play_button_label(False)
+                self._set_status("Paused")
             except Exception:
                 pass
         else:
@@ -3829,6 +4071,7 @@ class PlayerFrame(wx.Frame):
                         return
                 self.is_playing = False
                 self._set_play_button_label(False)
+                self._set_status("Paused")
             except Exception:
                 log.exception("Failed to pause player")
 
@@ -3863,6 +4106,7 @@ class PlayerFrame(wx.Frame):
         self._cancel_silence_scan()
         self.is_playing = False
         self._set_play_button_label(False)
+        self._set_status("Stopped")
 
         try:
             self.slider.SetValue(0)
