@@ -540,6 +540,26 @@ class LocalProvider(RSSProvider):
                 # Pre-fetch existing articles to avoid N+1 SELECTs
                 c.execute("SELECT id, date FROM articles WHERE feed_id = ?", (feed_id,))
                 existing_articles = {row[0]: row[1] or "" for row in c.fetchall()}
+
+                entry_ids = []
+                for entry in d.entries:
+                    base_id = entry.get('id') or entry.get('link')
+                    if base_id:
+                        entry_ids.append(base_id)
+                entry_ids = list(dict.fromkeys(entry_ids))
+                conflicting_ids = set()
+                if entry_ids:
+                    chunk_size = 900
+                    for i in range(0, len(entry_ids), chunk_size):
+                        chunk = entry_ids[i:i + chunk_size]
+                        placeholders = ",".join(["?"] * len(chunk))
+                        c.execute(
+                            f"SELECT id, feed_id FROM articles WHERE id IN ({placeholders})",
+                            chunk,
+                        )
+                        for row in c.fetchall():
+                            if row[1] != feed_id:
+                                conflicting_ids.add(row[0])
                 
                 total_entries = len(d.entries)
                 for i, entry in enumerate(d.entries):
@@ -557,9 +577,11 @@ class LocalProvider(RSSProvider):
                     elif 'description' in entry:
                         content = entry.description
                     
-                    article_id = entry.get('id', entry.get('link', ''))
-                    if not article_id:
+                    base_id = entry.get('id') or entry.get('link', '')
+                    if not base_id:
                         continue
+                    scoped_id = f"{feed_id}:{base_id}"
+                    article_id = base_id
 
                     title = entry.get('title', '')
                     if not title or title.strip() == "No Title":
@@ -601,11 +623,20 @@ class LocalProvider(RSSProvider):
                         url
                     )
 
-                    existing_date = existing_articles.get(article_id)
+                    existing_date = existing_articles.get(base_id)
                     if existing_date is not None:
                         if existing_date != date:
-                                c.execute("UPDATE articles SET date = ? WHERE id = ?", (date, article_id))
+                                c.execute("UPDATE articles SET date = ? WHERE id = ?", (date, base_id))
                         continue
+
+                    existing_date = existing_articles.get(scoped_id)
+                    if existing_date is not None:
+                        if existing_date != date:
+                                c.execute("UPDATE articles SET date = ? WHERE id = ?", (date, scoped_id))
+                        continue
+
+                    if base_id in conflicting_ids:
+                        article_id = scoped_id
 
                     media_url = None
                     media_type = None
@@ -667,12 +698,41 @@ class LocalProvider(RSSProvider):
                             (article_id, feed_id, title, url, content, date, author, media_url, media_type),
                         )
                         new_items += 1
+                        existing_articles[article_id] = date
                     except sqlite3.IntegrityError as e:
                         if _rollback_and_abort_on_foreign_key(conn, e):
                             status = "deleted"
                             error_msg = None
                             return
-                        raise
+                        if article_id == base_id:
+                            try:
+                                c.execute("SELECT feed_id, date FROM articles WHERE id = ? LIMIT 1", (base_id,))
+                                row = c.fetchone()
+                            except sqlite3.Error:
+                                row = None
+
+                            if row:
+                                existing_feed_id = row[0]
+                                existing_date = row[1] or ""
+                                if existing_feed_id == feed_id:
+                                    if existing_date != date:
+                                        c.execute("UPDATE articles SET date = ? WHERE id = ?", (date, base_id))
+                                    continue
+
+                                try:
+                                    c.execute(
+                                        "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                                        (scoped_id, feed_id, title, url, content, date, author, media_url, media_type),
+                                    )
+                                    article_id = scoped_id
+                                    new_items += 1
+                                    existing_articles[article_id] = date
+                                except sqlite3.IntegrityError:
+                                    continue
+                            else:
+                                raise
+                        else:
+                            continue
 
                     chapter_url = None
                     if 'podcast_chapters' in entry:
