@@ -490,7 +490,7 @@ class MainFrame(wx.Frame):
                     break
 
                 # Sort newest-first defensively.
-                page.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
+                page.sort(key=lambda a: (a.timestamp, self._article_cache_id(a)), reverse=True)
 
                 wx.CallAfter(self._append_articles, page, request_id, total, page_size)
 
@@ -1045,7 +1045,7 @@ class MainFrame(wx.Frame):
                         article.media_type = mtype
                         
                         # Refresh UI for this item
-                        wx.CallAfter(self._refresh_article_in_list, article.id)
+                        wx.CallAfter(self._refresh_article_in_list, self._article_cache_id(article))
                         wx.CallAfter(wx.MessageBox, "Audio detected and added!", "Success", wx.ICON_INFORMATION)
                     else:
                          wx.CallAfter(wx.MessageBox, "Provider does not support updating media.", "Error", wx.ICON_ERROR)
@@ -1060,7 +1060,7 @@ class MainFrame(wx.Frame):
         # Find item index
         idx = -1
         for i, a in enumerate(self.current_articles):
-            if a.id == article_id:
+            if self._article_cache_id(a) == article_id:
                 idx = i
                 break
         
@@ -1080,7 +1080,7 @@ class MainFrame(wx.Frame):
             with getattr(self, "_view_cache_lock", threading.Lock()):
                 for st in (self.view_cache or {}).values():
                     for a in (st.get("articles") or []):
-                        if getattr(a, "id", None) == article.id:
+                        if self._article_cache_id(a) == self._article_cache_id(article):
                             a.media_url = article.media_url
                             a.media_type = article.media_type
         except Exception:
@@ -1116,12 +1116,17 @@ class MainFrame(wx.Frame):
         # Removed appending feed title since it now has a column
         return title
 
+    def _article_cache_id(self, article) -> str | None:
+        if not article:
+            return None
+        return getattr(article, "cache_id", getattr(article, "id", None))
+
     def _sync_favorite_flag_in_cached_views(self, article_id: str, is_favorite: bool) -> None:
         try:
             with getattr(self, "_view_cache_lock", threading.Lock()):
                 for st in (self.view_cache or {}).values():
                     for a in (st.get("articles") or []):
-                        if getattr(a, "id", None) == article_id:
+                        if self._article_cache_id(a) == article_id:
                             a.is_favorite = bool(is_favorite)
         except Exception:
             log.exception("Error syncing favorite flag in cached views")
@@ -1136,16 +1141,17 @@ class MainFrame(wx.Frame):
 
                 fav_articles = list(fav_st.get("articles") or [])
                 fav_id_set = set(fav_st.get("id_set") or set())
+                article_cache_id = self._article_cache_id(article)
 
                 if bool(is_favorite):
-                    if article.id not in fav_id_set:
+                    if article_cache_id not in fav_id_set:
                         fav_articles.append(article)
-                        fav_id_set.add(article.id)
-                        fav_articles.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
+                        fav_id_set.add(article_cache_id)
+                        fav_articles.sort(key=lambda a: (a.timestamp, self._article_cache_id(a)), reverse=True)
                 else:
-                    if article.id in fav_id_set:
-                        fav_id_set.discard(article.id)
-                        fav_articles = [a for a in fav_articles if getattr(a, "id", None) != article.id]
+                    if article_cache_id in fav_id_set:
+                        fav_id_set.discard(article_cache_id)
+                        fav_articles = [a for a in fav_articles if self._article_cache_id(a) != article_cache_id]
 
                 fav_st["articles"] = fav_articles
                 fav_st["id_set"] = fav_id_set
@@ -1194,11 +1200,11 @@ class MainFrame(wx.Frame):
                     articles = list(st.get("articles") or [])
                     if not articles:
                         continue
-                    new_articles = [a for a in articles if getattr(a, "id", None) != article_id]
+                    new_articles = [a for a in articles if self._article_cache_id(a) != article_id]
                     if len(new_articles) == len(articles):
                         continue
                     st["articles"] = new_articles
-                    st["id_set"] = {a.id for a in new_articles}
+                    st["id_set"] = {self._article_cache_id(a) for a in new_articles}
                     if st.get("total") is not None:
                         try:
                             st["total"] = max(0, int(st.get("total") or 0) - 1)
@@ -1239,20 +1245,20 @@ class MainFrame(wx.Frame):
         cache_key, _url, _aid = self._fulltext_cache_key_for_article(article, idx)
         threading.Thread(
             target=self._delete_article_thread,
-            args=(article.id, cache_key),
+            args=(article.id, self._article_cache_id(article), cache_key),
             daemon=True,
         ).start()
 
-    def _delete_article_thread(self, article_id: str, cache_key: str) -> None:
+    def _delete_article_thread(self, article_id: str, article_cache_id: str, cache_key: str) -> None:
         ok = False
         err = ""
         try:
             ok = bool(self.provider.delete_article(article_id))
         except Exception as e:
             err = str(e) or "Unknown error"
-        wx.CallAfter(self._post_delete_article, article_id, cache_key, ok, err)
+        wx.CallAfter(self._post_delete_article, article_id, article_cache_id, cache_key, ok, err)
 
-    def _post_delete_article(self, article_id: str, cache_key: str, ok: bool, err: str) -> None:
+    def _post_delete_article(self, article_id: str, article_cache_id: str, cache_key: str, ok: bool, err: str) -> None:
         if not ok:
             msg = "Could not delete article."
             if err:
@@ -1271,14 +1277,14 @@ class MainFrame(wx.Frame):
 
         idx = None
         for i, a in enumerate(self.current_articles):
-            if getattr(a, "id", None) == article_id:
+            if self._article_cache_id(a) == article_cache_id:
                 idx = i
                 break
 
         if idx is not None:
             self._remove_article_from_current_list(idx)
 
-        self._remove_article_from_cached_views(article_id)
+        self._remove_article_from_cached_views(article_cache_id)
 
         if not self.current_articles:
             self._show_empty_articles_state()
@@ -1308,7 +1314,7 @@ class MainFrame(wx.Frame):
         try:
             st = self._ensure_view_state(view_id)
             st["articles"] = self.current_articles
-            st["id_set"] = {a.id for a in (self.current_articles or [])}
+            st["id_set"] = {self._article_cache_id(a) for a in (self.current_articles or [])}
             st["last_access"] = time.time()
         except Exception:
             log.exception("Error updating current view cache for view_id '%s'", view_id)
@@ -1335,7 +1341,7 @@ class MainFrame(wx.Frame):
 
         article.is_favorite = bool(new_state)
 
-        self._sync_favorite_flag_in_cached_views(article.id, bool(new_state))
+        self._sync_favorite_flag_in_cached_views(self._article_cache_id(article), bool(new_state))
         self._update_cached_favorites_view(article, bool(new_state))
 
         # If we're in the Favorites view and the item was removed from favorites, drop it from the list.
@@ -1812,7 +1818,7 @@ class MainFrame(wx.Frame):
             page, total = self.provider.get_articles_page(feed_id, offset=0, limit=page_size)
             # Ensure stable order (newest first)
             page = page or []
-            page.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
+            page.sort(key=lambda a: (a.timestamp, self._article_cache_id(a)), reverse=True)
 
             if not full_load:
                 wx.CallAfter(self._quick_merge_articles, page, request_id, feed_id)
@@ -1893,7 +1899,7 @@ class MainFrame(wx.Frame):
         if fid:
             st = self._ensure_view_state(fid)
             st['articles'] = self.current_articles
-            st['id_set'] = {a.id for a in self.current_articles}
+            st['id_set'] = {self._article_cache_id(a) for a in self.current_articles}
             st['total'] = total
             st['page_size'] = int(page_size)
             st['paged_offset'] = len(articles or [])
@@ -1926,8 +1932,8 @@ class MainFrame(wx.Frame):
             page_size = self.article_page_size
 
         # Deduplicate to avoid duplicates when the underlying feed shifts due to new entries.
-        existing_ids = {a.id for a in getattr(self, 'current_articles', [])}
-        new_articles = [a for a in articles if a.id not in existing_ids]
+        existing_ids = {self._article_cache_id(a) for a in getattr(self, 'current_articles', [])}
+        new_articles = [a for a in articles if self._article_cache_id(a) not in existing_ids]
 
         # Even if everything was a duplicate, persist paging progress for resume logic.
         fid = getattr(self, 'current_feed_id', None)
@@ -1956,17 +1962,17 @@ class MainFrame(wx.Frame):
         first_new_article_id = None
         if load_more_requested:
             try:
-                first_new_article_id = new_articles[0].id
+                first_new_article_id = self._article_cache_id(new_articles[0])
             except Exception:
                 first_new_article_id = None
 
         focused_article_id = None
         if (not focused_on_load_more) and focused_idx != wx.NOT_FOUND and 0 <= focused_idx < len(self.current_articles):
-             focused_article_id = self.current_articles[focused_idx].id
+             focused_article_id = self._article_cache_id(self.current_articles[focused_idx])
 
         selected_article_id = None
         if (not selected_on_load_more) and selected_idx != wx.NOT_FOUND and 0 <= selected_idx < len(self.current_articles):
-            selected_article_id = self.current_articles[selected_idx].id
+            selected_article_id = self._article_cache_id(self.current_articles[selected_idx])
         if selected_article_id is None and not selected_on_load_more:
             selected_article_id = getattr(self, "selected_article_id", None)
 
@@ -1974,13 +1980,13 @@ class MainFrame(wx.Frame):
         top_idx = self.list_ctrl.GetTopItem()
         top_article_id = None
         if top_idx != wx.NOT_FOUND and 0 <= top_idx < len(self.current_articles):
-            top_article_id = self.current_articles[top_idx].id
+            top_article_id = self._article_cache_id(self.current_articles[top_idx])
 
         self._remove_loading_more_placeholder()
 
         # Combine and sort to ensure chronological order even if paging overlapped/shifted
         combined = getattr(self, 'current_articles', []) + new_articles
-        combined.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
+        combined.sort(key=lambda a: (a.timestamp, self._article_cache_id(a)), reverse=True)
         self.current_articles = combined
 
         self.list_ctrl.Freeze()
@@ -2005,7 +2011,7 @@ class MainFrame(wx.Frame):
         if fid:
             st = self._ensure_view_state(fid)
             st['articles'] = self.current_articles
-            st['id_set'] = {a.id for a in self.current_articles}
+            st['id_set'] = {self._article_cache_id(a) for a in self.current_articles}
             if total is not None:
                 st['total'] = total
             st['page_size'] = int(page_size)
@@ -2057,7 +2063,7 @@ class MainFrame(wx.Frame):
         selected_idx = None
         if selected_id:
             for i, a in enumerate(self.current_articles):
-                if a.id == selected_id:
+                if self._article_cache_id(a) == selected_id:
                     selected_idx = i
                     self.list_ctrl.SetItemState(i, wx.LIST_STATE_SELECTED, wx.LIST_STATE_SELECTED)
                     break
@@ -2066,7 +2072,7 @@ class MainFrame(wx.Frame):
         focused_idx = None
         if focused_id:
             for i, a in enumerate(self.current_articles):
-                if a.id == focused_id:
+                if self._article_cache_id(a) == focused_id:
                     focused_idx = i
                     self.list_ctrl.SetItemState(i, wx.LIST_STATE_FOCUSED, wx.LIST_STATE_FOCUSED)
                     # If we don't have a specific scroll target, ensure focused is visible
@@ -2086,7 +2092,7 @@ class MainFrame(wx.Frame):
         if top_id:
             target_idx = -1
             for i, a in enumerate(self.current_articles):
-                if a.id == top_id:
+                if self._article_cache_id(a) == top_id:
                     target_idx = i
                     break
             
@@ -2124,7 +2130,7 @@ class MainFrame(wx.Frame):
         target_idx = -1
         try:
             for i, a in enumerate(self.current_articles):
-                if a.id == article_id:
+                if self._article_cache_id(a) == article_id:
                     target_idx = i
                     break
         except Exception:
@@ -2146,7 +2152,7 @@ class MainFrame(wx.Frame):
         if fid:
             st = self._ensure_view_state(fid)
             st['articles'] = (getattr(self, 'current_articles', []) or [])
-            st['id_set'] = {a.id for a in (getattr(self, 'current_articles', []) or [])}
+            st['id_set'] = {self._article_cache_id(a) for a in (getattr(self, 'current_articles', []) or [])}
             st['fully_loaded'] = True
             st['last_access'] = time.time()
 
@@ -2229,7 +2235,7 @@ class MainFrame(wx.Frame):
         try:
             page, total = self.provider.get_articles_page(feed_id, offset=offset, limit=page_size)
             page = page or []
-            page.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
+            page.sort(key=lambda a: (a.timestamp, self._article_cache_id(a)), reverse=True)
             wx.CallAfter(self._after_load_more, page, total, request_id, page_size)
         except Exception as e:
             wx.CallAfter(self._load_more_failed, request_id, str(e))
@@ -2269,8 +2275,8 @@ class MainFrame(wx.Frame):
             self._populate_articles(latest_page, request_id, None, page_size)
             return
 
-        existing_ids = {a.id for a in self.current_articles}
-        new_entries = [a for a in latest_page if a.id not in existing_ids]
+        existing_ids = {self._article_cache_id(a) for a in self.current_articles}
+        new_entries = [a for a in latest_page if self._article_cache_id(a) not in existing_ids]
         if not new_entries:
             return
 
@@ -2287,19 +2293,19 @@ class MainFrame(wx.Frame):
 
         focused_article_id = None
         if (not focused_on_load_more) and focused_idx != wx.NOT_FOUND and 0 <= focused_idx < len(self.current_articles):
-             focused_article_id = self.current_articles[focused_idx].id
+             focused_article_id = self._article_cache_id(self.current_articles[focused_idx])
 
         # Capture Top Item for scroll restoration
         top_idx = self.list_ctrl.GetTopItem()
         top_article_id = None
         if top_idx != wx.NOT_FOUND and 0 <= top_idx < len(self.current_articles):
-            top_article_id = self.current_articles[top_idx].id
+            top_article_id = self._article_cache_id(self.current_articles[top_idx])
 
         self._updating_list = True
         try:
             # Combine, deduplicate, and sort
             combined = new_entries + self.current_articles
-            combined.sort(key=lambda a: (a.timestamp, a.id), reverse=True)
+            combined.sort(key=lambda a: (a.timestamp, self._article_cache_id(a)), reverse=True)
             
             # Enforce page-limited view based on how many history pages the user loaded.
             truncated = False
@@ -2317,7 +2323,7 @@ class MainFrame(wx.Frame):
                 pass
 
             # If no change in order or content after truncation, skip
-            if [a.id for a in combined] == [a.id for a in self.current_articles]:
+            if [self._article_cache_id(a) for a in combined] == [self._article_cache_id(a) for a in self.current_articles]:
                 return
 
             self.current_articles = combined
@@ -2382,7 +2388,7 @@ class MainFrame(wx.Frame):
         if fid:
             st = self._ensure_view_state(fid)
             st['articles'] = self.current_articles
-            st['id_set'] = {a.id for a in self.current_articles}
+            st['id_set'] = {self._article_cache_id(a) for a in self.current_articles}
             # Do NOT advance paged_offset here; quick top-ups shouldn't change history offset.
             st['page_size'] = page_size
             st['last_access'] = time.time()
@@ -2407,10 +2413,10 @@ class MainFrame(wx.Frame):
             
             # Prevent flashing/resetting if the selection hasn't semantically changed
             # (e.g. during background refresh when list indices shift).
-            if getattr(self, "selected_article_id", None) == article.id:
+            if getattr(self, "selected_article_id", None) == self._article_cache_id(article):
                 return
 
-            self.selected_article_id = article.id # Track selection
+            self.selected_article_id = self._article_cache_id(article) # Track selection
             # Reset full-text state for new selection
             self._fulltext_loading_url = None
             self._fulltext_token += 1
@@ -2429,7 +2435,7 @@ class MainFrame(wx.Frame):
         article = self.current_articles[idx]
         
         # Verify selection hasn't changed
-        if getattr(self, "selected_article_id", None) != article.id:
+        if getattr(self, "selected_article_id", None) != self._article_cache_id(article):
             return
 
         # Prepare content (Heavy: BeautifulSoup)
@@ -3026,13 +3032,13 @@ class MainFrame(wx.Frame):
             self._chapters_debounce = None
 
         delay = int(getattr(self, "_chapters_debounce_ms", 500))
-        article_id = getattr(article, "id", None)
+        article_cache_id = self._article_cache_id(article)
 
-        self._chapters_debounce = wx.CallLater(delay, self._start_chapters_load, article_id)
+        self._chapters_debounce = wx.CallLater(delay, self._start_chapters_load, article_cache_id)
 
-    def _start_chapters_load(self, article_id):
+    def _start_chapters_load(self, article_cache_id):
         try:
-            if hasattr(self, 'selected_article_id') and self.selected_article_id != article_id:
+            if hasattr(self, 'selected_article_id') and self.selected_article_id != article_cache_id:
                 return
         except Exception:
             pass
@@ -3041,7 +3047,7 @@ class MainFrame(wx.Frame):
         article = None
         try:
             for a in self.current_articles:
-                if getattr(a, "id", None) == article_id:
+                if self._article_cache_id(a) == article_cache_id:
                     article = a
                     break
         except Exception:
@@ -3063,11 +3069,11 @@ class MainFrame(wx.Frame):
                 chapters = None
         
         if chapters:
-            wx.CallAfter(self._append_chapters, article.id, chapters)
+            wx.CallAfter(self._append_chapters, self._article_cache_id(article), chapters)
 
-    def _append_chapters(self, article_id, chapters):
+    def _append_chapters(self, article_cache_id, chapters):
         # Verify selection hasn't changed
-        if hasattr(self, 'selected_article_id') and self.selected_article_id == article_id:
+        if hasattr(self, 'selected_article_id') and self.selected_article_id == article_cache_id:
             text = "\n\nChapters:\n"
             for ch in chapters:
                 start = ch.get("start", 0)
