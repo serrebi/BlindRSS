@@ -212,6 +212,11 @@ class SettingsDialog(wx.Dialog):
         self.cache_ctrl = wx.SpinCtrl(general_panel, min=5, max=100, initial=int(config.get("max_cached_views", 15)))
         cache_sizer.Add(self.cache_ctrl, 0, wx.ALL, 5)
         general_sizer.Add(cache_sizer, 0, wx.EXPAND | wx.ALL, 5)
+
+        # Full-text caching
+        self.cache_full_text_chk = wx.CheckBox(general_panel, label="Cache full text in background")
+        self.cache_full_text_chk.SetValue(bool(config.get("cache_full_text", False)))
+        general_sizer.Add(self.cache_full_text_chk, 0, wx.ALL, 5)
         
         # Downloads
         self.downloads_chk = wx.CheckBox(general_panel, label="Enable Downloads")
@@ -642,6 +647,7 @@ class SettingsDialog(wx.Dialog):
             "show_player_on_play": self.show_player_on_play_chk.GetValue(),
             "vlc_network_caching_ms": self.vlc_cache_ctrl.GetValue(),
             "max_cached_views": self.cache_ctrl.GetValue(),
+            "cache_full_text": self.cache_full_text_chk.GetValue(),
             "downloads_enabled": self.downloads_chk.GetValue(),
             "download_path": self.dl_path_ctrl.GetValue(),
             "download_retention": self.retention_ctrl.GetValue(),

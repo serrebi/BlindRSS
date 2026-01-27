@@ -67,7 +67,94 @@ class TheOldReaderProvider(RSSProvider):
             h["Authorization"] = f"GoogleLogin auth={self.token}"
         return h
 
-    def refresh(self, progress_cb=None) -> bool:
+    def _strip_view_prefixes(self, feed_id: str) -> str:
+        real_feed_id = feed_id or ""
+        while True:
+            if real_feed_id.startswith("favorites:"):
+                real_feed_id = real_feed_id[10:]
+            elif real_feed_id.startswith("fav:"):
+                real_feed_id = real_feed_id[4:]
+            elif real_feed_id.startswith("starred:"):
+                real_feed_id = real_feed_id[8:]
+            elif real_feed_id.startswith("unread:"):
+                real_feed_id = real_feed_id[7:]
+            elif real_feed_id.startswith("read:"):
+                real_feed_id = real_feed_id[5:]
+            else:
+                break
+        return real_feed_id
+
+    def _resolve_stream_id(self, feed_id: str) -> str | None:
+        if not feed_id:
+            return None
+        if feed_id.startswith(("favorites:", "fav:", "starred:", "read:")):
+            return None
+        real_feed_id = self._strip_view_prefixes(feed_id)
+        if not real_feed_id or real_feed_id == "all":
+            return "user/-/state/com.google/reading-list"
+        if real_feed_id.startswith("category:"):
+            label = real_feed_id.split(":", 1)[1]
+            return f"user/-/label/{label}"
+        return real_feed_id
+
+    def _iter_unread_ids(self, stream_id: str):
+        if not stream_id:
+            return
+        continuation = None
+        base_params = {
+            "s": stream_id,
+            "output": "json",
+            "n": 1000,
+            "xt": "user/-/state/com.google/read",
+        }
+        while True:
+            params = dict(base_params)
+            if continuation:
+                params["c"] = continuation
+            resp = requests.get(
+                f"{self.base_url}/stream/items/ids",
+                headers=self._headers(),
+                params=params,
+            )
+            resp.raise_for_status()
+            data = resp.json() if resp is not None else {}
+            items = data.get("items") or []
+            for item_id in items:
+                if item_id is not None:
+                    yield str(item_id)
+            continuation = data.get("continuation")
+            if not continuation or not items:
+                break
+
+    def _set_read_state_batch(self, article_ids: List[str], is_read: bool) -> bool:
+        if not self._login():
+            return False
+        if not article_ids:
+            return True
+        action_key = "a" if is_read else "r"
+        state_value = "user/-/state/com.google/read"
+        chunk_size = 200
+        ok = True
+        for i in range(0, len(article_ids), chunk_size):
+            chunk = article_ids[i:i + chunk_size]
+            data = [("i", str(aid)) for aid in chunk if aid is not None]
+            if not data:
+                continue
+            data.append((action_key, state_value))
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/edit-tag",
+                    headers=self._headers(),
+                    data=data,
+                )
+                if not resp.ok:
+                    ok = False
+            except Exception as e:
+                log.error(f"TheOldReader batch edit-tag failed: {e}")
+                ok = False
+        return ok
+
+    def refresh(self, progress_cb=None, force: bool = False) -> bool:
         if not self._login():
             log.warning("TheOldReader: Refresh skipped due to login failure.")
             return False
@@ -249,6 +336,39 @@ class TheOldReaderProvider(RSSProvider):
             })
             return True
         except:
+            return False
+
+    def mark_read_batch(self, article_ids: List[str]) -> bool:
+        return self._set_read_state_batch(article_ids, True)
+
+    def mark_all_read(self, feed_id: str) -> bool:
+        if not self._login():
+            return False
+        if not feed_id or feed_id.startswith(("favorites:", "fav:", "starred:", "read:")):
+            return False
+        stream_id = self._resolve_stream_id(feed_id)
+        if not stream_id:
+            return False
+
+        try:
+            ts = int(time.time() * 1_000_000)
+            resp = requests.post(
+                f"{self.base_url}/mark-all-as-read",
+                headers=self._headers(),
+                data={"s": stream_id, "ts": str(ts)},
+            )
+            if resp.ok:
+                return True
+        except Exception as e:
+            log.error(f"TheOldReader mark-all-as-read failed for {feed_id}: {e}")
+
+        try:
+            unread_ids = list(self._iter_unread_ids(stream_id))
+            if not unread_ids:
+                return True
+            return self._set_read_state_batch(unread_ids, True)
+        except Exception as e:
+            log.error(f"TheOldReader mark-all fallback failed for {feed_id}: {e}")
             return False
 
     def supports_favorites(self) -> bool:

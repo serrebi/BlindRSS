@@ -1010,6 +1010,49 @@ class LocalProvider(RSSProvider):
         finally:
             conn.close()
 
+    def mark_all_read(self, feed_id: str) -> bool:
+        if not feed_id:
+            return False
+        try:
+            real_feed_id, filter_read, filter_favorite = self._parse_article_view_filters(feed_id)
+        except Exception:
+            return False
+
+        # Avoid mass-marking favorites or already-read views.
+        if filter_favorite is not None or filter_read == 1:
+            return False
+
+        conn = get_connection()
+        try:
+            c = conn.cursor()
+            where_clauses = []
+            params = []
+
+            if real_feed_id.startswith("category:"):
+                cat_name = real_feed_id.split(":", 1)[1]
+                where_clauses.append("feed_id IN (SELECT id FROM feeds WHERE category = ?)")
+                params.append(cat_name)
+            elif real_feed_id != "all":
+                where_clauses.append("feed_id = ?")
+                params.append(real_feed_id)
+
+            if filter_read is not None:
+                where_clauses.append("is_read = ?")
+                params.append(filter_read)
+
+            where_sql = ""
+            if where_clauses:
+                where_sql = " WHERE " + " AND ".join(where_clauses)
+
+            c.execute(f"UPDATE articles SET is_read = 1{where_sql}", tuple(params))
+            conn.commit()
+            return True
+        except Exception as e:
+            log.error(f"Local mark-all-read error: {e}")
+            return False
+        finally:
+            conn.close()
+
     def supports_favorites(self) -> bool:
         return True
 

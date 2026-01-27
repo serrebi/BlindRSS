@@ -8,6 +8,7 @@ import time
 import os
 import re
 import logging
+from collections import deque
 from urllib.parse import urlsplit
 from bs4 import BeautifulSoup
 # from dateutil import parser as date_parser  # Removed unused import
@@ -216,6 +217,7 @@ class MainFrame(wx.Frame):
 
         # Full-text extraction cache (url -> rendered text)
         self._fulltext_cache = {}
+        self._fulltext_cache_source = {}
         self._fulltext_token = 0
         self._fulltext_loading_url = None
         # Debounce full-text extraction when moving through the list quickly.
@@ -225,7 +227,9 @@ class MainFrame(wx.Frame):
         # Single-worker background thread for full-text extraction (keeps CPU usage predictable).
         self._fulltext_worker_lock = threading.Lock()
         self._fulltext_worker_event = threading.Event()
-        self._fulltext_worker_request = None
+        self._fulltext_worker_queue = deque()
+        self._fulltext_prefetch_token = 0
+        self._fulltext_prefetch_seen = set()
         self._fulltext_worker_stop = False
         self._fulltext_worker_thread = threading.Thread(target=self._fulltext_worker_loop, daemon=True)
         self._fulltext_worker_thread.start()
@@ -393,9 +397,8 @@ class MainFrame(wx.Frame):
             for i, article in enumerate(self.current_articles):
                 idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
                 feed_title = ""
-                if feed_id == "all" or feed_id.startswith("category:"):
-                    node = self.feed_nodes.get(article.feed_id)
-                    feed = self.feed_map.get(node) if node else None
+                if article.feed_id:
+                    feed = self.feed_map.get(article.feed_id)
                     if feed:
                         feed_title = feed.title or ""
                 
@@ -409,6 +412,11 @@ class MainFrame(wx.Frame):
                 self._add_loading_more_placeholder()
             else:
                 self._remove_loading_more_placeholder()
+
+            try:
+                self._reset_fulltext_prefetch(self.current_articles)
+            except Exception:
+                pass
 
             # Start a cheap top-up (latest page) in the background.
             self.current_request_id = time.time()
@@ -425,6 +433,10 @@ class MainFrame(wx.Frame):
             self.list_ctrl.DeleteAllItems()
             self._remove_loading_more_placeholder()
             self.list_ctrl.InsertItem(0, "No articles found.")
+            try:
+                self._reset_fulltext_prefetch([])
+            except Exception:
+                pass
             self.current_request_id = time.time()
             threading.Thread(
                 target=self._load_articles_thread,
@@ -512,6 +524,7 @@ class MainFrame(wx.Frame):
         add_feed_item = file_menu.Append(wx.ID_ANY, "&Add Feed\tCtrl+N", "Add a new RSS feed")
         remove_feed_item = file_menu.Append(wx.ID_ANY, "&Remove Feed", "Remove selected feed")
         refresh_item = file_menu.Append(wx.ID_REFRESH, "&Refresh Feeds\tF5", "Refresh all feeds")
+        mark_all_read_item = file_menu.Append(wx.ID_ANY, "Mark All Items as &Read", "Mark all items as read")
         file_menu.AppendSeparator()
         add_cat_item = file_menu.Append(wx.ID_ANY, "Add &Category", "Add a new category")
         remove_cat_item = file_menu.Append(wx.ID_ANY, "Remove C&ategory", "Remove selected category")
@@ -560,6 +573,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_add_feed, add_feed_item)
         self.Bind(wx.EVT_MENU, self.on_remove_feed, remove_feed_item)
         self.Bind(wx.EVT_MENU, self.on_refresh_feeds, refresh_item)
+        self.Bind(wx.EVT_MENU, self.on_mark_all_read, mark_all_read_item)
         self.Bind(wx.EVT_MENU, self.on_add_category, add_cat_item)
         self.Bind(wx.EVT_MENU, self.on_remove_category, remove_cat_item)
         self.Bind(wx.EVT_MENU, self.on_import_opml, import_opml_item)
@@ -1250,6 +1264,10 @@ class MainFrame(wx.Frame):
             self._fulltext_cache.pop(cache_key, None)
         except Exception:
             pass
+        try:
+            self._fulltext_cache_source.pop(cache_key, None)
+        except Exception:
+            pass
 
         idx = None
         for i, a in enumerate(self.current_articles):
@@ -1834,6 +1852,10 @@ class MainFrame(wx.Frame):
                 st['paged_offset'] = 0
                 st['fully_loaded'] = True
                 st['last_access'] = time.time()
+            try:
+                self._reset_fulltext_prefetch([])
+            except Exception:
+                pass
             return
 
         self.list_ctrl.Freeze()
@@ -1889,6 +1911,11 @@ class MainFrame(wx.Frame):
                     fully = False
             st['fully_loaded'] = bool(fully)
             st['last_access'] = time.time()
+
+        try:
+            self._reset_fulltext_prefetch(self.current_articles)
+        except Exception:
+            pass
 
     def _append_articles(self, articles, request_id, total=None, page_size: int | None = None):
         if not hasattr(self, 'current_request_id') or request_id != self.current_request_id:
@@ -1991,6 +2018,11 @@ class MainFrame(wx.Frame):
             if st.get('total') is None and len(articles) < int(page_size):
                 st['fully_loaded'] = True
             st['last_access'] = time.time()
+
+        try:
+            self._queue_fulltext_prefetch(new_articles)
+        except Exception:
+            pass
 
         more = False
         if total is None:
@@ -2355,6 +2387,11 @@ class MainFrame(wx.Frame):
             st['page_size'] = page_size
             st['last_access'] = time.time()
 
+        try:
+            self._reset_fulltext_prefetch(self.current_articles)
+        except Exception:
+            pass
+
     def on_article_select(self, event):
         if self._updating_list:
             return
@@ -2443,6 +2480,189 @@ class MainFrame(wx.Frame):
         cache_key = url if url else f"article:{article_id}"
         return cache_key, url, str(article_id)
 
+    def _fulltext_prefetch_enabled(self) -> bool:
+        try:
+            # Background prefetching can poison full-text extraction on some sites.
+            # Keep caching after on-demand loads, but avoid background fetches.
+            return False
+        except Exception:
+            return False
+
+    def _fulltext_cache_enabled(self) -> bool:
+        try:
+            return bool(self.config_manager.get("cache_full_text", False))
+        except Exception:
+            return False
+
+    def _provider_supports_fulltext_fetch(self) -> bool:
+        prov = getattr(self, "provider", None)
+        if not prov:
+            return False
+        try:
+            fn = getattr(type(prov), "fetch_full_content", None)
+        except Exception:
+            fn = None
+        if fn is None:
+            return False
+        try:
+            return fn is not RSSProvider.fetch_full_content
+        except Exception:
+            return False
+
+    def _cached_fulltext_is_fallback(self, text: str) -> bool:
+        if not text:
+            return False
+        low = text.lower()
+        if "full-text extraction failed. showing feed content." in low:
+            return True
+        if "no webpage url for this item. showing feed content." in low:
+            return True
+        return False
+
+    def _cached_fulltext_is_authoritative(self, cache_key: str, url: str, looks_like_media: bool, cached_text: str) -> bool:
+        if not cached_text:
+            return False
+        if self._cached_fulltext_is_fallback(cached_text):
+            return False
+        if not url or looks_like_media:
+            return True
+        if not self._fulltext_cache_enabled():
+            return True
+        try:
+            # For URL-backed articles, only web extraction is authoritative.
+            return self._fulltext_cache_source.get(cache_key) == "web"
+        except Exception:
+            return False
+
+    def _clear_fulltext_prefetch_queue(self) -> None:
+        try:
+            with self._fulltext_worker_lock:
+                if self._fulltext_worker_queue:
+                    keep = deque([req for req in self._fulltext_worker_queue if not req.get("prefetch")])
+                    self._fulltext_worker_queue = keep
+                else:
+                    self._fulltext_worker_queue = deque()
+                self._fulltext_prefetch_seen = set()
+            try:
+                if not self._fulltext_worker_queue:
+                    self._fulltext_worker_event.clear()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _build_fulltext_request(
+        self,
+        article,
+        idx: int,
+        *,
+        token: int | None = None,
+        prefetch: bool = False,
+        prefetch_token: int | None = None,
+        apply: bool = True,
+    ) -> dict:
+        cache_key, url, article_id = self._fulltext_cache_key_for_article(article, idx)
+        return {
+            "idx": idx,
+            "cache_key": cache_key,
+            "url": url,
+            "fallback_html": getattr(article, "content", "") or "",
+            "fallback_title": getattr(article, "title", "") or "",
+            "fallback_author": getattr(article, "author", "") or "",
+            "article_id": article_id,
+            "token": token,
+            "prefetch": bool(prefetch),
+            "prefetch_token": prefetch_token,
+            "apply": bool(apply),
+        }
+
+    def _reset_fulltext_prefetch(self, articles) -> None:
+        if not self._fulltext_prefetch_enabled():
+            self._clear_fulltext_prefetch_queue()
+            return
+        try:
+            self._fulltext_prefetch_token = int(getattr(self, "_fulltext_prefetch_token", 0)) + 1
+        except Exception:
+            self._fulltext_prefetch_token = 1
+
+        queued = 0
+        token = int(getattr(self, "_fulltext_prefetch_token", 0))
+        try:
+            with self._fulltext_worker_lock:
+                if self._fulltext_worker_queue:
+                    keep = deque([req for req in self._fulltext_worker_queue if not req.get("prefetch")])
+                    self._fulltext_worker_queue = keep
+                else:
+                    self._fulltext_worker_queue = deque()
+                self._fulltext_prefetch_seen = set()
+                for idx, article in enumerate(articles or []):
+                    cache_key, _url, _aid = self._fulltext_cache_key_for_article(article, idx)
+                    cached = self._fulltext_cache.get(cache_key)
+                    if cached:
+                        try:
+                            looks_like_media = bool(getattr(article_extractor, "_looks_like_media_url", lambda _u: False)(_url))
+                        except Exception:
+                            looks_like_media = False
+                        if self._cached_fulltext_is_authoritative(cache_key, _url, looks_like_media, cached):
+                            continue
+                    if cache_key in self._fulltext_prefetch_seen:
+                        continue
+                    self._fulltext_prefetch_seen.add(cache_key)
+                    req = self._build_fulltext_request(
+                        article,
+                        idx,
+                        prefetch=True,
+                        prefetch_token=token,
+                        apply=False,
+                    )
+                    self._fulltext_worker_queue.append(req)
+                    queued += 1
+                if queued:
+                    self._fulltext_worker_event.set()
+                else:
+                    try:
+                        self._fulltext_worker_event.clear()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _queue_fulltext_prefetch(self, articles) -> None:
+        if not self._fulltext_prefetch_enabled():
+            return
+        if not articles:
+            return
+        token = int(getattr(self, "_fulltext_prefetch_token", 0))
+        queued = 0
+        try:
+            with self._fulltext_worker_lock:
+                for idx, article in enumerate(articles or []):
+                    cache_key, _url, _aid = self._fulltext_cache_key_for_article(article, idx)
+                    cached = self._fulltext_cache.get(cache_key)
+                    if cached:
+                        try:
+                            looks_like_media = bool(getattr(article_extractor, "_looks_like_media_url", lambda _u: False)(_url))
+                        except Exception:
+                            looks_like_media = False
+                        if self._cached_fulltext_is_authoritative(cache_key, _url, looks_like_media, cached):
+                            continue
+                    if cache_key in self._fulltext_prefetch_seen:
+                        continue
+                    self._fulltext_prefetch_seen.add(cache_key)
+                    req = self._build_fulltext_request(
+                        article,
+                        idx,
+                        prefetch=True,
+                        prefetch_token=token,
+                        apply=False,
+                    )
+                    self._fulltext_worker_queue.append(req)
+                    queued += 1
+                if queued:
+                    self._fulltext_worker_event.set()
+        except Exception:
+            pass
+
     def _schedule_fulltext_load_for_index(self, idx: int, force: bool = False):
         if idx is None or idx < 0 or idx >= len(self.current_articles):
             return
@@ -2451,6 +2671,13 @@ class MainFrame(wx.Frame):
         cache_key, url, _article_id = self._fulltext_cache_key_for_article(article, idx)
 
         cached = self._fulltext_cache.get(cache_key)
+        if cached:
+            try:
+                looks_like_media = bool(getattr(article_extractor, "_looks_like_media_url", lambda _u: False)(url))
+            except Exception:
+                looks_like_media = False
+            if not self._cached_fulltext_is_authoritative(cache_key, url, looks_like_media, cached):
+                cached = None
         if cached:
             try:
                 self._fulltext_loading_url = None
@@ -2496,6 +2723,13 @@ class MainFrame(wx.Frame):
         cached = self._fulltext_cache.get(cache_key)
         if cached:
             try:
+                looks_like_media = bool(getattr(article_extractor, "_looks_like_media_url", lambda _u: False)(url))
+            except Exception:
+                looks_like_media = False
+            if not self._cached_fulltext_is_authoritative(cache_key, url, looks_like_media, cached):
+                cached = None
+        if cached:
+            try:
                 self._fulltext_loading_url = None
                 self.content_ctrl.SetValue(cached)
                 self.content_ctrl.SetInsertionPoint(0)
@@ -2511,24 +2745,31 @@ class MainFrame(wx.Frame):
         fallback_html = getattr(article, "content", "") or ""
         fallback_title = getattr(article, "title", "") or ""
         fallback_author = getattr(article, "author", "") or ""
+        req = self._build_fulltext_request(
+            article,
+            idx,
+            token=token_snapshot,
+            prefetch=False,
+            prefetch_token=None,
+            apply=True,
+        )
+        # Preserve exact cache key computed above.
+        req["cache_key"] = cache_key
+        req["url"] = url
+        req["article_id"] = _article_id
+        req["fallback_html"] = fallback_html
+        req["fallback_title"] = fallback_title
+        req["fallback_author"] = fallback_author
+        self._fulltext_submit_request(req, priority=True)
 
-        req = {
-            "idx": idx,
-            "cache_key": cache_key,
-            "url": url,
-            "fallback_html": fallback_html,
-            "fallback_title": fallback_title,
-            "fallback_author": fallback_author,
-            "article_id": _article_id,
-            "token": token_snapshot,
-        }
-        self._fulltext_submit_request(req)
-
-    def _fulltext_submit_request(self, req: dict):
+    def _fulltext_submit_request(self, req: dict, priority: bool = False):
         try:
             with self._fulltext_worker_lock:
-                self._fulltext_worker_request = req
-            self._fulltext_worker_event.set()
+                if priority:
+                    self._fulltext_worker_queue.appendleft(req)
+                else:
+                    self._fulltext_worker_queue.append(req)
+                self._fulltext_worker_event.set()
         except Exception:
             pass
 
@@ -2556,9 +2797,10 @@ class MainFrame(wx.Frame):
             req = None
             try:
                 with self._fulltext_worker_lock:
-                    req = self._fulltext_worker_request
-                    self._fulltext_worker_request = None
-                    self._fulltext_worker_event.clear()
+                    if self._fulltext_worker_queue:
+                        req = self._fulltext_worker_queue.popleft()
+                    if not self._fulltext_worker_queue:
+                        self._fulltext_worker_event.clear()
             except Exception:
                 req = None
                 try:
@@ -2569,34 +2811,56 @@ class MainFrame(wx.Frame):
             if not req:
                 continue
 
-            token_snapshot = int(req.get("token", -1))
+            token_snapshot = req.get("token", None)
+            try:
+                token_snapshot = int(token_snapshot) if token_snapshot is not None else None
+            except Exception:
+                token_snapshot = None
+            is_prefetch = bool(req.get("prefetch", False))
+            prefetch_token = req.get("prefetch_token", None)
+            try:
+                prefetch_token = int(prefetch_token) if prefetch_token is not None else None
+            except Exception:
+                prefetch_token = None
+            apply_to_ui = bool(req.get("apply", True))
             cache_key = (req.get("cache_key") or "").strip()
             url = (req.get("url") or "").strip()
             fallback_html = req.get("fallback_html") or ""
             fallback_title = req.get("fallback_title") or ""
             fallback_author = req.get("fallback_author") or ""
 
-            # If selection already changed before we start, skip the expensive work.
-            if token_snapshot != int(getattr(self, "_fulltext_token", 0)):
-                continue
+            if is_prefetch:
+                if not self._fulltext_prefetch_enabled():
+                    continue
+                if prefetch_token is not None and prefetch_token != int(getattr(self, "_fulltext_prefetch_token", 0)):
+                    continue
+                if cache_key and cache_key in self._fulltext_cache:
+                    cached = self._fulltext_cache.get(cache_key)
+                    try:
+                        looks_like_media = bool(getattr(article_extractor, "_looks_like_media_url", lambda _u: False)(url))
+                    except Exception:
+                        looks_like_media = False
+                    if cached and self._cached_fulltext_is_authoritative(cache_key, url, looks_like_media, cached):
+                        continue
+            else:
+                # If selection already changed before we start, skip the expensive work.
+                if token_snapshot is not None and token_snapshot != int(getattr(self, "_fulltext_token", 0)):
+                    continue
 
             err = None
             rendered = None
-
-            # Prefer client-side extraction first (web fetch).
+            cacheable = True
+            looks_like_media = False
             try:
-                rendered = article_extractor.render_full_article(
-                    url,
-                    fallback_html=fallback_html,
-                    fallback_title=fallback_title,
-                    fallback_author=fallback_author,
-                )
-            except Exception as e:
-                err = str(e) or "Unknown error"
-                rendered = None
+                looks_like_media = bool(getattr(article_extractor, "_looks_like_media_url", lambda _u: False)(url))
+            except Exception:
+                looks_like_media = False
 
-            # If client extraction failed, ask provider (e.g., Miniflux fetch-content).
-            if not rendered:
+            is_web_eligible = bool(url) and not looks_like_media
+            render_source = None
+
+            if is_prefetch:
+                # Background prefetch uses provider-side fetch only (avoids hammering sites).
                 provider_html = None
                 try:
                     provider_html = self._provider_fetch_full_content(req.get("article_id"), url)
@@ -2609,11 +2873,53 @@ class MainFrame(wx.Frame):
                             fallback_html=provider_html,
                             fallback_title=fallback_title,
                             fallback_author=fallback_author,
+                            prefer_feed_content=False,
                         )
+                        render_source = "provider"
                     except Exception as e:
                         if not err: err = str(e) or "Unknown error"
+                        rendered = None
+            else:
+                # Try web extraction first (no fallback HTML so we can tell if it really worked).
+                if not rendered and is_web_eligible:
+                    try:
+                        rendered = article_extractor.render_full_article(
+                            url,
+                            fallback_html="",
+                            fallback_title=fallback_title,
+                            fallback_author=fallback_author,
+                            prefer_feed_content=False,
+                        )
+                        render_source = "web"
+                    except Exception as e:
+                        err = str(e) or "Unknown error"
+                        rendered = None
+
+                # If web extraction failed, try provider-side fetch.
+                if not rendered:
+                    provider_html = None
+                    try:
+                        provider_html = self._provider_fetch_full_content(req.get("article_id"), url)
+                    except Exception as e:
+                        if not err: err = str(e) or "Unknown error"
+                    if provider_html:
+                        try:
+                            rendered = article_extractor.render_full_article(
+                                "",
+                                fallback_html=provider_html,
+                                fallback_title=fallback_title,
+                                fallback_author=fallback_author,
+                                prefer_feed_content=False,
+                            )
+                            render_source = "provider"
+                        except Exception as e:
+                            if not err: err = str(e) or "Unknown error"
+                            rendered = None
 
             if not rendered:
+                if is_prefetch and is_web_eligible:
+                    # Don't cache feed-content fallback during prefetch; let on-demand loads retry.
+                    continue
                 # Fallback: show feed content (cleaned) rather than a blank failure message.
                 note_lines = []
                 if not url:
@@ -2644,38 +2950,70 @@ class MainFrame(wx.Frame):
                     except Exception:
                         final_text += "No text available.\n"
                 rendered = final_text
+                render_source = "fallback"
 
-            def apply():
-                # Only apply if selection still matches.
-                if token_snapshot != int(getattr(self, "_fulltext_token", 0)):
-                    return
-                try:
-                    idx_now = self.list_ctrl.GetFirstSelected()
-                except Exception:
-                    idx_now = -1
-                if idx_now is None or idx_now < 0 or idx_now >= len(self.current_articles):
-                    return
-                article_now = self.current_articles[idx_now]
-                cur_key, _cur_url, _aid = self._fulltext_cache_key_for_article(article_now, idx_now)
-                if cur_key != cache_key:
-                    return
+            if is_web_eligible:
+                cacheable = render_source in ("web", "provider")
+            cache_source = render_source or ("feed" if not is_web_eligible else "unknown")
+
+            if apply_to_ui:
+                def apply():
+                    # Only apply if selection still matches.
+                    if token_snapshot is not None and token_snapshot != int(getattr(self, "_fulltext_token", 0)):
+                        return
+                    try:
+                        idx_now = self.list_ctrl.GetFirstSelected()
+                    except Exception:
+                        idx_now = -1
+                    if idx_now is None or idx_now < 0 or idx_now >= len(self.current_articles):
+                        return
+                    article_now = self.current_articles[idx_now]
+                    cur_key, _cur_url, _aid = self._fulltext_cache_key_for_article(article_now, idx_now)
+                    if cur_key != cache_key:
+                        return
+
+                    if cacheable:
+                        try:
+                            self._fulltext_cache[cache_key] = rendered
+                            self._fulltext_cache_source[cache_key] = cache_source
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self._fulltext_cache.pop(cache_key, None)
+                            self._fulltext_cache_source.pop(cache_key, None)
+                        except Exception:
+                            pass
+
+                    try:
+                        self._fulltext_loading_url = None
+                        self.content_ctrl.SetValue(rendered)
+                        self.content_ctrl.SetInsertionPoint(0)
+                    except Exception:
+                        pass
 
                 try:
-                    self._fulltext_cache[cache_key] = rendered
+                    wx.CallAfter(apply)
                 except Exception:
                     pass
+            else:
+                def cache_only():
+                    if not self._fulltext_prefetch_enabled():
+                        return
+                    if prefetch_token is not None and prefetch_token != int(getattr(self, "_fulltext_prefetch_token", 0)):
+                        return
+                    if not cacheable:
+                        return
+                    try:
+                        self._fulltext_cache[cache_key] = rendered
+                        self._fulltext_cache_source[cache_key] = cache_source
+                    except Exception:
+                        pass
 
                 try:
-                    self._fulltext_loading_url = None
-                    self.content_ctrl.SetValue(rendered)
-                    self.content_ctrl.SetInsertionPoint(0)
+                    wx.CallAfter(cache_only)
                 except Exception:
                     pass
-
-            try:
-                wx.CallAfter(apply)
-            except Exception:
-                pass
 
 
     def _schedule_chapters_load(self, article):
@@ -2812,6 +3150,159 @@ class MainFrame(wx.Frame):
             threading.Thread(target=self.provider.mark_unread, args=(article.id,), daemon=True).start()
             article.is_read = False
             self.list_ctrl.SetItem(idx, 4, "Unread")
+
+    def on_mark_all_read(self, event=None):
+        feed_id = getattr(self, "current_feed_id", None)
+        if not feed_id:
+            return
+        try:
+            prompt = "Mark all items as read?"
+            if wx.MessageBox(prompt, "Mark All as Read", wx.YES_NO | wx.ICON_QUESTION) != wx.YES:
+                return
+        except Exception:
+            pass
+        threading.Thread(target=self._mark_all_read_thread, args=(feed_id,), daemon=True).start()
+
+    def _mark_all_read_thread(self, feed_id: str):
+        ok = False
+        err = ""
+        unread_ids: list[str] = []
+        used_direct = False
+        try:
+            provider_mark_all = getattr(self.provider, "mark_all_read", None)
+            if callable(provider_mark_all) and self._should_mark_all_view(feed_id):
+                try:
+                    ok = bool(provider_mark_all(feed_id))
+                except Exception:
+                    ok = False
+                if ok:
+                    used_direct = True
+                    unread_ids = self._collect_unread_ids_current_view(feed_id)
+            if not ok:
+                unread_ids = self._collect_unread_ids(feed_id)
+                if not unread_ids:
+                    ok = True
+                else:
+                    ok = bool(self.provider.mark_read_batch(unread_ids))
+        except Exception as e:
+            err = str(e) or "Unknown error"
+        wx.CallAfter(self._post_mark_all_read, feed_id, ok, unread_ids, err, used_direct)
+
+    def _is_global_mark_all_view(self, feed_id: str) -> bool:
+        if not feed_id:
+            return False
+        if feed_id == "all":
+            return True
+        if feed_id.startswith("unread:") and feed_id[7:] == "all":
+            return True
+        return False
+
+    def _should_mark_all_view(self, feed_id: str) -> bool:
+        if not feed_id:
+            return False
+        if feed_id.startswith(("favorites:", "fav:", "starred:")):
+            return False
+        if feed_id.startswith("read:"):
+            return False
+        return True
+
+    def _collect_unread_ids_current_view(self, feed_id: str) -> list[str]:
+        ids: list[str] = []
+        seen: set[str] = set()
+        # Always include currently loaded items for this view so the UI
+        # list can be fully marked even if a provider doesn't page all history.
+        try:
+            if feed_id == getattr(self, "current_feed_id", None):
+                for article in (self.current_articles or []):
+                    aid = getattr(article, "id", None)
+                    if not aid or aid in seen:
+                        continue
+                    seen.add(aid)
+                    if not getattr(article, "is_read", False):
+                        ids.append(aid)
+        except Exception:
+            pass
+        return ids
+
+    def _collect_unread_ids(self, feed_id: str) -> list[str]:
+        ids = self._collect_unread_ids_current_view(feed_id)
+        seen: set[str] = set(ids)
+        page_size = 500
+        offset = 0
+        last_offset = -1
+        while True:
+            if offset <= last_offset:
+                break
+            last_offset = offset
+            try:
+                page, total = self.provider.get_articles_page(feed_id, offset=offset, limit=page_size)
+            except Exception:
+                break
+            page = page or []
+            if not page:
+                break
+            for article in page:
+                aid = getattr(article, "id", None)
+                if not aid or aid in seen:
+                    continue
+                seen.add(aid)
+                if not getattr(article, "is_read", False):
+                    ids.append(aid)
+            offset += len(page)
+            if total is not None:
+                try:
+                    if offset >= int(total):
+                        break
+                except Exception:
+                    pass
+            if total is None and len(page) < page_size:
+                break
+        return ids
+
+    def _post_mark_all_read(self, feed_id: str, ok: bool, unread_ids: list[str], err: str = "", used_direct: bool = False):
+        if not ok:
+            msg = "Failed to mark all items as read."
+            if err:
+                msg += f"\n\n{err}"
+            wx.MessageBox(msg, "Error", wx.ICON_ERROR)
+            return
+
+        if not unread_ids and not used_direct:
+            try:
+                wx.MessageBox("All items are already marked as read.", "Mark All as Read", wx.ICON_INFORMATION)
+            except Exception:
+                pass
+            return
+
+        id_set = set(unread_ids or [])
+        try:
+            for i, article in enumerate(self.current_articles or []):
+                if getattr(article, "id", None) in id_set and not article.is_read:
+                    article.is_read = True
+                    if not self._is_load_more_row(i):
+                        try:
+                            self.list_ctrl.SetItem(i, 4, "Read")
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Clear cached views so filtered lists refresh correctly.
+        try:
+            with self._view_cache_lock:
+                self.view_cache.clear()
+        except Exception:
+            pass
+
+        try:
+            self._begin_articles_load(feed_id, full_load=True, clear_list=True)
+        except Exception:
+            pass
+
+        try:
+            self.refresh_feeds()
+        except Exception:
+            pass
 
     def on_article_activate(self, event):
         # Double click or Enter
@@ -3361,6 +3852,10 @@ class MainFrame(wx.Frame):
             old_provider = self.config_manager.get("active_provider", "local")
         except Exception:
             old_provider = "local"
+        try:
+            old_cache_full_text = bool(self.config_manager.get("cache_full_text", False))
+        except Exception:
+            old_cache_full_text = False
 
         dlg = SettingsDialog(self, self.config_manager.config)
         if dlg.ShowModal() == wx.ID_OK:
@@ -3372,6 +3867,19 @@ class MainFrame(wx.Frame):
                     self.config_manager.set(k, v)
             except Exception:
                 pass
+
+            try:
+                new_cache_full_text = bool(self.config_manager.get("cache_full_text", False))
+            except Exception:
+                new_cache_full_text = False
+            if new_cache_full_text != old_cache_full_text:
+                try:
+                    if new_cache_full_text:
+                        self._reset_fulltext_prefetch(getattr(self, "current_articles", []) or [])
+                    else:
+                        self._clear_fulltext_prefetch_queue()
+                except Exception:
+                    pass
 
             # Apply playback speed immediately if the player exists
             if "playback_speed" in data:

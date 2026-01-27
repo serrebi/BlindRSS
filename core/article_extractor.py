@@ -530,6 +530,35 @@ def _download_html(url: str, timeout: int = 20) -> Optional[str]:
     if not url:
         return None
 
+    def _looks_like_cloudflare_block(text: str) -> bool:
+        if not text:
+            return False
+        low = text.lower()
+        if "cloudflare" not in low:
+            return False
+        return ("attention required" in low or "just a moment" in low or "cf-browser-verification" in low)
+
+    def _download_via_jina(target_url: str) -> Optional[str]:
+        try:
+            target = re.sub(r"^https?://", "", (target_url or "").strip())
+            if not target:
+                return None
+            jina_url = f"https://r.jina.ai/http://{target}"
+            headers = {
+                "Accept": "text/plain, text/markdown, */*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            r = utils.safe_requests_get(jina_url, timeout=timeout, headers=headers, allow_redirects=True)
+            if 200 <= r.status_code < 400 and r.text:
+                text = r.text
+                marker = "Markdown Content:"
+                if marker in text:
+                    text = text.split(marker, 1)[1].strip()
+                return text
+        except Exception:
+            return None
+        return None
+
     try:
         headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -539,6 +568,13 @@ def _download_html(url: str, timeout: int = 20) -> Optional[str]:
         if 200 <= r.status_code < 400:
             r.encoding = r.encoding or "utf-8"
             return r.text
+        try:
+            if r is not None and (r.status_code in (403, 503) or _looks_like_cloudflare_block(r.text or "")):
+                alt = _download_via_jina(url)
+                if alt:
+                    return alt
+        except Exception:
+            pass
         return None
     except Exception:
         return None
@@ -852,6 +888,7 @@ def render_full_article(
     fallback_html: str = "",
     fallback_title: str = "",
     fallback_author: str = "",
+    prefer_feed_content: bool = True,
     max_pages: int = 6,
     timeout: int = 20,
 ) -> Optional[str]:
@@ -881,7 +918,7 @@ def render_full_article(
         return None
 
     # Optimization: prefer feed content for known sites or if it looks complete
-    if _should_prefer_feed_content(url, fallback_html):
+    if prefer_feed_content and _should_prefer_feed_content(url, fallback_html):
         art = extract_from_html(fallback_html, url, title=fallback_title, author=fallback_author)
         if art:
             return _render(art)
@@ -890,10 +927,14 @@ def render_full_article(
     try:
         art = extract_full_article(url, max_pages=max_pages, timeout=timeout)
         if art:
+            if fallback_title and not art.title:
+                art.title = fallback_title
+            if fallback_author and not art.author:
+                art.author = fallback_author
             return _render(art)
     except ExtractionError:
-        # will be handled below with fallback
-        raise
+        # fall through to fallback handling below
+        pass
     except Exception as e:
         raise ExtractionError(str(e) or "Unknown extraction error")
 
@@ -908,6 +949,10 @@ def render_full_article(
 def _should_prefer_feed_content(url: str, html: str) -> bool:
     """Return True if we should use the feed content instead of scraping."""
     if not html:
+        return False
+
+    low = html.lower()
+    if "unable to retrieve full-text content" in low:
         return False
     
     # 1. Known sites where scraping is slow/blocked but feed is good

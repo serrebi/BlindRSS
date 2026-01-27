@@ -83,6 +83,10 @@ class RSSProvider(abc.ABC):
             if not self.mark_read(aid):
                 success = False
         return success
+
+    # Optional: providers can override to mark all items in a view (feed/category/all).
+    def mark_all_read(self, feed_id: str) -> bool:
+        return False
     
     @abc.abstractmethod
     def add_feed(self, url: str, category: str = None) -> bool:

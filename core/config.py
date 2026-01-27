@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
     "minimize_to_tray": True,
     "start_maximized": False,
     "max_cached_views": 15,
+    "cache_full_text": False,
     "playback_speed": 1.0,
     "volume": 100,
     "volume_step": 5,

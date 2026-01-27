@@ -159,6 +159,23 @@ class MinifluxProvider(RSSProvider):
             return "/v1/entries", base_params
         return f"/v1/feeds/{feed_id}/entries", base_params
 
+    def _strip_view_prefixes(self, feed_id: str) -> str:
+        real_feed_id = feed_id or ""
+        while True:
+            if real_feed_id.startswith("favorites:"):
+                real_feed_id = real_feed_id[10:]
+            elif real_feed_id.startswith("fav:"):
+                real_feed_id = real_feed_id[4:]
+            elif real_feed_id.startswith("starred:"):
+                real_feed_id = real_feed_id[8:]
+            elif real_feed_id.startswith("unread:"):
+                real_feed_id = real_feed_id[7:]
+            elif real_feed_id.startswith("read:"):
+                real_feed_id = real_feed_id[5:]
+            else:
+                break
+        return real_feed_id
+
     def _entries_to_articles(self, entries: List[Dict[str, Any]]) -> List[Article]:
         if not entries:
             return []
@@ -167,6 +184,8 @@ class MinifluxProvider(RSSProvider):
 
         articles: List[Article] = []
         for entry in entries:
+            if self._is_placeholder_entry(entry):
+                continue
             media_url = None
             media_type = None
 
@@ -200,6 +219,15 @@ class MinifluxProvider(RSSProvider):
                 chapters=chapters
             ))
         return articles
+
+    def _is_placeholder_entry(self, entry: Dict[str, Any]) -> bool:
+        title = (entry.get("title") or "").strip().lower()
+        content = (entry.get("content") or entry.get("summary") or "").strip().lower()
+        if "unable to retrieve full-text content" in title:
+            return True
+        if "unable to retrieve full-text content" in content:
+            return True
+        return False
 
     def refresh(self, progress_cb=None, force: bool = False) -> bool:
         # Kick off a global refresh on the Miniflux server.
@@ -337,46 +365,7 @@ class MinifluxProvider(RSSProvider):
             # This is the guarantee path for complete retrieval.
             entries = self._get_entries_paged(f"/v1/feeds/{real_feed_id}/entries", base_params, limit=200)
 
-        if not entries:
-            return []
-        article_ids = [str(e["id"]) for e in entries]
-        chapters_map = utils.get_chapters_batch(article_ids)
-        
-        articles = []
-        for entry in entries:
-            media_url = None
-            media_type = None
-            
-            enclosures = entry.get("enclosures", [])
-            if enclosures:
-                media_url = enclosures[0].get("url")
-                media_type = enclosures[0].get("mime_type")
-            
-            date = utils.normalize_date(
-                entry.get("published_at") or entry.get("published"),
-                entry.get("title") or "",
-                entry.get("content") or entry.get("summary") or "",
-                entry.get("url") or "",
-            )
-
-            article_id = str(entry["id"])
-            # Use batch result
-            chapters = chapters_map.get(article_id, [])
-
-            articles.append(Article(
-                id=article_id,
-                feed_id=str(entry["feed_id"]),
-                title=entry["title"],
-                url=entry["url"],
-                content=entry.get("content", ""),
-                date=date,
-                author=entry.get("author", ""),
-                is_read=entry.get("status") == "read",
-                media_url=media_url,
-                media_type=media_type,
-                chapters=chapters
-            ))
-        return articles
+        return self._entries_to_articles(entries)
 
     def get_article_chapters(self, article_id: str) -> List[Dict]:
         """
@@ -426,6 +415,13 @@ class MinifluxProvider(RSSProvider):
         elif feed_id.startswith("read:"):
             base_params["status"] = ["read"]
             real_feed_id = feed_id[5:]
+        elif feed_id.startswith("favorites:") or feed_id.startswith("starred:"):
+            base_params["starred"] = "true"
+            real_feed_id = "all"
+            if ":" in feed_id:
+                suffix = feed_id.split(":", 1)[1]
+                if suffix and suffix != "all":
+                    real_feed_id = suffix
 
         endpoint, params = self._resolve_entries_endpoint(real_feed_id, base_params)
         if not endpoint:
@@ -441,12 +437,91 @@ class MinifluxProvider(RSSProvider):
         return self._entries_to_articles(entries), total_int
 
     def mark_read(self, article_id: str) -> bool:
-        self._req("PUT", "/v1/entries", json={"entry_ids": [int(article_id)], "status": "read"})
-        return True
+        return self._set_entries_status([article_id], "read")
 
     def mark_unread(self, article_id: str) -> bool:
-        self._req("PUT", "/v1/entries", json={"entry_ids": [int(article_id)], "status": "unread"})
-        return True
+        return self._set_entries_status([article_id], "unread")
+
+    def mark_read_batch(self, article_ids: List[str]) -> bool:
+        return self._set_entries_status(article_ids, "read")
+
+    def mark_all_read(self, feed_id: str) -> bool:
+        if not self.base_url:
+            return False
+
+        # Avoid broad server-side marks for favorites/starred views.
+        if (feed_id or "").startswith(("favorites:", "fav:", "starred:")):
+            return False
+
+        real_feed_id = self._strip_view_prefixes(feed_id)
+        try:
+            if real_feed_id.startswith("category:"):
+                cat_title = real_feed_id.split(":", 1)[1]
+                cid = self._get_category_id_by_title(cat_title)
+                if cid is None:
+                    return False
+                resp = requests.put(
+                    f"{self.base_url}/v1/categories/{cid}/mark-all-as-read",
+                    headers=self.headers,
+                    timeout=15,
+                )
+                return resp.status_code in (200, 204)
+
+            if real_feed_id == "all":
+                return False
+
+            resp = requests.put(
+                f"{self.base_url}/v1/feeds/{real_feed_id}/mark-all-as-read",
+                headers=self.headers,
+                timeout=15,
+            )
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            log.error(f"Miniflux mark-all-as-read failed for {feed_id}: {e}")
+            return False
+
+    def _set_entries_status(self, entry_ids: List[str], status: str) -> bool:
+        if not entry_ids:
+            return True
+        if not self.base_url:
+            return False
+
+        status = (status or "").strip().lower()
+        if status not in ("read", "unread"):
+            return False
+
+        # Miniflux supports batching via PUT /v1/entries.
+        chunk_size = 200
+        ok = True
+        unique_ids = []
+        seen = set()
+        for eid in entry_ids:
+            if eid is None:
+                continue
+            try:
+                eid = int(str(eid))
+            except Exception:
+                eid = str(eid)
+            if eid in seen:
+                continue
+            seen.add(eid)
+            unique_ids.append(eid)
+
+        for i in range(0, len(unique_ids), chunk_size):
+            chunk = unique_ids[i:i + chunk_size]
+            try:
+                resp = requests.put(
+                    f"{self.base_url}/v1/entries",
+                    headers=self.headers,
+                    json={"entry_ids": chunk, "status": status},
+                    timeout=15,
+                )
+                if resp.status_code not in (200, 204):
+                    ok = False
+            except Exception as e:
+                log.error(f"Miniflux batch status update failed: {e}")
+                ok = False
+        return ok
 
     def supports_favorites(self) -> bool:
         return True
