@@ -167,9 +167,14 @@ class LocalProvider(RSSProvider):
         final_title = feed_title or "Unknown Feed"
 
         headers = {}
-        if not force:
-            if etag: headers['If-None-Match'] = etag
-            if last_modified: headers['If-Modified-Since'] = last_modified
+        use_conditional = (not force) and (not npr_mod.is_npr_url(feed_url))
+        if use_conditional:
+            if etag:
+                headers['If-None-Match'] = etag
+            if last_modified:
+                headers['If-Modified-Since'] = last_modified
+        elif not force and (etag or last_modified):
+            log.debug("Skipping conditional headers for NPR feed %s", feed_url)
 
         host = urlparse(feed_url).hostname or feed_url
         limiter = host_limits[host]
