@@ -287,6 +287,7 @@ def _launch_update_helper(
     staging_root: str,
     temp_root: Optional[str] = None,
     debug_mode: bool = False,
+    show_log: bool = False,
 ) -> Tuple[bool, str]:
     try:
         helper_cwd = None
@@ -325,6 +326,10 @@ def _launch_update_helper(
             ]
             if temp_root:
                 cmd.append(temp_root)
+            elif show_log:
+                cmd.append("")
+            if show_log:
+                cmd.append("show")
             try:
                 subprocess.Popen(
                     cmd,
@@ -366,6 +371,10 @@ def _launch_update_helper(
             ]
             if temp_root:
                 cmd.append(temp_root)
+            elif show_log:
+                cmd.append("")
+            if show_log:
+                cmd.append("show")
             subprocess.Popen(cmd, cwd=helper_cwd)
             
         return True, ""
@@ -518,6 +527,16 @@ def download_and_apply_update(info: UpdateInfo, debug_mode: bool = False) -> Tup
     except Exception:
         helper_run_path = helper_path
 
+    show_log = True
+    try:
+        raw_show = os.environ.get("BLINDRSS_UPDATE_SHOW_WINDOW", "1")
+        if str(raw_show).strip().lower() in ("0", "false", "no", "off"):
+            show_log = False
+    except Exception:
+        show_log = True
+    if debug_mode:
+        show_log = False
+
     ok, msg = _launch_update_helper(
         helper_run_path,
         os.getpid(),
@@ -525,6 +544,7 @@ def download_and_apply_update(info: UpdateInfo, debug_mode: bool = False) -> Tup
         staging_root,
         temp_root=temp_root,
         debug_mode=debug_mode,
+        show_log=show_log,
     )
     if not ok:
         return False, msg

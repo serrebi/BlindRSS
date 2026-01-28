@@ -4,8 +4,11 @@ setlocal enabledelayedexpansion
 rem Always log updater output so failures aren't silent when running hidden.
 for /f %%T in ('powershell -NoProfile -InputFormat None -Command "(Get-Date).ToString(\"yyyyMMddHHmmss\")"') do set "RUNSTAMP=%%T"
 set "LOG_FILE=%TEMP%\BlindRSS_update_!RUNSTAMP!_!RANDOM!.log"
+set "SENTINEL=__BLINDRSS_UPDATE_DONE__"
 call :main %* >> "%LOG_FILE%" 2>&1
-exit /b %ERRORLEVEL%
+set "RC=%ERRORLEVEL%"
+echo %SENTINEL%>>"%LOG_FILE%"
+exit /b %RC%
 
 :main
 echo [BlindRSS Update] Log: "%LOG_FILE%"
@@ -15,6 +18,7 @@ set "INSTALL_DIR=%~2"
 set "STAGING_DIR=%~3"
 set "EXE_NAME=%~4"
 set "TEMP_ROOT=%~5"
+set "SHOW_LOG=%~6"
 
 if "%PID%"=="" goto :usage
 if "%INSTALL_DIR%"=="" goto :usage
@@ -49,6 +53,10 @@ if not exist "%STAGING_DIR%" (
 
 echo [BlindRSS Update] Waiting for process %PID% to exit...
 powershell -NoProfile -InputFormat None -Command "Wait-Process -Id %PID% -ErrorAction SilentlyContinue"
+
+if not "%SHOW_LOG%"=="" if /I not "%SHOW_LOG%"=="0" (
+    call :start_log_window "%LOG_FILE%" "%SENTINEL%"
+)
 
 rem OneDrive Fix: Don't move the root folder. Move CONTENTS.
 rem We back up the current contents to a backup folder, then move new contents in.
@@ -234,6 +242,18 @@ if "%TEMP_ROOT%"=="" goto :schedule_done
 start "" /b powershell -NoProfile -WindowStyle Hidden -Command "param([string]$path,[string]$install) Start-Sleep -Seconds 2; try { if (-not $path) { return }; $full=[IO.Path]::GetFullPath($path); $inst=[IO.Path]::GetFullPath($install); if ($full -ieq $inst) { return }; if ($full -notmatch 'BlindRSS_update_') { return }; if (Test-Path -LiteralPath $full -PathType Container) { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue }; $parent = Split-Path -Parent $full; if ((Split-Path -Leaf $parent) -ieq '_BlindRSS_update_tmp') { if (-not (Get-ChildItem -LiteralPath $parent -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $parent -Recurse -Force -ErrorAction SilentlyContinue } } } catch { }" "%TEMP_ROOT%" "%INSTALL_DIR%" >nul 2>nul
 
 :schedule_done
+endlocal
+exit /b 0
+
+:start_log_window
+setlocal
+set "LOG_FILE=%~1"
+set "SENTINEL=%~2"
+if "%LOG_FILE%"=="" goto :start_done
+
+start "" cmd /c powershell -NoProfile -Command "param([string]$log,[string]$sent) Write-Host 'BlindRSS update in progress...'; if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Wait | ForEach-Object { $_; if ($_ -eq $sent) { break } } } else { Write-Host 'Update log not found.'; Start-Sleep -Seconds 3 }" "%LOG_FILE%" "%SENTINEL%"
+
+:start_done
 endlocal
 exit /b 0
 
