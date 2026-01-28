@@ -97,6 +97,21 @@ class TheOldReaderProvider(RSSProvider):
             return f"user/-/label/{label}"
         return real_feed_id
 
+    def _resolve_item_feed_id(self, item: Dict[str, Any], fallback_feed_id: str | None) -> str:
+        origin = None
+        try:
+            origin = (item.get("origin") or {}).get("streamId")
+        except Exception:
+            origin = None
+        return str(origin or fallback_feed_id or "")
+
+    def _build_item_cache_id(self, item: Dict[str, Any], fallback_feed_id: str | None) -> str | None:
+        article_id = item.get("id")
+        if article_id is None:
+            return None
+        feed_id = self._resolve_item_feed_id(item, fallback_feed_id)
+        return utils.build_cache_id(str(article_id), feed_id, self.get_name())
+
     def _iter_unread_ids(self, stream_id: str):
         if not stream_id:
             return
@@ -241,6 +256,7 @@ class TheOldReaderProvider(RSSProvider):
             chapters_map = utils.get_chapters_batch(article_ids)
             
             articles = []
+            fallback_feed_id = real_feed_id or stream_id or feed_id
             for item in items:
                 content = ""
                 if "summary" in item: content = item["summary"]["content"]
@@ -255,6 +271,8 @@ class TheOldReaderProvider(RSSProvider):
                         media_type = encs[0].get("type")
                 
                 article_id = item["id"]
+                article_feed_id = self._resolve_item_feed_id(item, fallback_feed_id)
+                cache_id = self._build_item_cache_id(item, fallback_feed_id)
                 pub_timestamp = item.get("published")
                 date = "0001-01-01 00:00:00"
                 if pub_timestamp:
@@ -292,7 +310,7 @@ class TheOldReaderProvider(RSSProvider):
 
                 articles.append(Article(
                     id=article_id,
-                    feed_id=item.get("origin", {}).get("streamId", feed_id),
+                    feed_id=article_feed_id,
                     title=item.get("title", "No Title"),
                     url=item.get("alternate", [{}])[0].get("href", ""),
                     content=content,
@@ -302,7 +320,8 @@ class TheOldReaderProvider(RSSProvider):
                     is_favorite=is_fav,
                     media_url=media_url,
                     media_type=media_type,
-                    chapters=chapters
+                    chapters=chapters,
+                    cache_id=cache_id,
                 ))
             log.info(f"TheOldReader: Returning {len(articles)} processed articles.")
             return articles

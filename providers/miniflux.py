@@ -176,7 +176,7 @@ class MinifluxProvider(RSSProvider):
                 break
         return real_feed_id
 
-    def _entries_to_articles(self, entries: List[Dict[str, Any]]) -> List[Article]:
+    def _entries_to_articles(self, entries: List[Dict[str, Any]], fallback_feed_id: str | None = None) -> List[Article]:
         if not entries:
             return []
         article_ids = [str(e.get("id")) for e in entries if e.get("id") is not None]
@@ -202,11 +202,13 @@ class MinifluxProvider(RSSProvider):
             )
 
             article_id = str(entry.get("id"))
+            feed_id = str(entry.get("feed_id") or fallback_feed_id or "")
+            cache_id = utils.build_cache_id(article_id, feed_id, self.get_name())
             chapters = chapters_map.get(article_id, [])
 
             articles.append(Article(
                 id=article_id,
-                feed_id=str(entry.get("feed_id") or ""),
+                feed_id=feed_id,
                 title=entry.get("title") or "Untitled",
                 url=entry.get("url") or "",
                 content=entry.get("content") or entry.get("summary") or "",
@@ -216,7 +218,8 @@ class MinifluxProvider(RSSProvider):
                 is_favorite=entry.get("starred", False),
                 media_url=media_url,
                 media_type=media_type,
-                chapters=chapters
+                chapters=chapters,
+                cache_id=cache_id,
             ))
         return articles
 
@@ -365,7 +368,8 @@ class MinifluxProvider(RSSProvider):
             # This is the guarantee path for complete retrieval.
             entries = self._get_entries_paged(f"/v1/feeds/{real_feed_id}/entries", base_params, limit=200)
 
-        return self._entries_to_articles(entries)
+        fallback_feed_id = self._strip_view_prefixes(feed_id)
+        return self._entries_to_articles(entries, fallback_feed_id=fallback_feed_id)
 
     def get_article_chapters(self, article_id: str) -> List[Dict]:
         """
@@ -434,7 +438,8 @@ class MinifluxProvider(RSSProvider):
         except Exception:
             total_int = None
 
-        return self._entries_to_articles(entries), total_int
+        fallback_feed_id = self._strip_view_prefixes(feed_id)
+        return self._entries_to_articles(entries, fallback_feed_id=fallback_feed_id), total_int
 
     def mark_read(self, article_id: str) -> bool:
         return self._set_entries_status([article_id], "read")

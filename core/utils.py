@@ -77,6 +77,24 @@ def safe_requests_head(url, **kwargs):
     final_headers.update(headers)
     return requests.head(url, headers=final_headers, **kwargs)
 
+
+def build_cache_id(article_id: str | None, feed_id: str | None = None, provider: str | None = None) -> str | None:
+    """Build a stable cache id that scopes articles by provider/feed when needed."""
+    if not article_id:
+        return None
+    parts = []
+    if provider:
+        parts.append(str(provider))
+    if feed_id:
+        parts.append(str(feed_id))
+    prefix = ":".join(parts)
+    aid = str(article_id)
+    if prefix:
+        if aid.startswith(prefix + ":"):
+            return aid
+        return f"{prefix}:{aid}"
+    return aid
+
 # --- Date Parsing ---
 
 
