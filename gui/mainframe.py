@@ -77,6 +77,7 @@ class MainFrame(wx.Frame):
         self._refresh_progress_flush_scheduled = False
 
         self._unread_filter_enabled = False
+        self._is_first_tree_load = True
 
         self.init_ui()
         self.init_menus()
@@ -1734,7 +1735,16 @@ class MainFrame(wx.Frame):
             selection_target = None
             
             # Check if we should restore the last selected feed
-            if not selected_data and self.config_manager.get("remember_last_feed", False):
+            # On first load, always check the setting if enabled
+            # On subsequent loads, only restore if there was no previous selection
+            should_restore_saved = False
+            if self.config_manager.get("remember_last_feed", False):
+                if self._is_first_tree_load:
+                    should_restore_saved = True
+                elif not selected_data:
+                    should_restore_saved = True
+            
+            if should_restore_saved:
                 last_feed = self.config_manager.get("last_selected_feed")
                 if last_feed:
                     # Parse the saved feed_id to create matching selected_data
@@ -1759,6 +1769,9 @@ class MainFrame(wx.Frame):
                         self._unread_filter_enabled = True
                     else:
                         selected_data = {"type": "feed", "id": last_feed}
+            
+            # Mark that we've completed the first tree load
+            self._is_first_tree_load = False
             
             if selected_data and selected_data["type"] == "all":
                 if selected_data.get("id") == "unread:all":
