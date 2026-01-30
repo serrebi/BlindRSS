@@ -76,6 +76,8 @@ class MainFrame(wx.Frame):
         self._refresh_progress_pending = {}
         self._refresh_progress_flush_scheduled = False
 
+        self._unread_filter_enabled = False
+
         self.init_ui()
         self.init_menus()
         self.init_shortcuts()
@@ -858,22 +860,13 @@ class MainFrame(wx.Frame):
             pass
 
         self.stop_event.set()
-        if self.refresh_thread.is_alive():
-            self.refresh_thread.join(timeout=1)
-        # Give critical background workers a brief chance to finish cleanly.
-        critical = []
+        
+        # Force immediate shutdown as requested, ignoring background threads
         try:
-            with self._critical_workers_lock:
-                critical = [t for t in self._critical_workers if t and t.is_alive()]
+            self.Destroy()
         except Exception:
-            log.debug("Failed to snapshot critical worker threads on shutdown", exc_info=True)
-
-        for t in critical:
-            try:
-                t.join(timeout=5)
-            except Exception:
-                log.debug("Failed to join critical worker thread on shutdown", exc_info=True)
-        self.Destroy()
+            pass
+        os._exit(0)
 
     def on_iconize(self, event):
         if event.IsIconized() and self.config_manager.get("minimize_to_tray", True):
@@ -939,9 +932,20 @@ class MainFrame(wx.Frame):
             remove_item = menu.Append(wx.ID_ANY, "Remove Feed")
             self.Bind(wx.EVT_MENU, self.on_remove_feed, remove_item)
             
+        # View options common to all viewable items
+        menu.AppendSeparator()
+        unread_only_item = menu.AppendCheckItem(wx.ID_ANY, "Show Only Unread")
+        unread_only_item.Check(self._unread_filter_enabled)
+        self.Bind(wx.EVT_MENU, self.on_toggle_unread_filter, unread_only_item)
+
         if menu.GetMenuItemCount() > 0:
             self.tree.PopupMenu(menu, menu_pos)
         menu.Destroy()
+
+    def on_toggle_unread_filter(self, event):
+        self._unread_filter_enabled = event.IsChecked()
+        # Force reload of the current view with the new filter setting
+        self._reload_selected_articles()
 
     def on_list_context_menu(self, event):
         pos = event.GetPosition()
@@ -1785,6 +1789,9 @@ class MainFrame(wx.Frame):
         if not feed_id:
             return
 
+        if self._unread_filter_enabled:
+            feed_id = f"unread:{feed_id}"
+
         have_articles = bool(getattr(self, "current_articles", None))
         same_view = (feed_id == getattr(self, "current_feed_id", None))
 
@@ -1806,6 +1813,9 @@ class MainFrame(wx.Frame):
         feed_id = self._get_feed_id_from_tree_item(item)
         if not feed_id:
             return
+        
+        if self._unread_filter_enabled:
+            feed_id = f"unread:{feed_id}"
         
         # If the feed hasn't changed (e.g. during a tree refresh where items are recreated),
         # don't reset the view. The update logic (_reload_selected_articles) handles merging new items.
