@@ -5,13 +5,6 @@ rem Always log updater output so failures aren't silent when running hidden.
 for /f %%T in ('powershell -NoProfile -InputFormat None -Command "(Get-Date).ToString(\"yyyyMMddHHmmss\")"') do set "RUNSTAMP=%%T"
 set "LOG_FILE=%TEMP%\BlindRSS_update_!RUNSTAMP!_!RANDOM!.log"
 set "SENTINEL=__BLINDRSS_UPDATE_DONE__"
-call :main %* >> "%LOG_FILE%" 2>&1
-set "RC=%ERRORLEVEL%"
-echo %SENTINEL%>>"%LOG_FILE%"
-exit /b %RC%
-
-:main
-echo [BlindRSS Update] Log: "%LOG_FILE%"
 
 set "PID=%~1"
 set "INSTALL_DIR=%~2"
@@ -19,6 +12,23 @@ set "STAGING_DIR=%~3"
 set "EXE_NAME=%~4"
 set "TEMP_ROOT=%~5"
 set "SHOW_LOG=%~6"
+
+call :main %* >> "%LOG_FILE%" 2>&1
+set "RC=%ERRORLEVEL%"
+
+if %RC% equ 0 (
+    if "!SHOW_LOG!"=="" (
+        del /f /q "%LOG_FILE%" >nul 2>nul
+    ) else (
+        echo %SENTINEL%>>"%LOG_FILE%"
+    )
+) else (
+    echo %SENTINEL%>>"%LOG_FILE%"
+)
+exit /b %RC%
+
+:main
+echo [BlindRSS Update] Log: "%LOG_FILE%"
 
 if "%PID%"=="" goto :usage
 if "%INSTALL_DIR%"=="" goto :usage
@@ -34,7 +44,7 @@ if not defined BLINDRSS_UPDATE_HELPER_RELOCATED (
         for /f %%T in ('powershell -NoProfile -InputFormat None -Command "(Get-Date).ToString(\"yyyyMMddHHmmss\")"') do set "HSTAMP=%%T"
         set "TMP_HELPER=%TEMP%\BlindRSS_update_helper_!HSTAMP!_!RANDOM!.bat"
         copy /Y "%~f0" "!TMP_HELPER!" >nul 2>nul
-        start "" /b "!TMP_HELPER!" "%PID%" "%INSTALL_DIR%" "%STAGING_DIR%" "%EXE_NAME%" "%TEMP_ROOT%"
+        start "" /b "!TMP_HELPER!" "%PID%" "%INSTALL_DIR%" "%STAGING_DIR%" "%EXE_NAME%" "%TEMP_ROOT%" "%SHOW_LOG%"
         exit /b 0
     )
 )

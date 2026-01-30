@@ -527,13 +527,13 @@ def download_and_apply_update(info: UpdateInfo, debug_mode: bool = False) -> Tup
     except Exception:
         helper_run_path = helper_path
 
-    show_log = True
+    show_log = False
     try:
-        raw_show = os.environ.get("BLINDRSS_UPDATE_SHOW_WINDOW", "1")
-        if str(raw_show).strip().lower() in ("0", "false", "no", "off"):
-            show_log = False
+        raw_show = os.environ.get("BLINDRSS_UPDATE_SHOW_WINDOW", "0")
+        if str(raw_show).strip().lower() in ("1", "true", "yes", "on"):
+            show_log = True
     except Exception:
-        show_log = True
+        show_log = False
     if debug_mode:
         show_log = False
 
