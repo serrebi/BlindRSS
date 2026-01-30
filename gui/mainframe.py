@@ -1660,6 +1660,45 @@ class MainFrame(wx.Frame):
             selected_data = hint
             self._selection_hint = None
 
+        # Check if we should restore the last selected feed
+        # On first load, always check the setting if enabled
+        # On subsequent loads, only restore if there was no previous selection
+        should_restore_saved = False
+        if self.config_manager.get("remember_last_feed", False):
+            if self._is_first_tree_load:
+                should_restore_saved = True
+            elif not selected_data:
+                should_restore_saved = True
+        
+        if should_restore_saved:
+            last_feed = self.config_manager.get("last_selected_feed")
+            if last_feed:
+                # Parse the saved feed_id to create matching selected_data
+                if last_feed == "all":
+                    selected_data = {"type": "all", "id": "all"}
+                elif last_feed == "unread:all":
+                    selected_data = {"type": "all", "id": "unread:all"}
+                elif last_feed == "read:all":
+                    selected_data = {"type": "all", "id": "read:all"}
+                elif last_feed == "favorites:all":
+                    selected_data = {"type": "all", "id": "favorites:all"}
+                elif last_feed.startswith("unread:category:"):
+                    cat_name = last_feed[16:]  # Remove "unread:category:" prefix
+                    selected_data = {"type": "category", "id": cat_name}
+                    self._unread_filter_enabled = True
+                elif last_feed.startswith("category:"):
+                    cat_name = last_feed[9:]  # Remove "category:" prefix
+                    selected_data = {"type": "category", "id": cat_name}
+                elif last_feed.startswith("unread:"):
+                    feed_id = last_feed[7:]  # Remove "unread:" prefix
+                    selected_data = {"type": "feed", "id": feed_id}
+                    self._unread_filter_enabled = True
+                else:
+                    selected_data = {"type": "feed", "id": last_feed}
+        
+        # Mark that we've completed the first tree load
+        self._is_first_tree_load = False
+
         frozen = False
         self._updating_tree = True
         try:
@@ -1733,45 +1772,6 @@ class MainFrame(wx.Frame):
             # Restore selection (default to All Feeds on first load so the list populates)
             # If "remember last feed" is enabled and this is the first load, use the saved feed
             selection_target = None
-            
-            # Check if we should restore the last selected feed
-            # On first load, always check the setting if enabled
-            # On subsequent loads, only restore if there was no previous selection
-            should_restore_saved = False
-            if self.config_manager.get("remember_last_feed", False):
-                if self._is_first_tree_load:
-                    should_restore_saved = True
-                elif not selected_data:
-                    should_restore_saved = True
-            
-            if should_restore_saved:
-                last_feed = self.config_manager.get("last_selected_feed")
-                if last_feed:
-                    # Parse the saved feed_id to create matching selected_data
-                    if last_feed == "all":
-                        selected_data = {"type": "all", "id": "all"}
-                    elif last_feed == "unread:all":
-                        selected_data = {"type": "all", "id": "unread:all"}
-                    elif last_feed == "read:all":
-                        selected_data = {"type": "all", "id": "read:all"}
-                    elif last_feed == "favorites:all":
-                        selected_data = {"type": "all", "id": "favorites:all"}
-                    elif last_feed.startswith("unread:category:"):
-                        cat_name = last_feed[16:]  # Remove "unread:category:" prefix
-                        selected_data = {"type": "category", "id": cat_name}
-                        self._unread_filter_enabled = True
-                    elif last_feed.startswith("category:"):
-                        cat_name = last_feed[9:]  # Remove "category:" prefix
-                        selected_data = {"type": "category", "id": cat_name}
-                    elif last_feed.startswith("unread:"):
-                        feed_id = last_feed[7:]  # Remove "unread:" prefix
-                        selected_data = {"type": "feed", "id": feed_id}
-                        self._unread_filter_enabled = True
-                    else:
-                        selected_data = {"type": "feed", "id": last_feed}
-            
-            # Mark that we've completed the first tree load
-            self._is_first_tree_load = False
             
             if selected_data and selected_data["type"] == "all":
                 if selected_data.get("id") == "unread:all":
