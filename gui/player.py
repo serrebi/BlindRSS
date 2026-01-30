@@ -1655,10 +1655,10 @@ class PlayerFrame(wx.Frame):
                 except Exception:
                     remote_rate = 8000
                 window_ms = int(self.config_manager.get("silence_skip_window_ms", 30) or 30)
-                min_ms = int(self.config_manager.get("silence_skip_min_ms", 300) or 300)  # 300ms minimum for good responsiveness
+                min_ms = int(self.config_manager.get("silence_skip_min_ms", 800) or 800)  # 800ms minimum to avoid speech pauses
                 threshold_db = float(self.config_manager.get("silence_skip_threshold_db", -50.0) or -50.0)  # More lenient: -50 dB instead of -42 dB
-                pad_ms = int(self.config_manager.get("silence_skip_padding_ms", 200) or 200)  # Increased padding from 120ms to 200ms
-                merge_gap = int(self.config_manager.get("silence_skip_merge_gap_ms", 300) or 300)  # Increased from 200ms to 300ms
+                pad_ms = int(self.config_manager.get("silence_skip_padding_ms", 300) or 300)  # Increased padding from 200ms to 300ms for safety
+                merge_gap = int(self.config_manager.get("silence_skip_merge_gap_ms", 200) or 200)  # Reduced from 300ms to 200ms to avoid over-merging
                 vad_aggr = int(self.config_manager.get("silence_vad_aggressiveness", 1) or 1)  # Reduced from 2 to 1 (less aggressive)
                 vad_frame_ms = int(self.config_manager.get("silence_vad_frame_ms", 30) or 30)
                 try:
@@ -1672,10 +1672,10 @@ class PlayerFrame(wx.Frame):
                         vad_aggr = 0  # Least aggressive for remote
                     if float(threshold_db) > -52.0:
                         threshold_db = -52.0  # Even more lenient for remote
-                    if int(min_ms) < 500:
-                        min_ms = 500  # Slightly longer minimum for remote (was 1000ms)
-                    if int(merge_gap) < 300:
-                        merge_gap = 300  # More generous merge gap for remote
+                    if int(min_ms) < 1200:
+                        min_ms = 1200  # Much longer minimum for remote to avoid false positives
+                    if int(merge_gap) > 200:
+                        merge_gap = 200  # Keep regions separate for remote to avoid over-merging
                 sample_rate = int(remote_rate) if is_remote else int(base_rate)
                 try:
                     threads = int(self.config_manager.get("silence_scan_threads", 1 if is_remote else 2))
@@ -1924,13 +1924,13 @@ class PlayerFrame(wx.Frame):
 
         # 2. Cushion past silence (configurable; keep remote conservative).
         try:
-            resume_backoff = int(self.config_manager.get("silence_skip_resume_backoff_ms", 800) or 800)
+            resume_backoff = int(self.config_manager.get("silence_skip_resume_backoff_ms", 1000) or 1000)
         except Exception:
-            resume_backoff = 800
+            resume_backoff = 1000
         if resume_backoff < 0:
             resume_backoff = 0
-        if is_remote and resume_backoff > 800:
-            resume_backoff = 800
+        if is_remote and resume_backoff > 1000:
+            resume_backoff = 1000
         try:
             retrigger_backoff = int(self.config_manager.get("silence_skip_retrigger_backoff_ms", 1400) or 1400)
         except Exception:
