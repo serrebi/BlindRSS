@@ -1193,6 +1193,13 @@ class PlayerFrame(wx.Frame):
                 self.player.audio_set_volume(int(getattr(self, 'volume', 100)))
             except Exception:
                 pass
+            
+            # Sync the volume slider with VLC's actual volume to prevent jumps on first adjustment
+            try:
+                wx.CallLater(500, self._sync_volume_from_vlc)
+            except Exception:
+                pass
+            
             self.is_playing = True
             self._set_play_button_label(True)
 
@@ -1648,11 +1655,11 @@ class PlayerFrame(wx.Frame):
                 except Exception:
                     remote_rate = 8000
                 window_ms = int(self.config_manager.get("silence_skip_window_ms", 30) or 30)
-                min_ms = int(self.config_manager.get("silence_skip_min_ms", 600) or 600)
-                threshold_db = float(self.config_manager.get("silence_skip_threshold_db", -42.0) or -42.0)
-                pad_ms = int(self.config_manager.get("silence_skip_padding_ms", 120) or 120)
-                merge_gap = int(self.config_manager.get("silence_skip_merge_gap_ms", 200) or 200)
-                vad_aggr = int(self.config_manager.get("silence_vad_aggressiveness", 2) or 2)
+                min_ms = int(self.config_manager.get("silence_skip_min_ms", 300) or 300)  # 300ms minimum for good responsiveness
+                threshold_db = float(self.config_manager.get("silence_skip_threshold_db", -50.0) or -50.0)  # More lenient: -50 dB instead of -42 dB
+                pad_ms = int(self.config_manager.get("silence_skip_padding_ms", 200) or 200)  # Increased padding from 120ms to 200ms
+                merge_gap = int(self.config_manager.get("silence_skip_merge_gap_ms", 300) or 300)  # Increased from 200ms to 300ms
+                vad_aggr = int(self.config_manager.get("silence_vad_aggressiveness", 1) or 1)  # Reduced from 2 to 1 (less aggressive)
                 vad_frame_ms = int(self.config_manager.get("silence_vad_frame_ms", 30) or 30)
                 try:
                     base_url = getattr(self, "current_url", "") or ""
@@ -1660,14 +1667,15 @@ class PlayerFrame(wx.Frame):
                     base_url = ""
                 is_remote = base_url.startswith("http") and not ("127.0.0.1" in base_url or "localhost" in base_url)
                 if is_remote:
-                    if int(vad_aggr) > 1:
-                        vad_aggr = 1
-                    if float(threshold_db) > -42.0:
-                        threshold_db = -42.0
-                    if int(min_ms) < 900:
-                        min_ms = 900
-                    if int(merge_gap) > 180:
-                        merge_gap = 180
+                    # For remote streams, be even more conservative to avoid network-induced false positives
+                    if int(vad_aggr) > 0:
+                        vad_aggr = 0  # Least aggressive for remote
+                    if float(threshold_db) > -52.0:
+                        threshold_db = -52.0  # Even more lenient for remote
+                    if int(min_ms) < 500:
+                        min_ms = 500  # Slightly longer minimum for remote (was 1000ms)
+                    if int(merge_gap) < 300:
+                        merge_gap = 300  # More generous merge gap for remote
                 sample_rate = int(remote_rate) if is_remote else int(base_rate)
                 try:
                     threads = int(self.config_manager.get("silence_scan_threads", 1 if is_remote else 2))
@@ -3423,6 +3431,19 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pass
 
+    def _sync_volume_from_vlc(self) -> None:
+        """Sync the volume slider with VLC's actual volume to prevent jumps on first adjustment."""
+        if self.is_casting:
+            return
+        try:
+            vlc_volume = self.player.audio_get_volume()
+            if vlc_volume >= 0:  # -1 means error
+                # Update our internal state and UI without persisting (already persisted)
+                self.volume = int(vlc_volume)
+                self._update_volume_ui(int(vlc_volume))
+        except Exception:
+            pass
+
     def adjust_volume(self, delta_percent: int) -> None:
         cur = int(getattr(self, "volume", 100))
         self.set_volume_percent(cur + int(delta_percent), persist=True)
@@ -4026,6 +4047,13 @@ class PlayerFrame(wx.Frame):
                     self.player.audio_set_volume(int(getattr(self, "volume", 100)))
                 except Exception:
                     pass
+                
+                # Sync the volume slider with VLC's actual volume to prevent jumps on first adjustment
+                try:
+                    wx.CallLater(500, self._sync_volume_from_vlc)
+                except Exception:
+                    pass
+                
                 self._set_play_button_label(True)
                 self._set_status("Playing")
                 if not self.timer.IsRunning():

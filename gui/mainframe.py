@@ -791,8 +791,43 @@ class MainFrame(wx.Frame):
             print(f"Single feed refresh error: {e}")
             self._play_sound("sound_refresh_error")
 
+    def _perform_retention_cleanup(self):
+        """Perform retention cleanup based on config settings."""
+        try:
+            from core.db import cleanup_old_articles
+            retention_str = self.config_manager.get("article_retention", "Unlimited")
+            days = None
+            if retention_str == "1 day": days = 1
+            elif retention_str == "2 days": days = 2
+            elif retention_str == "3 days": days = 3
+            elif retention_str == "1 week": days = 7
+            elif retention_str == "2 weeks": days = 14
+            elif retention_str == "3 weeks": days = 21
+            elif retention_str == "1 month": days = 30
+            elif retention_str == "2 months": days = 60
+            elif retention_str == "3 months": days = 90
+            elif retention_str == "6 months": days = 180
+            elif retention_str == "1 year": days = 365
+            elif retention_str == "2 years": days = 730
+            elif retention_str == "5 years": days = 1825
+            
+            if days is not None:
+                cleanup_old_articles(days)
+        except Exception as e:
+            log.error(f"Retention cleanup failed: {e}")
+
     def _run_refresh(self, block: bool, force: bool = False) -> bool:
-        """Run provider.refresh with optional blocking guard to avoid overlap."""
+        """Run provider.refresh with optional blocking guard to avoid overlap.
+        
+        Performs retention cleanup BEFORE the refresh to avoid the following bug:
+        1. User marks all as read
+        2. Cleanup deletes those read articles
+        3. RSS refresh re-inserts them as unread (because they were deleted)
+        
+        By running cleanup here (before RSS fetch), we ensure that only articles
+        that existed BEFORE the refresh can be marked as read, and they won't be
+        resurrected as unread.
+        """
         acquired = False
         try:
             acquired = self._refresh_guard.acquire(blocking=block)
@@ -801,6 +836,9 @@ class MainFrame(wx.Frame):
         if not acquired:
             return False
         try:
+            # Perform retention cleanup before refresh to avoid resurrecting old articles
+            self._perform_retention_cleanup()
+            
             unread_snapshot = self._capture_unread_snapshot()
             new_items_total = 0
             seen_ids = set()
@@ -1518,30 +1556,8 @@ class MainFrame(wx.Frame):
 
     def _refresh_feeds_worker(self):
         try:
-            # Perform retention cleanup first
-            try:
-                from core.db import cleanup_old_articles
-                retention_str = self.config_manager.get("article_retention", "Unlimited")
-                days = None
-                if retention_str == "1 day": days = 1
-                elif retention_str == "2 days": days = 2
-                elif retention_str == "3 days": days = 3
-                elif retention_str == "1 week": days = 7
-                elif retention_str == "2 weeks": days = 14
-                elif retention_str == "3 weeks": days = 21
-                elif retention_str == "1 month": days = 30
-                elif retention_str == "2 months": days = 60
-                elif retention_str == "3 months": days = 90
-                elif retention_str == "6 months": days = 180
-                elif retention_str == "1 year": days = 365
-                elif retention_str == "2 years": days = 730
-                elif retention_str == "5 years": days = 1825
-                
-                if days is not None:
-                    cleanup_old_articles(days)
-            except Exception as e:
-                log.error(f"Retention cleanup failed: {e}")
-
+            # Retention cleanup moved to _manual_refresh_thread to prevent
+            # deletion of articles that were just marked as read.
             feeds = self.provider.get_feeds()
             all_cats = self.provider.get_categories()
             wx.CallAfter(self._update_tree, feeds, all_cats)
@@ -1714,7 +1730,36 @@ class MainFrame(wx.Frame):
             self.tree.ExpandAll()
 
             # Restore selection (default to All Feeds on first load so the list populates)
+            # If "remember last feed" is enabled and this is the first load, use the saved feed
             selection_target = None
+            
+            # Check if we should restore the last selected feed
+            if not selected_data and self.config_manager.get("remember_last_feed", False):
+                last_feed = self.config_manager.get("last_selected_feed")
+                if last_feed:
+                    # Parse the saved feed_id to create matching selected_data
+                    if last_feed == "all":
+                        selected_data = {"type": "all", "id": "all"}
+                    elif last_feed == "unread:all":
+                        selected_data = {"type": "all", "id": "unread:all"}
+                    elif last_feed == "read:all":
+                        selected_data = {"type": "all", "id": "read:all"}
+                    elif last_feed == "favorites:all":
+                        selected_data = {"type": "all", "id": "favorites:all"}
+                    elif last_feed.startswith("unread:category:"):
+                        cat_name = last_feed[16:]  # Remove "unread:category:" prefix
+                        selected_data = {"type": "category", "id": cat_name}
+                        self._unread_filter_enabled = True
+                    elif last_feed.startswith("category:"):
+                        cat_name = last_feed[9:]  # Remove "category:" prefix
+                        selected_data = {"type": "category", "id": cat_name}
+                    elif last_feed.startswith("unread:"):
+                        feed_id = last_feed[7:]  # Remove "unread:" prefix
+                        selected_data = {"type": "feed", "id": feed_id}
+                        self._unread_filter_enabled = True
+                    else:
+                        selected_data = {"type": "feed", "id": last_feed}
+            
             if selected_data and selected_data["type"] == "all":
                 if selected_data.get("id") == "unread:all":
                     selection_target = self.unread_node
@@ -1821,6 +1866,13 @@ class MainFrame(wx.Frame):
         # don't reset the view. The update logic (_reload_selected_articles) handles merging new items.
         if feed_id == getattr(self, "current_feed_id", None):
             return
+
+        # Save the last selected feed if the setting is enabled
+        try:
+            if self.config_manager.get("remember_last_feed", False):
+                self.config_manager.set("last_selected_feed", feed_id)
+        except Exception:
+            pass
 
         self._select_view(feed_id)
 

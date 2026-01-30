@@ -271,6 +271,10 @@ class SettingsDialog(wx.Dialog):
         self.refresh_startup_chk = wx.CheckBox(general_panel, label="Automatically refresh feeds upon start")
         self.refresh_startup_chk.SetValue(bool(config.get("refresh_on_startup", True)))
         general_sizer.Add(self.refresh_startup_chk, 0, wx.ALL, 5)
+
+        self.remember_last_feed_chk = wx.CheckBox(general_panel, label="Remember last selected feed/folder on startup")
+        self.remember_last_feed_chk.SetValue(bool(config.get("remember_last_feed", False)))
+        general_sizer.Add(self.remember_last_feed_chk, 0, wx.ALL, 5)
         
         general_panel.SetSizer(general_sizer)
         notebook.AddPage(general_panel, "General")
@@ -657,6 +661,7 @@ class SettingsDialog(wx.Dialog):
             "start_maximized": self.start_maximized_chk.GetValue(),
             "debug_mode": self.debug_mode_chk.GetValue(),
             "refresh_on_startup": self.refresh_startup_chk.GetValue(),
+            "remember_last_feed": self.remember_last_feed_chk.GetValue(),
             "auto_check_updates": self.auto_update_chk.GetValue(),
             "sounds_enabled": self.sounds_enabled_chk.GetValue(),
             "sound_refresh_complete": self.sound_complete_ctrl.GetValue(),
