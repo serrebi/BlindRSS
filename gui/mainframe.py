@@ -646,6 +646,9 @@ class MainFrame(wx.Frame):
             if focus == self.list_ctrl:
                 self.on_delete_article()
                 return
+            if focus == self.tree:
+                self.on_remove_feed(None)
+                return
 
         if event.ControlDown() and not event.ShiftDown() and not event.AltDown() and not event.MetaDown():
             pw = getattr(self, "player_window", None)
@@ -3139,6 +3142,33 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
+    def _update_feed_unread_count_ui(self, feed_id: str, delta: int) -> None:
+        if not feed_id or delta == 0:
+            return
+        
+        # Update feed object
+        feed = self.feed_map.get(feed_id)
+        if not feed:
+            return
+        
+        try:
+            old_count = int(feed.unread_count or 0)
+        except Exception:
+            old_count = 0
+            
+        new_count = max(0, old_count + delta)
+        feed.unread_count = new_count
+        
+        # Update tree node
+        node = self.feed_nodes.get(feed_id)
+        if node and node.IsOk():
+            title = feed.title or ""
+            label = f"{title} ({new_count})" if new_count > 0 else title
+            try:
+                self.tree.SetItemText(node, label)
+            except Exception:
+                pass
+
     def mark_article_read(self, idx):
         if idx < 0 or idx >= len(self.current_articles):
             return
@@ -3147,6 +3177,7 @@ class MainFrame(wx.Frame):
             threading.Thread(target=self.provider.mark_read, args=(article.id,), daemon=True).start()
             article.is_read = True
             self.list_ctrl.SetItem(idx, 4, "Read")
+            self._update_feed_unread_count_ui(article.feed_id, -1)
 
     def mark_article_unread(self, idx):
         if idx < 0 or idx >= len(self.current_articles):
@@ -3156,6 +3187,7 @@ class MainFrame(wx.Frame):
             threading.Thread(target=self.provider.mark_unread, args=(article.id,), daemon=True).start()
             article.is_read = False
             self.list_ctrl.SetItem(idx, 4, "Unread")
+            self._update_feed_unread_count_ui(article.feed_id, 1)
 
     def on_mark_all_read(self, event=None):
         feed_id = getattr(self, "current_feed_id", None)
