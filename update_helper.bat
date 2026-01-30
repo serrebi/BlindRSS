@@ -17,12 +17,10 @@ call :main %* >> "%LOG_FILE%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 if %RC% equ 0 (
-    if "!SHOW_LOG!"=="" (
-        del /f /q "%LOG_FILE%" >nul 2>nul
-    ) else (
-        echo %SENTINEL%>>"%LOG_FILE%"
-    )
+    rem Success - always delete log file
+    del /f /q "%LOG_FILE%" >nul 2>nul
 ) else (
+    rem Failure - write sentinel so any running log window will close
     echo %SENTINEL%>>"%LOG_FILE%"
 )
 exit /b %RC%
@@ -63,10 +61,6 @@ if not exist "%STAGING_DIR%" (
 
 echo [BlindRSS Update] Waiting for process %PID% to exit...
 powershell -NoProfile -InputFormat None -Command "Wait-Process -Id %PID% -ErrorAction SilentlyContinue"
-
-if not "%SHOW_LOG%"=="" if /I not "%SHOW_LOG%"=="0" (
-    call :start_log_window "%LOG_FILE%" "%SENTINEL%"
-)
 
 rem OneDrive Fix: Don't move the root folder. Move CONTENTS.
 rem We back up the current contents to a backup folder, then move new contents in.
@@ -118,6 +112,9 @@ exit /b 0
 
 :rollback
 echo [BlindRSS Update] Update failed. Restoring backup...
+if not "%SHOW_LOG%"=="" if /I not "%SHOW_LOG%"=="0" (
+    call :start_log_window "%LOG_FILE%" "%SENTINEL%"
+)
 if exist "%BACKUP_DIR%" (
     robocopy "%BACKUP_DIR%" "%INSTALL_DIR%" /E /MOVE /R:3 /W:1 /NFL /NDL
 )
