@@ -3734,11 +3734,11 @@ class MainFrame(wx.Frame):
         try:
             success = self.provider.add_feed(url, cat)
             if success:
-                try:
-                    # Update tree quickly so the new feed appears right away.
-                    wx.CallAfter(self.refresh_feeds)
-                except Exception:
-                    pass
+                # NOTE: Do NOT call refresh_feeds() here before _run_refresh completes.
+                # If the tree updates before articles are fetched, users may click on
+                # the new feed and see an empty list. The empty result gets cached
+                # with fully_loaded=True, causing the feed to appear permanently empty.
+                # _run_refresh() calls refresh_feeds() after articles are fetched.
                 try:
                     # Force a refresh so the newly added feed has content immediately.
                     refresh_ran = bool(self._run_refresh(block=True, force=True))
