@@ -65,8 +65,8 @@ DEFAULT_CONFIG = {
     "vlc_local_proxy_file_caching_ms": 1000,  # keep VLC buffering low for local range-cache proxy
     "range_cache_enabled": False,
     "range_cache_apply_all_hosts": True,  # apply local range-cache proxy to all HTTP(S) hosts
-    "range_cache_initial_burst_kb": 131072,  # initial background burst (KB)
-    "range_cache_initial_inline_prefetch_kb": 16384,  # small inline prefetch cushion per seek/read (KB)
+    "range_cache_initial_burst_kb": 8192,  # initial background burst (KB) - 8 MB default
+    "range_cache_initial_inline_prefetch_kb": 1024,  # small inline prefetch cushion per seek/read (KB) - 1 MB default
     "range_cache_prefetch_kb": 32768,  # per seek/read; larger reduces round-trips on high latency
     "range_cache_inline_window_kb": 4096,  # max bytes served per VLC request; smaller = lower seek latency
     "range_cache_hosts": [],  # allowlist when range_cache_apply_all_hosts is False

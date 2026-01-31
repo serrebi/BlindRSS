@@ -1117,7 +1117,8 @@ class RangeCacheProxy:
         # We may still download ahead in the background.
         self.inline_window_bytes = max(256 * 1024, int(inline_window_kb) * 1024)
         # Burst prefetch: fetch a larger first background range so early seeks don't stall.
-        self.initial_burst_bytes = max(32 * 1024 * 1024, int(initial_burst_kb) * 1024)
+        # Minimum 4 MB to ensure reasonable caching, but don't force huge downloads that delay playback.
+        self.initial_burst_bytes = max(4 * 1024 * 1024, int(initial_burst_kb) * 1024)
         # Inline prefetch: small cushion added to early seeks/ranged reads to reduce immediate rebuffering.
         try:
             self.initial_inline_prefetch_bytes = max(0, min(_INLINE_PREFETCH_CAP_BYTES, int(initial_inline_prefetch_kb) * 1024))
@@ -1729,7 +1730,7 @@ def get_range_cache_proxy(
             if inline_window_kb:
                 _RANGE_PROXY_SINGLETON.inline_window_bytes = max(256 * 1024, int(inline_window_kb) * 1024)
             if initial_burst_kb:
-                _RANGE_PROXY_SINGLETON.initial_burst_bytes = max(32 * 1024 * 1024, int(initial_burst_kb) * 1024)
+                _RANGE_PROXY_SINGLETON.initial_burst_bytes = max(4 * 1024 * 1024, int(initial_burst_kb) * 1024)
             if initial_inline_prefetch_kb:
                 try:
                     _RANGE_PROXY_SINGLETON.initial_inline_prefetch_bytes = max(0, min(_INLINE_PREFETCH_CAP_BYTES, int(initial_inline_prefetch_kb) * 1024))
