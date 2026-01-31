@@ -1419,6 +1419,9 @@ class RangeCacheProxy:
                         end = (ent.total_length - 1) if ent.total_length is not None else None
 
                     # Clamp/validate against known length.
+                    # IMPORTANT: For open-ended requests (bytes=X-), limit response to inline_window_bytes
+                    # to prevent blocking on huge file transfers. VLC will request more as needed.
+                    open_ended = (end is None)
                     if ent.total_length is not None:
                         if start < 0:
                             start = 0
@@ -1428,7 +1431,8 @@ class RangeCacheProxy:
                             self.end_headers()
                             return
                         if end is None:
-                            end = ent.total_length - 1
+                            # Limit open-ended requests to inline window to keep playback responsive
+                            end = min(start + max(0, int(proxy.inline_window_bytes) - 1), ent.total_length - 1)
                         else:
                             end = min(int(end), ent.total_length - 1)
                     else:
