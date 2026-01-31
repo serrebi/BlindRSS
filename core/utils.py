@@ -686,9 +686,10 @@ def normalize_url_for_vlc(url: str) -> str:
     try:
         parts = urllib.parse.urlsplit(url)
         # Keep reserved characters, but encode spaces and other unsafe chars.
-        path = urllib.parse.quote(parts.path, safe="/:@-._~!$&'()*+,;=")
+        # Include '%' in safe to avoid double-encoding already-encoded sequences like %27.
+        path = urllib.parse.quote(parts.path, safe="/:@-._~!$&'()*+,;=%")
         query = urllib.parse.quote_plus(parts.query, safe="=&:@-._~!$&'()*+,;/%")
-        frag = urllib.parse.quote(parts.fragment, safe="")
+        frag = urllib.parse.quote(parts.fragment, safe="%")
         return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, frag))
     except Exception:
         return url
