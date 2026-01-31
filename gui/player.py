@@ -2093,7 +2093,7 @@ class PlayerFrame(wx.Frame):
             self._last_range_proxy_cache_dir = cache_dir if cache_dir else None
             self._last_range_proxy_prefetch_kb = prefetch_kb
             self._last_range_proxy_initial_burst_kb = initial_burst_kb
-            self._last_range_proxy_initial_inline_kb = initial_inline_prefetch_kb
+            self._last_range_proxy_initial_inline_kb = initial_inline_kb
             
             proxied = proxy.proxify(url, headers=req_headers)
             log.debug("Proxy URL generated: %s", proxied)
