@@ -1070,10 +1070,16 @@ class _Entry:
         self._save_mapping(sid, url, headers)
 
         ent = self._get_or_create_entry(sid, url, headers)
-        # ensure probe in background (best effort)
+        # Launch probe in a background thread so proxify() returns immediately.
+        # The HTTP handler will wait for the probe if needed when VLC requests bytes.
+        def _bg_probe():
+            try:
+                with ent.lock:
+                    ent.probe()
+            except Exception:
+                pass
         try:
-            with ent.lock:
-                ent.probe()
+            threading.Thread(target=_bg_probe, daemon=True).start()
         except Exception:
             pass
 
@@ -1668,10 +1674,16 @@ class RangeCacheProxy:
         self._save_mapping(sid, url, headers)
 
         ent = self._get_or_create_entry(sid, url, headers)
-        # ensure probe in background (best effort)
+        # Launch probe in a background thread so proxify() returns immediately.
+        # The HTTP handler will wait for the probe if needed when VLC requests bytes.
+        def _bg_probe():
+            try:
+                with ent.lock:
+                    ent.probe()
+            except Exception:
+                pass
         try:
-            with ent.lock:
-                ent.probe()
+            threading.Thread(target=_bg_probe, daemon=True).start()
         except Exception:
             pass
 
