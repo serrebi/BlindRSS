@@ -3,6 +3,7 @@ import subprocess
 import json
 import platform
 import re
+import threading
 from functools import lru_cache
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qs
@@ -36,6 +37,45 @@ _MEDIA_PATH_HINTS = (
 _EXTRACTORS_REQUIRE_MEDIA_HINTS = {
     "VoxMedia",  # Matches most pages on theverge.com/vox.com/etc, not just media
 }
+
+# Cache for yt-dlp extractors (loaded once in background)
+_ytdlp_extractors = None
+_ytdlp_extractors_lock = threading.Lock()
+_ytdlp_extractors_loading = False
+
+
+def _load_ytdlp_extractors():
+    """Load yt-dlp extractors in background. Called once at startup."""
+    global _ytdlp_extractors, _ytdlp_extractors_loading
+    with _ytdlp_extractors_lock:
+        if _ytdlp_extractors is not None or _ytdlp_extractors_loading:
+            return
+        _ytdlp_extractors_loading = True
+    
+    try:
+        from yt_dlp.extractor import gen_extractor_classes
+        extractors = list(gen_extractor_classes())
+        with _ytdlp_extractors_lock:
+            _ytdlp_extractors = extractors
+    except Exception:
+        with _ytdlp_extractors_lock:
+            _ytdlp_extractors = []
+    finally:
+        with _ytdlp_extractors_lock:
+            _ytdlp_extractors_loading = False
+
+
+def _get_ytdlp_extractors():
+    """Get cached extractors, loading synchronously if needed."""
+    global _ytdlp_extractors
+    if _ytdlp_extractors is not None:
+        return _ytdlp_extractors
+    _load_ytdlp_extractors()
+    return _ytdlp_extractors or []
+
+
+# Pre-load extractors in background thread at module import
+threading.Thread(target=_load_ytdlp_extractors, daemon=True).start()
 
 
 @lru_cache(maxsize=2048)
@@ -82,9 +122,7 @@ def is_ytdlp_supported(url: str) -> bool:
 
     # Use yt-dlp's extractor regexes (offline) and ignore Generic.
     try:
-        from yt_dlp.extractor import gen_extractor_classes
-
-        for extractor_cls in gen_extractor_classes():
+        for extractor_cls in _get_ytdlp_extractors():
             try:
                 if not extractor_cls.suitable(url):
                     continue
