@@ -201,6 +201,9 @@ class _Entry:
     last_req_time: float = field(default_factory=time.time)
 
     real_url: Optional[str] = None
+    
+    # Probe completion event - set once the initial probe finishes
+    _probe_done: threading.Event = field(default_factory=threading.Event)
 
     _dir: str = ""
     _bg_thread: Optional[threading.Thread] = None
@@ -316,6 +319,10 @@ class _Entry:
                 pass
 
     def probe(self) -> None:
+        # Fast path: if already probed, return immediately
+        if self._probe_done.is_set():
+            return
+            
         session = self._make_session()
         try:
             # First, ensure we have the final resolved URL (handling redirects once)
@@ -344,6 +351,7 @@ class _Entry:
                     self.real_url = self.url
 
             if self.range_supported is not None and (self.total_length is not None or self.range_supported is False):
+                self._probe_done.set()
                 return
 
             target_url = self.real_url or self.url
@@ -369,6 +377,7 @@ class _Entry:
                 print(f"PROXY_WARNING: RangeCacheProxy probe failed: {e}")
                 self.range_supported = False
                 self.total_length = None
+                self._probe_done.set()
                 return
 
             try:
@@ -407,6 +416,7 @@ class _Entry:
                 except Exception:
                     pass
         finally:
+            self._probe_done.set()
             try:
                 session.close()
             except Exception:
@@ -1344,9 +1354,10 @@ class RangeCacheProxy:
                     except Exception:
                         pass
 
-                    # Ensure length/range support is known before we emit headers.
+                    # Wait for the background probe to complete (max 15s).
+                    # This avoids duplicate network requests and ensures we have metadata.
                     try:
-                        ent.probe()
+                        ent._probe_done.wait(timeout=15.0)
                     except Exception:
                         pass
 
