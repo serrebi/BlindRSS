@@ -1998,7 +1998,7 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pass
 
-    def _maybe_range_cache_url(self, url: str, headers: dict | None = None) -> str:
+    def _maybe_range_cache_url(self, url: str, headers: dict | None = None, url_is_resolved: bool = False) -> str:
         try:
             if not url:
                 return url
@@ -2095,8 +2095,8 @@ class PlayerFrame(wx.Frame):
             self._last_range_proxy_initial_burst_kb = initial_burst_kb
             self._last_range_proxy_initial_inline_kb = initial_inline_kb
             
-            proxied = proxy.proxify(url, headers=req_headers)
-            log.debug("Proxy URL generated: %s", proxied)
+            proxied = proxy.proxify(url, headers=req_headers, skip_redirect_resolve=url_is_resolved)
+            log.debug("Proxy URL generated: %s (skip_redirect_resolve=%s)", proxied, url_is_resolved)
             try:
                 if hasattr(proxy, "is_ready") and (proxy.is_ready() is False):
                     log.debug("Proxy not ready yet; proceeding without blocking")
@@ -2301,8 +2301,22 @@ class PlayerFrame(wx.Frame):
                         path = urlparse(low).path or low
                     except Exception:
                         path = low
+                    # Only skip redirect resolution for local files or already-proxied URLs
+                    # Podcast tracking URLs (op3.dev, etc.) need resolution even if they end in .mp3
                     if path.endswith(_SEEKABLE_EXTENSIONS):
-                        should_resolve = False
+                        # Check if this looks like a tracking/redirect URL that needs resolution
+                        try:
+                            parsed = urlparse(low)
+                            host = (parsed.netloc or "").lower()
+                            # Known podcast tracking/analytics hosts that always redirect
+                            tracking_hosts = ("op3.dev", "pdst.fm", "chrt.fm", "chtbl.com", "podtrac.com", 
+                                            "blubrry.com", "podcasts.apple.com", "anchor.fm", "spotify.com")
+                            if any(th in host for th in tracking_hosts):
+                                should_resolve = True
+                            else:
+                                should_resolve = False
+                        except Exception:
+                            should_resolve = False
             except Exception:
                 should_resolve = True
 
@@ -2326,6 +2340,7 @@ class PlayerFrame(wx.Frame):
                 resolved_title,
                 chapters,
                 bool(use_ytdlp),
+                bool(should_resolve),  # url_is_resolved: True if we already resolved redirects
             )
         except Exception:
             pass
@@ -2339,6 +2354,7 @@ class PlayerFrame(wx.Frame):
         resolved_title: str,
         chapters,
         use_ytdlp: bool,
+        url_is_resolved: bool = False,
     ) -> None:
         try:
             if int(load_seq) != int(getattr(self, "_active_load_seq", 0) or 0):
@@ -2435,7 +2451,7 @@ class PlayerFrame(wx.Frame):
                     self._start_http_seek_diagnostics(str(final_url), headers=ytdlp_headers)
             except Exception:
                 pass
-            final_url = self._maybe_range_cache_url(final_url, headers=ytdlp_headers)
+            final_url = self._maybe_range_cache_url(final_url, headers=ytdlp_headers, url_is_resolved=url_is_resolved)
             try:
                 proxied = bool(self._last_used_range_proxy)
                 log.info("VLC URL: %s proxied=%s", final_url, proxied)

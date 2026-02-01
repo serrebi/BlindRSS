@@ -1,4 +1,4 @@
-"""
+﻿"""
 Range-aware local HTTP proxy with on-disk caching to improve seek performance on
 high-latency remote HTTP/HTTPS audio files.
 
@@ -1059,7 +1059,7 @@ class _Entry:
                 raise RuntimeError("RangeCacheProxy not started")
             return f"http://{self._host}:{self._port}"
 
-    def proxify(self, url: str, headers: Optional[Dict[str, str]] = None) -> str:
+    def proxify(self, url: str, headers: Optional[Dict[str, str]] = None, skip_redirect_resolve: bool = False) -> str:
         """
         Register a URL and return a local proxy URL.
 
@@ -1080,6 +1080,11 @@ class _Entry:
         self._save_mapping(sid, url, headers)
 
         ent = self._get_or_create_entry(sid, url, headers)
+        
+        # If the caller says redirects are already resolved, set real_url to skip that step in probe()
+        if skip_redirect_resolve:
+            ent.real_url = url
+        
         # Launch probe in a background thread so proxify() returns immediately.
         # The HTTP handler will wait for the probe if needed when VLC requests bytes.
         def _bg_probe():
@@ -1664,7 +1669,7 @@ class RangeCacheProxy:
                 raise RuntimeError("RangeCacheProxy not started")
             return f"http://{self._host}:{self._port}"
 
-    def proxify(self, url: str, headers: Optional[Dict[str, str]] = None) -> str:
+    def proxify(self, url: str, headers: Optional[Dict[str, str]] = None, skip_redirect_resolve: bool = False) -> str:
         """
         Register a URL and return a local proxy URL.
 
@@ -1685,6 +1690,11 @@ class RangeCacheProxy:
         self._save_mapping(sid, url, headers)
 
         ent = self._get_or_create_entry(sid, url, headers)
+        
+        # If the caller says redirects are already resolved, set real_url to skip that step in probe()
+        if skip_redirect_resolve:
+            ent.real_url = url
+        
         # Launch probe in a background thread so proxify() returns immediately.
         # The HTTP handler will wait for the probe if needed when VLC requests bytes.
         def _bg_probe():
