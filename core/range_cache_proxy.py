@@ -133,7 +133,7 @@ def _parse_content_range(value: str) -> Optional[Tuple[int, int, Optional[int]]]
     return a, b, total
 
 
-def _parse_range_header(range_value: str, total_length: Optional[int]) -> Optional[Tuple[int, int]]:
+def _parse_range_header(range_value: str, total_length: Optional[int]) -> Optional[Tuple[int, Optional[int]]]:
     # Supports: bytes=start-end, bytes=start-
     if not range_value:
         return None
@@ -144,10 +144,9 @@ def _parse_range_header(range_value: str, total_length: Optional[int]) -> Option
     start = int(m.group(1))
     end_s = m.group(2)
     if end_s is None or end_s == "":
-        if total_length is None:
-            # Unknown length: serve a reasonable window starting at 'start'
-            return (start, start + (2 * 1024 * 1024) - 1)
-        return (start, max(start, total_length - 1))
+        # Open-ended range. Leave end unset so the caller can clamp to a
+        # smaller inline window for responsive startup.
+        return (start, None)
     end = int(end_s)
     if end < start:
         end = start
