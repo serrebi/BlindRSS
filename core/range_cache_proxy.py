@@ -44,6 +44,11 @@ _DEFAULT_UA = (
     "Chrome/121.0.0.0 Safari/537.36"
 )
 
+# Keep probe timeouts short so initial playback isn't held hostage by slow trackers.
+_PROBE_CONNECT_TIMEOUT_S = 3.0
+_PROBE_READ_TIMEOUT_S = 8.0
+_PROBE_WAIT_S = 3.0
+
 # Cap how much extra we fetch inline (beyond the requested bytes) to keep seeks snappy.
 # Larger amounts still happen via background download.
 _INLINE_PREFETCH_CAP_BYTES = 16 * 1024 * 1024
@@ -324,31 +329,6 @@ class _Entry:
             
         session = self._make_session()
         try:
-            # First, ensure we have the final resolved URL (handling redirects once)
-            if not self.real_url:
-                try:
-                    # Perform a quick HEAD/GET stream to resolve redirects without downloading body
-                    # Use a separate ephemeral session or the main one? Main is fine.
-                    # Just doing a quick resolve.
-                    hdrs = HEADERS.copy()
-                    hdrs.pop("Accept", None)
-                    hdrs.update(self.headers or {})
-                    hdrs.setdefault("User-Agent", _DEFAULT_UA)
-                    try:
-                        # stream=True ensures we don't download the file.
-                        r_resolve = session.get(self.url, headers=hdrs, stream=True, timeout=(10, 15), allow_redirects=True)
-                        final = r_resolve.url or self.url
-                        r_resolve.close()
-                        
-                        if final != self.url:
-                            LOG.debug("RangeCacheProxy resolved redirect: %s -> %s", self.url, final)
-                        self.real_url = final
-                    except Exception as e:
-                        print(f"PROXY_WARNING: RangeCacheProxy redirect resolution failed: {e}")
-                        self.real_url = self.url # Fallback
-                except Exception:
-                    self.real_url = self.url
-
             if self.range_supported is not None and (self.total_length is not None or self.range_supported is False):
                 self._probe_done.set()
                 return
@@ -370,8 +350,14 @@ class _Entry:
             hdrs_probe["Range"] = "bytes=0-0"
 
             try:
-                # allow_redirects=True again just to be safe, though self.real_url should be final.
-                r = session.get(target_url, headers=hdrs_probe, stream=True, timeout=(10, 30), allow_redirects=True)
+                # allow_redirects=True here; we'll capture the final URL if it changes.
+                r = session.get(
+                    target_url,
+                    headers=hdrs_probe,
+                    stream=True,
+                    timeout=(_PROBE_CONNECT_TIMEOUT_S, _PROBE_READ_TIMEOUT_S),
+                    allow_redirects=True,
+                )
             except Exception as e:
                 print(f"PROXY_WARNING: RangeCacheProxy probe failed: {e}")
                 self.range_supported = False
@@ -380,6 +366,12 @@ class _Entry:
                 return
 
             try:
+                try:
+                    final = r.url or ""
+                    if final:
+                        self.real_url = final
+                except Exception:
+                    pass
                 ct = r.headers.get("Content-Type") or ""
                 if ct:
                     self.content_type = ct.split(";")[0].strip() or self.content_type
@@ -1358,10 +1350,10 @@ class RangeCacheProxy:
                     except Exception:
                         pass
 
-                    # Wait for the background probe to complete (max 15s).
-                    # This avoids duplicate network requests and ensures we have metadata.
+                    # Wait briefly for the background probe to complete.
+                    # Keep this short so slow trackers don't block playback startup.
                     try:
-                        ent._probe_done.wait(timeout=15.0)
+                        ent._probe_done.wait(timeout=_PROBE_WAIT_S)
                     except Exception:
                         pass
 

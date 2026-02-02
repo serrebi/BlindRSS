@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
     "per_host_max_connections": 4,
     "feed_timeout_seconds": 15,
     "feed_retry_attempts": 5,
+    "playback_resolve_timeout_s": 4.0,
     "active_provider": "local",
     "debug_mode": False,
     "refresh_on_startup": True,

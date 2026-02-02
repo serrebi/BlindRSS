@@ -2320,8 +2320,21 @@ class PlayerFrame(wx.Frame):
             except Exception:
                 should_resolve = True
 
+            try:
+                if should_resolve and bool(self.config_manager.get("skip_silence", False)):
+                    # When skip-silence is enabled, playback is forced through the local range-cache proxy,
+                    # which can follow redirects. Avoid blocking startup on a pre-resolve round-trip.
+                    if low.startswith("http") and ".m3u8" not in low:
+                        should_resolve = False
+            except Exception:
+                pass
+
             if should_resolve:
-                final_url = utils.resolve_final_url(final_url, max_redirects=maxr)
+                try:
+                    resolve_timeout_s = float(self.config_manager.get("playback_resolve_timeout_s", 4.0) or 4.0)
+                except Exception:
+                    resolve_timeout_s = 4.0
+                final_url = utils.resolve_final_url(final_url, max_redirects=maxr, timeout_s=resolve_timeout_s)
             final_url = utils.normalize_url_for_vlc(final_url)
 
         try:
