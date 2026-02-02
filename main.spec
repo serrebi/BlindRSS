@@ -2,6 +2,7 @@
 
 import os
 import sys
+import importlib.util
 from PyInstaller.utils.hooks import collect_all
 
 # VLC path - adjust this if VLC is installed elsewhere
@@ -27,7 +28,6 @@ binaries = [
 hiddenimports = [
     'vlc',
     'trafilatura',
-    'pkg_resources.py2_warn',
 ]
 
 try:
@@ -37,7 +37,24 @@ except Exception:
     pass
 
 for pkg in packages_to_collect:
-    d, b, h = collect_all(pkg)
+    try:
+        spec = importlib.util.find_spec(pkg)
+    except Exception:
+        spec = None
+    if spec is None:
+        # Module not installed in this environment; skip it.
+        continue
+    is_pkg = bool(spec.submodule_search_locations)
+
+    if not is_pkg:
+        hiddenimports.append(pkg)
+        continue
+
+    try:
+        d, b, h = collect_all(pkg)
+    except Exception:
+        hiddenimports.append(pkg)
+        continue
     datas.extend(d)
     binaries.extend(b)
     hiddenimports.extend(h)
