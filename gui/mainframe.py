@@ -501,7 +501,7 @@ class MainFrame(wx.Frame):
             query = ""
         query = (query or "").strip()
         if not query:
-            self._clear_search_filter()
+            self._clear_search_filter(force=True)
             return
         self._search_query = query
         self._search_active = True
@@ -512,7 +512,7 @@ class MainFrame(wx.Frame):
             self.search_ctrl.SetValue("")
         except Exception:
             pass
-        self._clear_search_filter()
+        self._clear_search_filter(force=True)
 
     def on_persistent_search_select(self, event):
         try:
@@ -577,8 +577,8 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
-    def _clear_search_filter(self):
-        if not self._is_search_active():
+    def _clear_search_filter(self, force: bool = False):
+        if not force and not self._is_search_active():
             self._search_active = False
             self._search_query = ""
             try:
