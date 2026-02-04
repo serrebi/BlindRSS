@@ -12,7 +12,7 @@ from collections import deque
 from urllib.parse import urlsplit
 from bs4 import BeautifulSoup
 # from dateutil import parser as date_parser  # Removed unused import
-from .dialogs import AddFeedDialog, SettingsDialog, FeedPropertiesDialog, AboutDialog
+from .dialogs import AddFeedDialog, SettingsDialog, FeedPropertiesDialog, AboutDialog, PersistentSearchDialog
 from .player import PlayerFrame
 from .tray import BlindRSSTrayIcon
 from .hotkeys import HoldRepeatHotkeys
@@ -82,11 +82,15 @@ class MainFrame(wx.Frame):
         self._search_active = False
         self._base_articles = []
         self._base_view_id = None
+        self._persistent_searches = []
+        self._persistent_search_menu = None
+        self._persistent_search_items = {}
 
         self.init_ui()
         self.init_menus()
         self.init_shortcuts()
         self.Bind(wx.EVT_CHAR_HOOK, self.on_char_hook)
+        self._load_persistent_searches()
         
         self.tray_icon = BlindRSSTrayIcon(self)
         
@@ -297,6 +301,78 @@ class MainFrame(wx.Frame):
     def _is_search_active(self) -> bool:
         return bool(getattr(self, "_search_active", False) and (self._search_query or "").strip())
 
+    def _normalize_persistent_searches(self, searches):
+        cleaned = []
+        seen = set()
+        for item in (searches or []):
+            try:
+                value = str(item or "").strip()
+            except Exception:
+                value = ""
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(value)
+        return cleaned
+
+    def _load_persistent_searches(self):
+        try:
+            items = self.config_manager.get("persistent_searches", [])
+        except Exception:
+            items = []
+        self._persistent_searches = self._normalize_persistent_searches(items)
+        self._refresh_persistent_search_controls()
+
+    def _save_persistent_searches(self, searches):
+        cleaned = self._normalize_persistent_searches(searches)
+        self._persistent_searches = cleaned
+        try:
+            self.config_manager.set("persistent_searches", cleaned)
+        except Exception:
+            pass
+        self._refresh_persistent_search_controls()
+
+    def _refresh_persistent_search_controls(self):
+        try:
+            self.search_ctrl.AutoComplete(self._persistent_searches)
+        except Exception:
+            pass
+        self._apply_persistent_search_menu()
+
+    def _apply_persistent_search_menu(self):
+        try:
+            if getattr(self, "_persistent_search_menu", None):
+                try:
+                    self._persistent_search_menu.Destroy()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        menu = wx.Menu()
+        self._persistent_search_items = {}
+
+        if self._persistent_searches:
+            for query in self._persistent_searches:
+                item = menu.Append(wx.ID_ANY, query)
+                self._persistent_search_items[int(item.GetId())] = query
+                self.Bind(wx.EVT_MENU, self.on_persistent_search_select, item)
+        else:
+            empty_item = menu.Append(wx.ID_ANY, "(No saved searches)")
+            empty_item.Enable(False)
+
+        menu.AppendSeparator()
+        manage_item = menu.Append(wx.ID_ANY, "Configure Persistent Search...")
+        self.Bind(wx.EVT_MENU, self.on_configure_persistent_search, manage_item)
+
+        try:
+            self.search_ctrl.SetMenu(menu)
+        except Exception:
+            pass
+        self._persistent_search_menu = menu
+
     def _set_base_articles(self, articles, view_id=None) -> None:
         self._base_articles = list(articles or [])
         if view_id is None:
@@ -437,6 +513,28 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
         self._clear_search_filter()
+
+    def on_persistent_search_select(self, event):
+        try:
+            query = self._persistent_search_items.get(int(event.GetId()))
+        except Exception:
+            query = None
+        if not query:
+            return
+        try:
+            self.search_ctrl.SetValue(query)
+        except Exception:
+            pass
+        self.on_search_enter(None)
+
+    def on_configure_persistent_search(self, event=None):
+        dlg = PersistentSearchDialog(self, self._persistent_searches)
+        try:
+            if dlg.ShowModal() == wx.ID_OK:
+                searches = dlg.get_searches()
+                self._save_persistent_searches(searches)
+        finally:
+            dlg.Destroy()
 
     def _apply_search_filter(self):
         if not self._is_search_active():
@@ -801,6 +899,8 @@ class MainFrame(wx.Frame):
         import_opml_item = file_menu.Append(wx.ID_ANY, "&Import OPML...", "Import feeds from OPML")
         export_opml_item = file_menu.Append(wx.ID_ANY, "E&xport OPML...", "Export feeds to OPML")
         file_menu.AppendSeparator()
+        persistent_search_item = file_menu.Append(wx.ID_ANY, "Configure Persistent Search...", "Configure saved search queries")
+        file_menu.AppendSeparator()
         exit_item = file_menu.Append(wx.ID_EXIT, "E&xit", "Exit application")
         
         view_menu = wx.Menu()
@@ -847,6 +947,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_remove_category, remove_cat_item)
         self.Bind(wx.EVT_MENU, self.on_import_opml, import_opml_item)
         self.Bind(wx.EVT_MENU, self.on_export_opml, export_opml_item)
+        self.Bind(wx.EVT_MENU, self.on_configure_persistent_search, persistent_search_item)
         self.Bind(wx.EVT_MENU, self.on_show_player, player_item)
         self.Bind(wx.EVT_MENU, self.on_show_player, player_toggle_item)
         self.Bind(wx.EVT_MENU, self.on_player_play_pause, player_play_pause_item)

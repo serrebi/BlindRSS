@@ -78,6 +78,7 @@ DEFAULT_CONFIG = {
     "download_path": os.path.join(APP_DIR, "podcasts"),
     "download_retention": "Unlimited",
     "article_retention": "Unlimited",
+    "persistent_searches": [],
     "providers": {
         "local": {
             "feeds": []  # List of feed URLs/data

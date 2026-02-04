@@ -1171,6 +1171,73 @@ class FeedSearchDialog(wx.Dialog):
         return None
 
 
+class PersistentSearchDialog(wx.Dialog):
+    def __init__(self, parent, searches=None):
+        super().__init__(parent, title="Configure Persistent Search", size=(420, 320))
+
+        self._searches = list(searches or [])
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        sizer.Add(wx.StaticText(self, label="Saved searches:"), 0, wx.ALL, 5)
+
+        self.list_ctrl = wx.ListBox(self, choices=self._searches)
+        sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 5)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        add_btn = wx.Button(self, label="Add...")
+        remove_btn = wx.Button(self, label="Remove")
+        btn_row.Add(add_btn, 0, wx.ALL, 5)
+        btn_row.Add(remove_btn, 0, wx.ALL, 5)
+        sizer.Add(btn_row, 0, wx.ALIGN_LEFT | wx.ALL, 0)
+
+        btn_sizer = self.CreateButtonSizer(wx.OK | wx.CANCEL)
+        sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 5)
+
+        self.SetSizer(sizer)
+        self.Centre()
+
+        add_btn.Bind(wx.EVT_BUTTON, self.on_add)
+        remove_btn.Bind(wx.EVT_BUTTON, self.on_remove)
+
+    def _normalize_query(self, text: str) -> str:
+        return (text or "").strip()
+
+    def _has_query(self, query: str) -> bool:
+        q = (query or "").strip().lower()
+        if not q:
+            return True
+        for existing in self._searches:
+            if (existing or "").strip().lower() == q:
+                return True
+        return False
+
+    def on_add(self, event):
+        dlg = wx.TextEntryDialog(self, "Search query:", "Add Search")
+        if dlg.ShowModal() == wx.ID_OK:
+            query = self._normalize_query(dlg.GetValue())
+            if query and not self._has_query(query):
+                self._searches.append(query)
+                self.list_ctrl.Append(query)
+        dlg.Destroy()
+
+    def on_remove(self, event):
+        idx = self.list_ctrl.GetSelection()
+        if idx == wx.NOT_FOUND:
+            return
+        try:
+            self.list_ctrl.Delete(idx)
+        except Exception:
+            pass
+        try:
+            self._searches.pop(idx)
+        except Exception:
+            pass
+
+    def get_searches(self):
+        return list(self._searches or [])
+
+
 class AboutDialog(wx.Dialog):
     def __init__(self, parent, version_str):
         super().__init__(parent, title="About BlindRSS", size=(400, 300))
