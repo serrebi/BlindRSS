@@ -78,6 +78,10 @@ class MainFrame(wx.Frame):
 
         self._unread_filter_enabled = False
         self._is_first_tree_load = True
+        self._search_query = ""
+        self._search_active = False
+        self._base_articles = []
+        self._base_view_id = None
 
         self.init_ui()
         self.init_menus()
@@ -189,8 +193,26 @@ class MainFrame(wx.Frame):
         self.root = self.tree.AddRoot("Root")
         self.all_feeds_node = self.tree.AppendItem(self.root, "All Feeds")
         
-        # Right: Splitter (List + Content)
-        right_splitter = wx.SplitterWindow(splitter)
+        # Right: Search + Splitter (List + Content)
+        right_panel = wx.Panel(splitter)
+        right_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self.search_ctrl = wx.SearchCtrl(right_panel, style=wx.TE_PROCESS_ENTER)
+        self.search_ctrl.SetName("Article Filter")
+        try:
+            self.search_ctrl.SetDescriptiveText("Filter current view (Enter)")
+        except Exception:
+            try:
+                self.search_ctrl.SetHint("Filter current view (Enter)")
+            except Exception:
+                pass
+        try:
+            self.search_ctrl.ShowCancelButton(True)
+        except Exception:
+            pass
+        right_sizer.Add(self.search_ctrl, 0, wx.EXPAND | wx.ALL, 4)
+
+        right_splitter = wx.SplitterWindow(right_panel)
         
         # Top Right: List (Articles)
         self.list_ctrl = wx.ListCtrl(right_splitter, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
@@ -206,7 +228,10 @@ class MainFrame(wx.Frame):
         self.content_ctrl.SetName("Article Content")
         
         right_splitter.SplitHorizontally(self.list_ctrl, self.content_ctrl, 300)
-        splitter.SplitVertically(self.tree, right_splitter, 250)
+        right_sizer.Add(right_splitter, 1, wx.EXPAND)
+        right_panel.SetSizer(right_sizer)
+
+        splitter.SplitVertically(self.tree, right_panel, 250)
         
         self.Bind(wx.EVT_TREE_SEL_CHANGED, self.on_tree_select, self.tree)
         self.Bind(wx.EVT_CONTEXT_MENU, self.on_tree_context_menu, self.tree)
@@ -214,6 +239,9 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_article_select, self.list_ctrl)
         self.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_article_activate, self.list_ctrl)
         self.Bind(wx.EVT_CONTEXT_MENU, self.on_list_context_menu, self.list_ctrl)
+        self.search_ctrl.Bind(wx.EVT_TEXT_ENTER, self.on_search_enter)
+        self.search_ctrl.Bind(wx.EVT_SEARCHCTRL_SEARCH_BTN, self.on_search_enter)
+        self.search_ctrl.Bind(wx.EVT_SEARCHCTRL_CANCEL_BTN, self.on_search_clear)
 
         # When tabbing into the content field, load full article text.
         self.content_ctrl.Bind(wx.EVT_SET_FOCUS, self.on_content_focus)
@@ -243,6 +271,14 @@ class MainFrame(wx.Frame):
 
         # Store article objects for the list
         self.current_articles = []
+        self._base_articles = []
+
+        try:
+            self.search_ctrl.MoveAfterInTabOrder(self.tree)
+            self.list_ctrl.MoveAfterInTabOrder(self.search_ctrl)
+            self.content_ctrl.MoveAfterInTabOrder(self.list_ctrl)
+        except Exception:
+            pass
 
     def _focus_default_control(self):
         """Ensure keyboard focus lands on the tree after the frame is visible."""
@@ -257,6 +293,238 @@ class MainFrame(wx.Frame):
             self.Maximize(True)
         elif self.IsMaximized():
             self.Maximize(False)
+
+    def _is_search_active(self) -> bool:
+        return bool(getattr(self, "_search_active", False) and (self._search_query or "").strip())
+
+    def _set_base_articles(self, articles, view_id=None) -> None:
+        self._base_articles = list(articles or [])
+        if view_id is None:
+            view_id = getattr(self, "current_feed_id", None)
+        self._base_view_id = view_id
+
+    def _get_base_articles_for_current_view(self):
+        fid = getattr(self, "current_feed_id", None)
+        if fid and fid == getattr(self, "_base_view_id", None) and self._base_articles is not None:
+            return list(self._base_articles or [])
+        try:
+            st = (self.view_cache or {}).get(fid)
+        except Exception:
+            st = None
+        if st:
+            return list(st.get("articles") or [])
+        return list(getattr(self, "current_articles", []) or [])
+
+    def _article_search_text(self, article) -> str:
+        if not article:
+            return ""
+        parts = []
+        try:
+            parts.append(getattr(article, "title", "") or "")
+            parts.append(getattr(article, "author", "") or "")
+            parts.append(getattr(article, "url", "") or "")
+            parts.append(getattr(article, "content", "") or "")
+            parts.append(getattr(article, "media_url", "") or "")
+        except Exception:
+            pass
+        try:
+            feed_title = ""
+            feed_id = getattr(article, "feed_id", None)
+            if feed_id:
+                feed = self.feed_map.get(feed_id)
+                if feed:
+                    feed_title = feed.title or ""
+            if feed_title:
+                parts.append(feed_title)
+        except Exception:
+            pass
+        return " ".join([p for p in parts if p]).lower()
+
+    def _filter_articles(self, articles, query: str):
+        query = (query or "").strip().lower()
+        if not query:
+            return list(articles or [])
+        terms = [t for t in re.split(r"\s+", query) if t]
+        if not terms:
+            return list(articles or [])
+        filtered = []
+        for article in (articles or []):
+            text = self._article_search_text(article)
+            if all(term in text for term in terms):
+                filtered.append(article)
+        return filtered
+
+    def _capture_list_view_state(self):
+        focused_idx = self.list_ctrl.GetFocusedItem()
+        selected_idx = self.list_ctrl.GetFirstSelected()
+        focused_on_load_more = self._is_load_more_row(focused_idx)
+        selected_on_load_more = self._is_load_more_row(selected_idx)
+
+        focused_article_id = None
+        if (not focused_on_load_more) and focused_idx != wx.NOT_FOUND and 0 <= focused_idx < len(self.current_articles):
+            focused_article_id = self._article_cache_id(self.current_articles[focused_idx])
+
+        selected_article_id = None
+        if (not selected_on_load_more) and selected_idx != wx.NOT_FOUND and 0 <= selected_idx < len(self.current_articles):
+            selected_article_id = self._article_cache_id(self.current_articles[selected_idx])
+
+        top_article_id = None
+        top_idx = self.list_ctrl.GetTopItem()
+        if top_idx != wx.NOT_FOUND and 0 <= top_idx < len(self.current_articles):
+            top_article_id = self._article_cache_id(self.current_articles[top_idx])
+
+        return focused_article_id, top_article_id, selected_article_id, (focused_on_load_more or selected_on_load_more)
+
+    def _render_articles_list(self, articles, empty_label: str = "No articles found.") -> None:
+        self.list_ctrl.DeleteAllItems()
+        if not articles:
+            self.list_ctrl.InsertItem(0, empty_label)
+            return
+
+        self.list_ctrl.Freeze()
+        for i, article in enumerate(articles):
+            idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
+            feed_title = ""
+            if article.feed_id:
+                feed = self.feed_map.get(article.feed_id)
+                if feed:
+                    feed_title = feed.title or ""
+
+            self.list_ctrl.SetItem(idx, 1, article.author or "")
+            self.list_ctrl.SetItem(idx, 2, utils.humanize_article_date(article.date))
+            self.list_ctrl.SetItem(idx, 3, feed_title)
+            self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
+        self.list_ctrl.Thaw()
+
+    def _should_show_load_more_placeholder(self, base_count: int | None = None) -> bool:
+        fid = getattr(self, "current_feed_id", None)
+        if not fid:
+            return False
+        try:
+            st = (self.view_cache or {}).get(fid)
+        except Exception:
+            st = None
+        if not st:
+            return False
+        if bool(st.get("fully_loaded", False)):
+            return False
+        total = st.get("total")
+        if total is None:
+            return True
+        try:
+            count = int(base_count) if base_count is not None else int(len(st.get("articles") or []))
+            return int(total) > count
+        except Exception:
+            return True
+
+    def on_search_enter(self, event):
+        query = ""
+        try:
+            query = self.search_ctrl.GetValue()
+        except Exception:
+            query = ""
+        query = (query or "").strip()
+        if not query:
+            self._clear_search_filter()
+            return
+        self._search_query = query
+        self._search_active = True
+        self._apply_search_filter()
+
+    def on_search_clear(self, event):
+        try:
+            self.search_ctrl.SetValue("")
+        except Exception:
+            pass
+        self._clear_search_filter()
+
+    def _apply_search_filter(self):
+        if not self._is_search_active():
+            return
+        base_articles = self._get_base_articles_for_current_view()
+        self._set_base_articles(base_articles, getattr(self, "current_feed_id", None))
+
+        focused_id, top_id, selected_id, load_more_selected = self._capture_list_view_state()
+
+        filtered = self._filter_articles(base_articles, self._search_query)
+        self.current_articles = filtered
+
+        self._remove_loading_more_placeholder()
+        empty_label = "No matches." if base_articles else "No articles found."
+        self._render_articles_list(filtered, empty_label=empty_label)
+
+        show_more = self._should_show_load_more_placeholder(len(base_articles))
+        if show_more:
+            self._add_loading_more_placeholder()
+
+        if load_more_selected and show_more:
+            wx.CallAfter(self._restore_load_more_focus)
+        else:
+            wx.CallAfter(self._restore_list_view, focused_id, top_id, selected_id)
+
+        try:
+            self._reset_fulltext_prefetch(self.current_articles)
+        except Exception:
+            pass
+
+        if not filtered or (selected_id and not any(self._article_cache_id(a) == selected_id for a in filtered)):
+            self.selected_article_id = None
+            try:
+                self.content_ctrl.SetValue("")
+            except Exception:
+                pass
+
+        try:
+            self.SetStatusText(f"Filter: {len(filtered)} of {len(base_articles)}")
+        except Exception:
+            pass
+
+    def _clear_search_filter(self):
+        if not self._is_search_active():
+            self._search_active = False
+            self._search_query = ""
+            try:
+                self.SetStatusText("")
+            except Exception:
+                pass
+            return
+
+        self._search_active = False
+        self._search_query = ""
+
+        base_articles = self._get_base_articles_for_current_view()
+        self._set_base_articles(base_articles, getattr(self, "current_feed_id", None))
+
+        focused_id, top_id, selected_id, load_more_selected = self._capture_list_view_state()
+
+        self.current_articles = list(base_articles or [])
+        self._remove_loading_more_placeholder()
+        self._render_articles_list(self.current_articles, empty_label="No articles found.")
+        show_more = self._should_show_load_more_placeholder(len(base_articles))
+        if show_more:
+            self._add_loading_more_placeholder()
+
+        if load_more_selected and show_more:
+            wx.CallAfter(self._restore_load_more_focus)
+        else:
+            wx.CallAfter(self._restore_list_view, focused_id, top_id, selected_id)
+
+        try:
+            self._reset_fulltext_prefetch(self.current_articles)
+        except Exception:
+            pass
+
+        if selected_id and not any(self._article_cache_id(a) == selected_id for a in self.current_articles):
+            self.selected_article_id = None
+            try:
+                self.content_ctrl.SetValue("")
+            except Exception:
+                pass
+
+        try:
+            self.SetStatusText("")
+        except Exception:
+            pass
 
     def _ensure_player_window(self):
         pw = getattr(self, "player_window", None)
@@ -392,24 +660,21 @@ class MainFrame(wx.Frame):
         with getattr(self, "_view_cache_lock", threading.Lock()):
             st = self.view_cache.get(feed_id)
         if st and isinstance(st.get("articles"), list) and st.get("articles"):
-            self.current_articles = list(st.get("articles") or [])
-            self.list_ctrl.DeleteAllItems()
-            self._remove_loading_more_placeholder()
+            base_articles = list(st.get("articles") or [])
+            self._set_base_articles(base_articles, feed_id)
+            display_articles = base_articles
+            if self._is_search_active():
+                display_articles = self._filter_articles(base_articles, self._search_query)
 
-            self.list_ctrl.Freeze()
-            for i, article in enumerate(self.current_articles):
-                idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
-                feed_title = ""
-                if article.feed_id:
-                    feed = self.feed_map.get(article.feed_id)
-                    if feed:
-                        feed_title = feed.title or ""
-                
-                self.list_ctrl.SetItem(idx, 1, article.author or "")
-                self.list_ctrl.SetItem(idx, 2, utils.humanize_article_date(article.date))
-                self.list_ctrl.SetItem(idx, 3, feed_title)
-                self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
-            self.list_ctrl.Thaw()
+            self.current_articles = display_articles
+            self._remove_loading_more_placeholder()
+            empty_label = "No matches." if (self._is_search_active() and base_articles) else "No articles found."
+            self._render_articles_list(display_articles, empty_label=empty_label)
+            if self._is_search_active():
+                try:
+                    self.SetStatusText(f"Filter: {len(display_articles)} of {len(base_articles)}")
+                except Exception:
+                    pass
 
             if not bool(st.get("fully_loaded", False)):
                 self._add_loading_more_placeholder()
@@ -432,6 +697,7 @@ class MainFrame(wx.Frame):
 
         # If we have cached empty state, show it immediately and still top-up.
         if st and isinstance(st.get("articles"), list) and not st.get("articles") and st.get("fully_loaded"):
+            self._set_base_articles([], feed_id)
             self.current_articles = []
             self.list_ctrl.DeleteAllItems()
             self._remove_loading_more_placeholder()
@@ -1217,6 +1483,12 @@ class MainFrame(wx.Frame):
 
     def _remove_article_from_current_list(self, idx: int) -> None:
         froze = False
+        article_id = None
+        try:
+            if 0 <= idx < len(self.current_articles):
+                article_id = self._article_cache_id(self.current_articles[idx])
+        except Exception:
+            article_id = None
         try:
             self.list_ctrl.Freeze()
             froze = True
@@ -1228,6 +1500,11 @@ class MainFrame(wx.Frame):
                 self.current_articles.pop(idx)
             except Exception:
                 log.exception("Error popping article from current_articles at index %s", idx)
+            if article_id and self._base_view_id == getattr(self, "current_feed_id", None):
+                try:
+                    self._base_articles = [a for a in (self._base_articles or []) if self._article_cache_id(a) != article_id]
+                except Exception:
+                    pass
             try:
                 self.list_ctrl.DeleteItem(idx)
             except Exception:
@@ -1350,7 +1627,8 @@ class MainFrame(wx.Frame):
         try:
             self._remove_loading_more_placeholder()
             self.list_ctrl.DeleteAllItems()
-            self.list_ctrl.InsertItem(0, "No articles found.")
+            label = "No matches." if (self._is_search_active() and getattr(self, "_base_articles", None)) else "No articles found."
+            self.list_ctrl.InsertItem(0, label)
             self.content_ctrl.Clear()
             self.selected_article_id = None
         except Exception:
@@ -1359,8 +1637,13 @@ class MainFrame(wx.Frame):
     def _update_current_view_cache(self, view_id: str) -> None:
         try:
             st = self._ensure_view_state(view_id)
-            st["articles"] = self.current_articles
-            st["id_set"] = {self._article_cache_id(a) for a in (self.current_articles or [])}
+            if self._is_search_active() and self._base_view_id == view_id:
+                base_articles = list(getattr(self, "_base_articles", []) or [])
+                st["articles"] = base_articles
+                st["id_set"] = {self._article_cache_id(a) for a in base_articles}
+            else:
+                st["articles"] = self.current_articles
+                st["id_set"] = {self._article_cache_id(a) for a in (self.current_articles or [])}
             st["last_access"] = time.time()
         except Exception:
             log.exception("Error updating current view cache for view_id '%s'", view_id)
@@ -1823,6 +2106,7 @@ class MainFrame(wx.Frame):
         self.current_feed_id = feed_id
 
         if clear_list:
+            self._set_base_articles([], feed_id)
             self._remove_loading_more_placeholder()
             self.list_ctrl.DeleteAllItems()
             self.list_ctrl.InsertItem(0, "Loading...")
@@ -1850,7 +2134,13 @@ class MainFrame(wx.Frame):
         if self._unread_filter_enabled:
             feed_id = f"unread:{feed_id}"
 
-        have_articles = bool(getattr(self, "current_articles", None))
+        base_articles = None
+        if self._base_view_id == feed_id:
+            base_articles = getattr(self, "_base_articles", None)
+        if self._is_search_active():
+            have_articles = bool(base_articles)
+        else:
+            have_articles = bool(getattr(self, "current_articles", None))
         same_view = (feed_id == getattr(self, "current_feed_id", None))
 
         if have_articles and same_view:
@@ -1919,12 +2209,13 @@ class MainFrame(wx.Frame):
 
         self._remove_loading_more_placeholder()
 
-        self.current_articles = list(articles or [])
-        self.list_ctrl.DeleteAllItems()
-
         fid = getattr(self, 'current_feed_id', None)
+        base_articles = list(articles or [])
+        self._set_base_articles(base_articles, fid)
 
-        if not self.current_articles:
+        if not base_articles:
+            self.current_articles = []
+            self.list_ctrl.DeleteAllItems()
             self.list_ctrl.InsertItem(0, 'No articles found.')
             # Cache empty state
             if fid:
@@ -1942,29 +2233,27 @@ class MainFrame(wx.Frame):
                 pass
             return
 
-        self.list_ctrl.Freeze()
-        for i, article in enumerate(self.current_articles):
-            idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
-            
-            feed_title = ""
-            if article.feed_id:
-                feed = self.feed_map.get(article.feed_id)
-                if feed:
-                    feed_title = feed.title or ""
-            
-            self.list_ctrl.SetItem(idx, 1, article.author or "")
-            self.list_ctrl.SetItem(idx, 2, utils.humanize_article_date(article.date))
-            self.list_ctrl.SetItem(idx, 3, feed_title)
-            self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
-        self.list_ctrl.Thaw()
+        display_articles = base_articles
+        if self._is_search_active():
+            display_articles = self._filter_articles(base_articles, self._search_query)
+
+        self.current_articles = display_articles
+        self.list_ctrl.DeleteAllItems()
+        empty_label = "No matches." if (self._is_search_active() and base_articles) else "No articles found."
+        self._render_articles_list(display_articles, empty_label=empty_label)
+        if self._is_search_active():
+            try:
+                self.SetStatusText(f"Filter: {len(display_articles)} of {len(base_articles)}")
+            except Exception:
+                pass
 
         # Add a placeholder row if we know/strongly suspect there is more history coming.
         more = False
         if total is None:
-            more = (len(self.current_articles) >= page_size)
+            more = (len(base_articles) >= page_size)
         else:
             try:
-                more = int(total) > len(self.current_articles)
+                more = int(total) > len(base_articles)
             except Exception:
                 more = False
 
@@ -1976,8 +2265,8 @@ class MainFrame(wx.Frame):
         # Update cache for this view (fresh first page).
         if fid:
             st = self._ensure_view_state(fid)
-            st['articles'] = self.current_articles
-            st['id_set'] = {self._article_cache_id(a) for a in self.current_articles}
+            st['articles'] = base_articles
+            st['id_set'] = {self._article_cache_id(a) for a in base_articles}
             st['total'] = total
             st['page_size'] = int(page_size)
             st['paged_offset'] = len(articles or [])
@@ -2009,12 +2298,18 @@ class MainFrame(wx.Frame):
         if page_size is None:
             page_size = self.article_page_size
 
+        fid = getattr(self, 'current_feed_id', None)
+        base_articles = None
+        if self._base_view_id == fid:
+            base_articles = list(getattr(self, '_base_articles', []) or [])
+        else:
+            base_articles = list(getattr(self, 'current_articles', []) or [])
+
         # Deduplicate to avoid duplicates when the underlying feed shifts due to new entries.
-        existing_ids = {self._article_cache_id(a) for a in getattr(self, 'current_articles', [])}
+        existing_ids = {self._article_cache_id(a) for a in base_articles}
         new_articles = [a for a in articles if self._article_cache_id(a) not in existing_ids]
 
         # Even if everything was a duplicate, persist paging progress for resume logic.
-        fid = getattr(self, 'current_feed_id', None)
         st = None
         if fid:
             st = self._ensure_view_state(fid)
@@ -2063,33 +2358,28 @@ class MainFrame(wx.Frame):
         self._remove_loading_more_placeholder()
 
         # Combine and sort to ensure chronological order even if paging overlapped/shifted
-        combined = getattr(self, 'current_articles', []) + new_articles
+        combined = base_articles + new_articles
         combined.sort(key=lambda a: (a.timestamp, self._article_cache_id(a)), reverse=True)
-        self.current_articles = combined
+        self._set_base_articles(combined, fid)
 
-        self.list_ctrl.Freeze()
-        self.list_ctrl.DeleteAllItems()
-        for i, article in enumerate(self.current_articles):
-            idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
-            
-            feed_title = ""
-            if article.feed_id:
-                feed = self.feed_map.get(article.feed_id)
-                if feed:
-                    feed_title = feed.title or ""
-            
-            self.list_ctrl.SetItem(idx, 1, article.author or "")
-            self.list_ctrl.SetItem(idx, 2, utils.humanize_article_date(article.date))
-            self.list_ctrl.SetItem(idx, 3, feed_title)
-            self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
-        
-        self.list_ctrl.Thaw()
+        display_articles = combined
+        if self._is_search_active():
+            display_articles = self._filter_articles(combined, self._search_query)
+        self.current_articles = display_articles
+
+        empty_label = "No matches." if (self._is_search_active() and combined) else "No articles found."
+        self._render_articles_list(display_articles, empty_label=empty_label)
+        if self._is_search_active():
+            try:
+                self.SetStatusText(f"Filter: {len(display_articles)} of {len(combined)}")
+            except Exception:
+                pass
 
         # Update cache for this view
         if fid:
             st = self._ensure_view_state(fid)
-            st['articles'] = self.current_articles
-            st['id_set'] = {self._article_cache_id(a) for a in self.current_articles}
+            st['articles'] = combined
+            st['id_set'] = {self._article_cache_id(a) for a in combined}
             if total is not None:
                 st['total'] = total
             st['page_size'] = int(page_size)
@@ -2117,7 +2407,7 @@ class MainFrame(wx.Frame):
                 if fid and st is not None and st.get('paged_offset') is not None:
                     more = int(st.get('paged_offset', 0)) < int(total)
                 else:
-                    more = int(total) > len(self.current_articles)
+                    more = int(total) > len(combined)
             except Exception:
                 more = False
 
@@ -2229,8 +2519,12 @@ class MainFrame(wx.Frame):
         fid = getattr(self, 'current_feed_id', None)
         if fid:
             st = self._ensure_view_state(fid)
-            st['articles'] = (getattr(self, 'current_articles', []) or [])
-            st['id_set'] = {self._article_cache_id(a) for a in (getattr(self, 'current_articles', []) or [])}
+            if self._base_view_id == fid:
+                base_articles = list(getattr(self, "_base_articles", []) or [])
+            else:
+                base_articles = list(getattr(self, "current_articles", []) or [])
+            st['articles'] = base_articles
+            st['id_set'] = {self._article_cache_id(a) for a in base_articles}
             st['fully_loaded'] = True
             st['last_access'] = time.time()
 
@@ -2295,7 +2589,10 @@ class MainFrame(wx.Frame):
         # 1. Use current article count as authoritative source if available.
         # 2. Fall back to cached paged_offset.
         # This fixes bugs where cache eviction resets paged_offset to 0, causing Page 0 duplicates.
-        current_count = len(getattr(self, "current_articles", []) or [])
+        if self._base_view_id == feed_id:
+            current_count = len(getattr(self, "_base_articles", []) or [])
+        else:
+            current_count = len(getattr(self, "current_articles", []) or [])
         cached_offset = int(st.get("paged_offset", 0))
         offset = current_count if current_count > 0 else cached_offset
 
@@ -2348,12 +2645,18 @@ class MainFrame(wx.Frame):
 
         page_size = self.article_page_size
 
+        base_articles = None
+        if self._base_view_id == feed_id:
+            base_articles = list(getattr(self, "_base_articles", []) or [])
+        else:
+            base_articles = list(getattr(self, "current_articles", []) or [])
+
         # No prior content: behave like a normal populate
-        if not getattr(self, "current_articles", None):
+        if not base_articles:
             self._populate_articles(latest_page, request_id, None, page_size)
             return
 
-        existing_ids = {self._article_cache_id(a) for a in self.current_articles}
+        existing_ids = {self._article_cache_id(a) for a in base_articles}
         new_entries = [a for a in latest_page if self._article_cache_id(a) not in existing_ids]
         if not new_entries:
             return
@@ -2382,7 +2685,7 @@ class MainFrame(wx.Frame):
         self._updating_list = True
         try:
             # Combine, deduplicate, and sort
-            combined = new_entries + self.current_articles
+            combined = new_entries + base_articles
             combined.sort(key=lambda a: (a.timestamp, self._article_cache_id(a)), reverse=True)
             
             # Enforce page-limited view based on how many history pages the user loaded.
@@ -2401,31 +2704,25 @@ class MainFrame(wx.Frame):
                 pass
 
             # If no change in order or content after truncation, skip
-            if [self._article_cache_id(a) for a in combined] == [self._article_cache_id(a) for a in self.current_articles]:
+            if [self._article_cache_id(a) for a in combined] == [self._article_cache_id(a) for a in base_articles]:
                 return
 
-            self.current_articles = combined
+            self._set_base_articles(combined, feed_id)
+            display_articles = combined
+            if self._is_search_active():
+                display_articles = self._filter_articles(combined, self._search_query)
+            self.current_articles = display_articles
             
             # Reset placeholder state since we are doing a full rebuild
             self._remove_loading_more_placeholder()
 
-            self.list_ctrl.Freeze()
-            self.list_ctrl.DeleteAllItems()
-            for i, article in enumerate(self.current_articles):
-                idx = self.list_ctrl.InsertItem(i, self._get_display_title(article))
-                
-                feed_title = ""
-                if article.feed_id:
-                    feed = self.feed_map.get(article.feed_id)
-                    if feed:
-                        feed_title = feed.title or ""
-                        
-                self.list_ctrl.SetItem(idx, 1, article.author or "")
-                self.list_ctrl.SetItem(idx, 2, utils.humanize_article_date(article.date))
-                self.list_ctrl.SetItem(idx, 3, feed_title)
-                self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
-            
-            self.list_ctrl.Thaw()
+            empty_label = "No matches." if (self._is_search_active() and combined) else "No articles found."
+            self._render_articles_list(display_articles, empty_label=empty_label)
+            if self._is_search_active():
+                try:
+                    self.SetStatusText(f"Filter: {len(display_articles)} of {len(combined)}")
+                except Exception:
+                    pass
 
             # Re-evaluate "Load More" placeholder
             more = False
@@ -2436,13 +2733,13 @@ class MainFrame(wx.Frame):
                 if total is None:
                     # If we truncated, we definitely have more.
                     # Otherwise fallback to page check
-                    more = truncated or (len(self.current_articles) >= page_size)
+                    more = truncated or (len(combined) >= page_size)
                 else:
                     try:
                         # If we have a total, checks if we've shown everything.
                         # Note: paged_offset tracks what we FETCHED, not what we show.
                         # But typically they align unless we truncated.
-                        more = int(total) > len(self.current_articles)
+                        more = int(total) > len(combined)
                     except Exception:
                         more = False
             
@@ -2465,8 +2762,8 @@ class MainFrame(wx.Frame):
         fid = getattr(self, 'current_feed_id', None)
         if fid:
             st = self._ensure_view_state(fid)
-            st['articles'] = self.current_articles
-            st['id_set'] = {self._article_cache_id(a) for a in self.current_articles}
+            st['articles'] = combined
+            st['id_set'] = {self._article_cache_id(a) for a in combined}
             # Do NOT advance paged_offset here; quick top-ups shouldn't change history offset.
             st['page_size'] = page_size
             st['last_access'] = time.time()
@@ -4021,6 +4318,7 @@ class MainFrame(wx.Frame):
                 try:
                     # Clear list/content immediately to avoid stale selection against new provider.
                     self.current_articles = []
+                    self._set_base_articles([], None)
                     self.list_ctrl.DeleteAllItems()
                     self.content_ctrl.SetValue("")
                 except Exception:
