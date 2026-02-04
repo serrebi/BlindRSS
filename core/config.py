@@ -79,6 +79,7 @@ DEFAULT_CONFIG = {
     "download_retention": "Unlimited",
     "article_retention": "Unlimited",
     "persistent_searches": [],
+    "show_search_field": True,
     "providers": {
         "local": {
             "feeds": []  # List of feed URLs/data

@@ -85,6 +85,7 @@ class MainFrame(wx.Frame):
         self._persistent_searches = []
         self._persistent_search_menu = None
         self._persistent_search_items = {}
+        self._search_visible = bool(self.config_manager.get("show_search_field", True))
 
         self.init_ui()
         self.init_menus()
@@ -278,13 +279,7 @@ class MainFrame(wx.Frame):
         self._base_articles = []
 
         self._bind_search_tab_escape()
-
-        try:
-            self.search_ctrl.MoveAfterInTabOrder(self.tree)
-            self.list_ctrl.MoveAfterInTabOrder(self.search_ctrl)
-            self.content_ctrl.MoveAfterInTabOrder(self.list_ctrl)
-        except Exception:
-            pass
+        self._set_search_visible(self._search_visible, update_menu=False, update_config=False)
 
     def _focus_default_control(self):
         """Ensure keyboard focus lands on the tree after the frame is visible."""
@@ -299,6 +294,57 @@ class MainFrame(wx.Frame):
             self.Maximize(True)
         elif self.IsMaximized():
             self.Maximize(False)
+
+    def _update_search_tab_order(self) -> None:
+        try:
+            if getattr(self, "_search_visible", True):
+                self.search_ctrl.MoveAfterInTabOrder(self.tree)
+                self.list_ctrl.MoveAfterInTabOrder(self.search_ctrl)
+                self.content_ctrl.MoveAfterInTabOrder(self.list_ctrl)
+            else:
+                self.list_ctrl.MoveAfterInTabOrder(self.tree)
+                self.content_ctrl.MoveAfterInTabOrder(self.list_ctrl)
+        except Exception:
+            pass
+
+    def _set_search_visible(self, show: bool, *, update_menu: bool = True, update_config: bool = True) -> None:
+        self._search_visible = bool(show)
+        if update_config:
+            try:
+                self.config_manager.set("show_search_field", self._search_visible)
+            except Exception:
+                pass
+        try:
+            self.search_ctrl.Show(self._search_visible)
+        except Exception:
+            pass
+
+        try:
+            parent = self.search_ctrl.GetParent()
+            if parent:
+                parent.Layout()
+                parent.Refresh()
+        except Exception:
+            pass
+
+        if not self._search_visible:
+            try:
+                focus = self._get_focused_window()
+            except Exception:
+                focus = None
+            try:
+                if focus == self.search_ctrl or focus in self.search_ctrl.GetChildren():
+                    self.list_ctrl.SetFocus()
+            except Exception:
+                pass
+
+        self._update_search_tab_order()
+
+        if update_menu and getattr(self, "_show_search_item", None):
+            try:
+                self._show_search_item.Check(self._search_visible)
+            except Exception:
+                pass
 
     def _is_search_active(self) -> bool:
         return bool(getattr(self, "_search_active", False) and (self._search_query or "").strip())
@@ -568,6 +614,12 @@ class MainFrame(wx.Frame):
                 self._save_persistent_searches(searches)
         finally:
             dlg.Destroy()
+
+    def on_toggle_search_field(self, event):
+        try:
+            self._set_search_visible(event.IsChecked())
+        except Exception:
+            self._set_search_visible(True)
 
     def _apply_search_filter(self):
         if not self._is_search_active():
@@ -937,6 +989,9 @@ class MainFrame(wx.Frame):
         exit_item = file_menu.Append(wx.ID_EXIT, "E&xit", "Exit application")
         
         view_menu = wx.Menu()
+        show_search_item = view_menu.AppendCheckItem(wx.ID_ANY, "Show &Search Field", "Show or hide the search field")
+        show_search_item.Check(bool(getattr(self, "_search_visible", True)))
+        self._show_search_item = show_search_item
         # Ctrl+P is handled globally (see main.py GlobalMediaKeyFilter). Do not make it a menu accelerator.
         player_item = view_menu.Append(wx.ID_ANY, "Show/Hide &Player (Ctrl+P)", "Show or hide the media player window")
 
@@ -981,6 +1036,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_import_opml, import_opml_item)
         self.Bind(wx.EVT_MENU, self.on_export_opml, export_opml_item)
         self.Bind(wx.EVT_MENU, self.on_configure_persistent_search, persistent_search_item)
+        self.Bind(wx.EVT_MENU, self.on_toggle_search_field, show_search_item)
         self.Bind(wx.EVT_MENU, self.on_show_player, player_item)
         self.Bind(wx.EVT_MENU, self.on_show_player, player_toggle_item)
         self.Bind(wx.EVT_MENU, self.on_player_play_pause, player_play_pause_item)
