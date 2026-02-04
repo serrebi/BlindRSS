@@ -277,6 +277,8 @@ class MainFrame(wx.Frame):
         self.current_articles = []
         self._base_articles = []
 
+        self._bind_search_tab_escape()
+
         try:
             self.search_ctrl.MoveAfterInTabOrder(self.tree)
             self.list_ctrl.MoveAfterInTabOrder(self.search_ctrl)
@@ -471,6 +473,37 @@ class MainFrame(wx.Frame):
             self.list_ctrl.SetItem(idx, 3, feed_title)
             self.list_ctrl.SetItem(idx, 4, "Read" if article.is_read else "Unread")
         self.list_ctrl.Thaw()
+
+    def _bind_search_tab_escape(self):
+        def _handle_tab(event):
+            try:
+                key = event.GetKeyCode()
+            except Exception:
+                key = None
+            if key == wx.WXK_TAB:
+                flags = wx.NavigationKeyEvent.IsBackward if event.ShiftDown() else wx.NavigationKeyEvent.IsForward
+                try:
+                    self.search_ctrl.Navigate(flags)
+                except Exception:
+                    try:
+                        self.Navigate(flags)
+                    except Exception:
+                        pass
+                return
+            event.Skip()
+
+        try:
+            self.search_ctrl.Bind(wx.EVT_CHAR_HOOK, _handle_tab)
+        except Exception:
+            pass
+        try:
+            for child in self.search_ctrl.GetChildren():
+                try:
+                    child.Bind(wx.EVT_CHAR_HOOK, _handle_tab)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _should_show_load_more_placeholder(self, base_count: int | None = None) -> bool:
         fid = getattr(self, "current_feed_id", None)
