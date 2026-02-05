@@ -141,6 +141,26 @@ class SettingsDialog(wx.Dialog):
         
         refresh_sizer.Add(self.refresh_ctrl, 0, wx.ALL, 5)
         general_sizer.Add(refresh_sizer, 0, wx.EXPAND | wx.ALL, 5)
+
+        search_mode_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        search_mode_sizer.Add(wx.StaticText(general_panel, label="Search Matches:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        self.search_mode_map = {
+            "Titles only": "title_only",
+            "Titles + article text": "title_content",
+        }
+        self.search_mode_choices = list(self.search_mode_map.keys())
+        self.search_mode_ctrl = wx.Choice(general_panel, choices=self.search_mode_choices)
+        current_search_mode = str(config.get("search_mode", "title_content") or "title_content")
+        selected_label = None
+        for label, value in self.search_mode_map.items():
+            if value == current_search_mode:
+                selected_label = label
+                break
+        if not selected_label:
+            selected_label = "Titles + article text"
+        self.search_mode_ctrl.SetStringSelection(selected_label)
+        search_mode_sizer.Add(self.search_mode_ctrl, 0, wx.ALL, 5)
+        general_sizer.Add(search_mode_sizer, 0, wx.EXPAND | wx.ALL, 5)
         
         concurrency_sizer = wx.BoxSizer(wx.HORIZONTAL)
         concurrency_sizer.Add(wx.StaticText(general_panel, label="Max Concurrent Refreshes:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
@@ -642,6 +662,7 @@ class SettingsDialog(wx.Dialog):
 
         return {
             "refresh_interval": self.refresh_map.get(self.refresh_ctrl.GetStringSelection(), 300),
+            "search_mode": self.search_mode_map.get(self.search_mode_ctrl.GetStringSelection(), "title_content"),
             "max_concurrent_refreshes": self.concurrent_ctrl.GetValue(),
             "per_host_max_connections": self.per_host_ctrl.GetValue(),
             "feed_timeout_seconds": self.timeout_ctrl.GetValue(),

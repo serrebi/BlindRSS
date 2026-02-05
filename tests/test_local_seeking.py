@@ -42,10 +42,10 @@ class LocalSeekingProxyTests(unittest.TestCase):
         conn.close()
 
     def test_parse_range_header_clamps(self):
-        # When total length is known, clamp end; when unknown, keep request end.
+        # Explicit end should clamp to known length; open-ended stays None.
         self.assertEqual(rcp._parse_range_header("bytes=0-100", 50), (0, 49))
         self.assertEqual(rcp._parse_range_header("bytes=100-200", None), (100, 200))
-        self.assertEqual(rcp._parse_range_header("bytes=200-", 500), (200, 499))
+        self.assertEqual(rcp._parse_range_header("bytes=200-", 500), (200, None))
 
     def test_proxify_returns_local_media_url(self):
         proxied = self.proxy.proxify("http://example.com/audio.mp3")

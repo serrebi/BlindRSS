@@ -86,6 +86,7 @@ class MainFrame(wx.Frame):
         self._persistent_search_menu = None
         self._persistent_search_items = {}
         self._search_visible = bool(self.config_manager.get("show_search_field", True))
+        self._search_mode = self._normalize_search_mode(self.config_manager.get("search_mode", "title_content"))
 
         self.init_ui()
         self.init_menus()
@@ -439,27 +440,21 @@ class MainFrame(wx.Frame):
             return list(st.get("articles") or [])
         return list(getattr(self, "current_articles", []) or [])
 
+    def _normalize_search_mode(self, mode: str) -> str:
+        mode = (mode or "").strip().lower()
+        if mode in ("title_only", "titles_only", "title"):
+            return "title_only"
+        return "title_content"
+
     def _article_search_text(self, article) -> str:
         if not article:
             return ""
         parts = []
+        mode = getattr(self, "_search_mode", "title_content")
         try:
             parts.append(getattr(article, "title", "") or "")
-            parts.append(getattr(article, "author", "") or "")
-            parts.append(getattr(article, "url", "") or "")
-            parts.append(getattr(article, "content", "") or "")
-            parts.append(getattr(article, "media_url", "") or "")
-        except Exception:
-            pass
-        try:
-            feed_title = ""
-            feed_id = getattr(article, "feed_id", None)
-            if feed_id:
-                feed = self.feed_map.get(feed_id)
-                if feed:
-                    feed_title = feed.title or ""
-            if feed_title:
-                parts.append(feed_title)
+            if mode != "title_only":
+                parts.append(getattr(article, "content", "") or "")
         except Exception:
             pass
         return " ".join([p for p in parts if p]).lower()
@@ -4456,6 +4451,10 @@ class MainFrame(wx.Frame):
             old_cache_full_text = bool(self.config_manager.get("cache_full_text", False))
         except Exception:
             old_cache_full_text = False
+        try:
+            old_search_mode = self._normalize_search_mode(self.config_manager.get("search_mode", "title_content"))
+        except Exception:
+            old_search_mode = "title_content"
 
         dlg = SettingsDialog(self, self.config_manager.config)
         if dlg.ShowModal() == wx.ID_OK:
@@ -4478,6 +4477,16 @@ class MainFrame(wx.Frame):
                         self._reset_fulltext_prefetch(getattr(self, "current_articles", []) or [])
                     else:
                         self._clear_fulltext_prefetch_queue()
+                except Exception:
+                    pass
+
+            try:
+                self._search_mode = self._normalize_search_mode(self.config_manager.get("search_mode", "title_content"))
+            except Exception:
+                self._search_mode = "title_content"
+            if self._is_search_active() and self._search_mode != old_search_mode:
+                try:
+                    self._apply_search_filter()
                 except Exception:
                     pass
 

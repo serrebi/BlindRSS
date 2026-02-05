@@ -80,6 +80,7 @@ DEFAULT_CONFIG = {
     "article_retention": "Unlimited",
     "persistent_searches": [],
     "show_search_field": True,
+    "search_mode": "title_content",
     "providers": {
         "local": {
             "feeds": []  # List of feed URLs/data

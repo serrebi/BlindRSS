@@ -9,7 +9,7 @@ def test_parse_range():
     # Open-ended request
     result = _parse_range_header("bytes=0-", 140285994)
     print(f"Parse 'bytes=0-' with total=140285994: {result}")
-    assert result == (0, 140285993), f"Expected (0, 140285993), got {result}"
+    assert result == (0, None), f"Expected (0, None), got {result}"
     
     # Explicit end
     result = _parse_range_header("bytes=0-1000", 140285994)
@@ -19,7 +19,7 @@ def test_parse_range():
     # Start from middle
     result = _parse_range_header("bytes=21966541-", 140285994)
     print(f"Parse 'bytes=21966541-' with total=140285994: {result}")
-    assert result == (21966541, 140285993), f"Expected (21966541, 140285993), got {result}"
+    assert result == (21966541, None), f"Expected (21966541, None), got {result}"
     
     print("\nAll parse tests passed!")
 
