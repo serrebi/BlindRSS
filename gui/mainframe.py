@@ -82,6 +82,8 @@ class MainFrame(wx.Frame):
         self._search_active = False
         self._base_articles = []
         self._base_view_id = None
+        self._search_base_articles = None
+        self._search_base_view_id = None
         self._persistent_searches = []
         self._persistent_search_menu = None
         self._persistent_search_items = {}
@@ -621,6 +623,12 @@ class MainFrame(wx.Frame):
             return
         base_articles = self._get_base_articles_for_current_view()
         self._set_base_articles(base_articles, getattr(self, "current_feed_id", None))
+        try:
+            self._search_base_articles = list(base_articles or [])
+            self._search_base_view_id = getattr(self, "current_feed_id", None)
+        except Exception:
+            self._search_base_articles = None
+            self._search_base_view_id = None
 
         focused_id, top_id, selected_id, load_more_selected = self._capture_list_view_state()
 
@@ -670,7 +678,17 @@ class MainFrame(wx.Frame):
         self._search_active = False
         self._search_query = ""
 
-        base_articles = self._get_base_articles_for_current_view()
+        base_articles = None
+        try:
+            if (
+                self._search_base_view_id == getattr(self, "current_feed_id", None)
+                and self._search_base_articles is not None
+            ):
+                base_articles = list(self._search_base_articles or [])
+        except Exception:
+            base_articles = None
+        if base_articles is None:
+            base_articles = self._get_base_articles_for_current_view()
         self._set_base_articles(base_articles, getattr(self, "current_feed_id", None))
 
         focused_id, top_id, selected_id, load_more_selected = self._capture_list_view_state()
@@ -703,6 +721,9 @@ class MainFrame(wx.Frame):
             self.SetStatusText("")
         except Exception:
             pass
+
+        self._search_base_articles = None
+        self._search_base_view_id = None
 
     def _ensure_player_window(self):
         pw = getattr(self, "player_window", None)
