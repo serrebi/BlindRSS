@@ -457,8 +457,23 @@ class MainFrame(wx.Frame):
             parts.append(getattr(article, "title", "") or "")
             if mode != "title_only":
                 parts.append(getattr(article, "content", "") or "")
+                parts.append(getattr(article, "author", "") or "")
+                parts.append(getattr(article, "url", "") or "")
+                parts.append(getattr(article, "media_url", "") or "")
         except Exception:
             pass
+        if mode != "title_only":
+            try:
+                feed_title = ""
+                feed_id = getattr(article, "feed_id", None)
+                if feed_id:
+                    feed = self.feed_map.get(feed_id)
+                    if feed:
+                        feed_title = feed.title or ""
+                if feed_title:
+                    parts.append(feed_title)
+            except Exception:
+                pass
         return " ".join([p for p in parts if p]).lower()
 
     def _filter_articles(self, articles, query: str):
