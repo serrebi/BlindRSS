@@ -222,7 +222,9 @@ class _Entry:
     def _make_session(self) -> requests.Session:
         s = requests.Session()
         try:
-            adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=2)
+            # Playback proxying should fail fast. Long retries can stall VLC startup
+            # (and are especially painful when combined with redirect chains).
+            adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=0)
             s.mount("http://", adapter)
             s.mount("https://", adapter)
         except Exception:
@@ -1080,8 +1082,9 @@ class _Entry:
         # The HTTP handler will wait for the probe if needed when VLC requests bytes.
         def _bg_probe():
             try:
-                with ent.lock:
-                    ent.probe()
+                # Never hold ent.lock (segment/cache lock) while probing the origin.
+                # A slow probe would otherwise block /media reads and delay playback.
+                ent.probe()
             except Exception:
                 pass
         try:
@@ -1690,8 +1693,9 @@ class RangeCacheProxy:
         # The HTTP handler will wait for the probe if needed when VLC requests bytes.
         def _bg_probe():
             try:
-                with ent.lock:
-                    ent.probe()
+                # Never hold ent.lock (segment/cache lock) while probing the origin.
+                # A slow probe would otherwise block /media reads and delay playback.
+                ent.probe()
             except Exception:
                 pass
         try:
