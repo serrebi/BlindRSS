@@ -2147,6 +2147,7 @@ class PlayerFrame(wx.Frame):
         final_url = url
         ytdlp_headers = {}
         resolved_title = title or "Playing Audio..."
+        should_resolve = True
 
         if use_ytdlp:
             rumble_handled = False
