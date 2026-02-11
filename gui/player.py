@@ -357,6 +357,10 @@ class PlayerFrame(wx.Frame):
                 self.event_manager.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._on_vlc_error)
             except Exception:
                 pass
+            try:
+                self.apply_preferred_soundcard()
+            except Exception:
+                pass
             self.initialized = True
             return True
         except Exception as e:
@@ -383,6 +387,43 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pass
         return self._init_vlc()
+
+    def _get_preferred_soundcard_id(self) -> str:
+        try:
+            raw = self.config_manager.get("preferred_soundcard", "")
+        except Exception:
+            raw = ""
+        value = str(raw or "").strip()
+        if value.lower() in {"default", "system", "system_default"}:
+            return ""
+        return value
+
+    def apply_preferred_soundcard(self) -> bool:
+        player = getattr(self, "player", None)
+        if player is None:
+            return False
+        device_id = self._get_preferred_soundcard_id()
+        prev_device_id = getattr(self, "_last_applied_soundcard_id", None)
+        try:
+            if device_id:
+                try:
+                    # mmdevice supports selecting specific Windows endpoint IDs.
+                    player.audio_output_set("mmdevice")
+                except Exception:
+                    pass
+                player.audio_output_device_set(None, str(device_id))
+            else:
+                player.audio_output_device_set(None, None)
+            self._last_applied_soundcard_id = str(device_id or "")
+            if str(prev_device_id or "") != str(device_id or ""):
+                if device_id:
+                    log.info("Applied preferred soundcard: %s", device_id)
+                else:
+                    log.info("Using system default soundcard")
+            return True
+        except Exception:
+            log.exception("Failed to apply preferred soundcard")
+            return False
 
     def _set_status(self, text: str) -> None:
         """Update the status label without spamming screen readers."""
@@ -1110,6 +1151,7 @@ class PlayerFrame(wx.Frame):
                     inline_window_kb=inline_window_kb,
                     initial_burst_kb=int(self._last_range_proxy_initial_burst_kb or self.config_manager.get('range_cache_initial_burst_kb', 65536) or 65536),
                     initial_inline_prefetch_kb=int(self._last_range_proxy_initial_inline_kb or self.config_manager.get('range_cache_initial_inline_prefetch_kb', 1024) or 1024),
+                    debug_logs=bool(self.config_manager.get('range_cache_debug', False)),
                 )
                 try:
                     proxy.start()
@@ -1189,6 +1231,10 @@ class PlayerFrame(wx.Frame):
             except Exception:
                 log.exception("Error calling self.player.play()")
                 return
+            try:
+                self.apply_preferred_soundcard()
+            except Exception:
+                pass
             try:
                 self.player.audio_set_volume(int(getattr(self, 'volume', 100)))
             except Exception:
@@ -2075,7 +2121,8 @@ class PlayerFrame(wx.Frame):
                                          background_download=background_download, background_chunk_kb=background_chunk_kb,
                                          inline_window_kb=inline_window_kb,
                                          initial_burst_kb=initial_burst_kb,
-                                         initial_inline_prefetch_kb=initial_inline_kb)
+                                         initial_inline_prefetch_kb=initial_inline_kb,
+                                         debug_logs=bool(self.config_manager.get('range_cache_debug', False)))
             
             # Default headers
             req_headers = {

@@ -209,6 +209,7 @@ class _Entry:
     # Probe completion event - set once the initial probe finishes
     _probe_done: threading.Event = field(default_factory=threading.Event)
 
+    debug_logs: bool = False
     _dir: str = ""
     _bg_thread: Optional[threading.Thread] = None
     _bg_stop: threading.Event = field(default_factory=threading.Event)
@@ -218,6 +219,20 @@ class _Entry:
         self._dir = os.path.join(self.cache_dir, _sha256_hex(self.url))
         _safe_mkdir(self._dir)
         self._load_existing_segments()
+
+    def _debug(self, fmt: str, *args) -> None:
+        if not bool(getattr(self, "debug_logs", False)):
+            return
+        try:
+            LOG.info("PROXY_DEBUG: " + fmt, *args)
+        except Exception:
+            pass
+
+    def _warn(self, fmt: str, *args) -> None:
+        try:
+            LOG.warning("PROXY_WARNING: " + fmt, *args)
+        except Exception:
+            pass
 
     def _make_session(self) -> requests.Session:
         s = requests.Session()
@@ -312,7 +327,7 @@ class _Entry:
 
                 # Atomic rename if possible (os.replace is atomic on same volume)
                 os.replace(temp_path, final_path)
-                print(f"PROXY_DEBUG: Finalized chunk {start}-{end}")
+                self._debug("Finalized chunk %s-%s", start, end)
                 
                 self.segments.append((start, end))
                 self.segments = _normalize_segments(self.segments)
@@ -361,7 +376,7 @@ class _Entry:
                     allow_redirects=True,
                 )
             except Exception as e:
-                print(f"PROXY_WARNING: RangeCacheProxy probe failed: {e}")
+                self._warn("RangeCacheProxy probe failed: %s", e)
                 self.range_supported = False
                 self.total_length = None
                 self._probe_done.set()
@@ -448,7 +463,7 @@ class _Entry:
             try:
                 r = session.get(target_url, headers=hdrs, stream=True, timeout=(10, 60), allow_redirects=True)
             except Exception as e:
-                print(f"PROXY_WARNING: RangeCacheProxy fetch failed: {e}")
+                self._warn("RangeCacheProxy fetch failed: %s", e)
                 return False
 
             try:
@@ -503,7 +518,7 @@ class _Entry:
                     # Only save if we got a meaningful amount (e.g. > 4KB) to avoid cache fragmentation.
                     if bytes_written > 4096:
                         actual_end = served_start + bytes_written - 1
-                        print(f"PROXY_DEBUG: Saving partial chunk {served_start}-{actual_end}")
+                        self._debug("Saving partial chunk %s-%s", served_start, actual_end)
                         self._finalize_chunk(tmp_path, served_start, actual_end)
                     else:
                         try:
@@ -643,7 +658,7 @@ class _Entry:
                 raise IOError("Cache miss while streaming")
             s, e = seg
             part_end = min(e, end_i)
-            print(f"PROXY_DEBUG: CACHE HIT {cur}-{part_end}")
+            self._debug("CACHE HIT %s-%s", cur, part_end)
             path = self._chunk_path(s, e)
             try:
                 with open(path, "rb") as f:
@@ -706,7 +721,7 @@ class _Entry:
             try:
                 r = session.get(target_url, headers=hdrs, stream=True, timeout=(10, 60), allow_redirects=True)
             except Exception as e:
-                print(f"PROXY_WARNING: RangeCacheProxy origin stream failed: {e}")
+                self._warn("RangeCacheProxy origin stream failed: %s", e)
                 return req_start - 1
 
             tmp_path = None
@@ -781,7 +796,7 @@ class _Entry:
                                 # Client disconnected; SAVE PARTIAL CACHE
                                 if bytes_written > 0:
                                     actual_end = served_start + bytes_written - 1
-                                    print(f"PROXY_DEBUG: Saving partial stream chunk {served_start}-{actual_end}")
+                                    self._debug("Saving partial stream chunk %s-%s", served_start, actual_end)
                                     f.close() # Ensure file is closed before finalizing
                                     self._finalize_chunk(tmp_path, served_start, actual_end)
                                     return actual_end
@@ -797,7 +812,7 @@ class _Entry:
                             if bytes_written >= expected_len:
                                 break
                 except Exception as e:
-                    print(f"PROXY_DEBUG: Error writing to temp file: {e}")
+                    self._debug("Error writing to temp file: %s", e)
                     try:
                         if os.path.exists(tmp_path):
                             os.remove(tmp_path)
@@ -809,7 +824,7 @@ class _Entry:
                     # Interrupted / truncated fetch from origin. SAVE PARTIAL CACHE.
                     if bytes_written > 0:
                         actual_end = served_start + bytes_written - 1
-                        print(f"PROXY_DEBUG: Saving truncated stream chunk {served_start}-{actual_end}")
+                        self._debug("Saving truncated stream chunk %s-%s", served_start, actual_end)
                         self._finalize_chunk(tmp_path, served_start, actual_end)
                         return actual_end
                     else:
@@ -873,10 +888,10 @@ class _Entry:
 
         def run() -> None:
             try:
-                print("PROXY_DEBUG: BG download starting")
+                self._debug("BG download starting")
                 self.probe()
                 if self.range_supported is False:
-                    print("PROXY_DEBUG: BG download aborted (no range support)")
+                    self._debug("BG download aborted (no range support)")
                     return
 
                 # Bootstrap size: make sure the start of the file is cached deeply.
@@ -887,7 +902,7 @@ class _Entry:
                 while not self._bg_stop.is_set():
                     # Stop if idle for a while.
                     if time.time() - self.last_access > 120:
-                        print("PROXY_DEBUG: BG download stopping (idle)")
+                        self._debug("BG download stopping (idle)")
                         return
 
                     ms = None
@@ -903,7 +918,7 @@ class _Entry:
                             except Exception:
                                 req = 0
                             if abs(req - int(self.bg_cursor)) > jump_threshold:
-                                print(f"PROXY_DEBUG: BG download jump {self.bg_cursor} -> {req}")
+                                self._debug("BG download jump %s -> %s", self.bg_cursor, req)
                                 self.bg_cursor = req
 
                         # Always download from the first not-yet-cached byte at/after bg_cursor.
@@ -948,13 +963,13 @@ class _Entry:
                             # If cursor moved > 2MB from the reference point, assume a seek occurred.
                             # Normal playback (audio) moves much slower than this.
                             if abs(cur_req - ref_req) > 2 * 1024 * 1024:
-                                print(f"PROXY_DEBUG: BG aborting chunk (seek detected: {ref_req} -> {cur_req})")
+                                self._debug("BG aborting chunk (seek detected: %s -> %s)", ref_req, cur_req)
                                 return True
                         except Exception:
                             pass
                         return False
 
-                    print(f"PROXY_DEBUG: BG fetching {ms}-{me}")
+                    self._debug("BG fetching %s-%s", ms, me)
                     ok = self._fetch_range(ms, me, check_abort=check_should_abort)
                     if not ok:
                         time.sleep(1.0)
@@ -1123,6 +1138,7 @@ class RangeCacheProxy:
         inline_window_kb: int = 1024,
         initial_burst_kb: int = 32768,
         initial_inline_prefetch_kb: int = 1024,
+        debug_logs: bool = False,
     ):
         base = cache_dir or os.path.join(tempfile.gettempdir(), "BlindRSS_streamcache")
         _safe_mkdir(base)
@@ -1142,6 +1158,7 @@ class RangeCacheProxy:
         self.max_inline_prefetch_bytes = 2 * 1024 * 1024
         self.background_download = bool(background_download)
         self.background_chunk_bytes = max(1024 * 1024, int(background_chunk_kb) * 1024)
+        self.debug_logs = bool(debug_logs)
 
         self._entries: Dict[str, _Entry] = {}
         self._lock = threading.RLock()
@@ -1156,6 +1173,20 @@ class RangeCacheProxy:
 
         self._map_dir = os.path.join(self.cache_dir, "mappings")
         _safe_mkdir(self._map_dir)
+
+    def _debug(self, fmt: str, *args) -> None:
+        if not bool(getattr(self, "debug_logs", False)):
+            return
+        try:
+            LOG.info("PROXY_DEBUG: " + fmt, *args)
+        except Exception:
+            pass
+
+    def _warn(self, fmt: str, *args) -> None:
+        try:
+            LOG.warning("PROXY_WARNING: " + fmt, *args)
+        except Exception:
+            pass
 
     def _mapping_path(self, sid: str) -> str:
         return os.path.join(self._map_dir, f"{sid}.json")
@@ -1211,6 +1242,7 @@ class RangeCacheProxy:
                 initial_burst_bytes=self.initial_burst_bytes,
                 initial_inline_prefetch_bytes=getattr(self, 'initial_inline_prefetch_bytes', 0),
                 background_chunk_bytes=self.background_chunk_bytes,
+                debug_logs=bool(getattr(self, "debug_logs", False)),
             )
             self._entries[sid] = ent
             return ent
@@ -1361,11 +1393,11 @@ class RangeCacheProxy:
                         pass
 
                     range_hdr = (self.headers.get("Range") or "").strip()
-                    print(f"PROXY_DEBUG: GET /media id={sid} Range={range_hdr}")
+                    proxy._debug("GET /media id=%s Range=%s", sid, range_hdr)
 
                     # If origin does not support range, just stream through (no caching).
                     if ent.range_supported is False:
-                        print("PROXY_DEBUG: Range not supported, streaming directly.")
+                        proxy._debug("Range not supported, streaming directly.")
                         hdrs = HEADERS.copy()
                         hdrs.pop("Accept", None)
                         hdrs.update(ent.headers or {})
@@ -1383,7 +1415,7 @@ class RangeCacheProxy:
                             try:
                                 r = session.get(ent.url, headers=hdrs, stream=True, timeout=(10, 60), allow_redirects=True)
                             except Exception as e:
-                                print(f"PROXY_DEBUG: Origin fetch failed: {e}")
+                                proxy._debug("Origin fetch failed: %s", e)
                                 self.send_error(502, f"Origin fetch failed: {e}")
                                 return
                             try:
@@ -1484,7 +1516,7 @@ class RangeCacheProxy:
                         else:
                             self.send_header("Content-Range", f"bytes {start}-{end}/*")
                         self.end_headers()
-                        print(f"PROXY_DEBUG: 206 Partial Content {start}-{end}/{ent.total_length}")
+                        proxy._debug("206 Partial Content %s-%s/%s", start, end, ent.total_length)
                     else:
                         self.send_response(200)
                         self.send_header("Content-Type", ent.content_type)
@@ -1492,7 +1524,7 @@ class RangeCacheProxy:
                             self.send_header("Content-Length", str(ent.total_length))
                         self.send_header("Accept-Ranges", "bytes")
                         self.end_headers()
-                        print(f"PROXY_DEBUG: 200 OK (Full Content)")
+                        proxy._debug("200 OK (Full Content)")
 
                     # Start background downloader early so the beginning of the file is cached ASAP.
                     try:
@@ -1542,7 +1574,7 @@ class RangeCacheProxy:
                         else:
                             miss_end = min(end, int(nxt) - 1)
 
-                        print(f"PROXY_DEBUG: Cache miss at {cur}, fetching {cur}-{miss_end}")
+                        proxy._debug("Cache miss at %s, fetching %s-%s", cur, cur, miss_end)
                         try:
                             streamed_end = ent.stream_origin_range_to_and_cache(cur, miss_end, self.wfile, flush_first=first_flush)
                         except Exception:
@@ -1578,7 +1610,7 @@ class RangeCacheProxy:
                 try:
                     self._server.serve_forever(poll_interval=0.25)
                 except Exception as e:
-                    print(f"PROXY_WARNING: RangeCacheProxy server error: {e}")
+                    self._warn("RangeCacheProxy server error: %s", e)
                 finally:
                     # Mark as not ready if the server stops unexpectedly.
                     try:
@@ -1735,6 +1767,7 @@ def get_range_cache_proxy(
     inline_window_kb: int = 1024,
     initial_burst_kb: int = 32768,
     initial_inline_prefetch_kb: int = 1024,
+    debug_logs: bool = False,
 ) -> RangeCacheProxy:
     global _RANGE_PROXY_SINGLETON
     if _RANGE_PROXY_SINGLETON is None:
@@ -1746,6 +1779,7 @@ def get_range_cache_proxy(
             inline_window_kb=inline_window_kb,
             initial_burst_kb=initial_burst_kb,
             initial_inline_prefetch_kb=initial_inline_prefetch_kb,
+            debug_logs=debug_logs,
         )
     else:
         # Allow tuning without replacing the server
@@ -1771,6 +1805,12 @@ def get_range_cache_proxy(
             _RANGE_PROXY_SINGLETON.background_download = bool(background_download)
             if background_chunk_kb:
                 _RANGE_PROXY_SINGLETON.background_chunk_bytes = max(1024 * 1024, int(background_chunk_kb) * 1024)
+            _RANGE_PROXY_SINGLETON.debug_logs = bool(debug_logs)
+            try:
+                for _sid, _ent in list(_RANGE_PROXY_SINGLETON._entries.items()):
+                    _ent.debug_logs = bool(debug_logs)
+            except Exception:
+                pass
         except Exception:
             pass
     return _RANGE_PROXY_SINGLETON

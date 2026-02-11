@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "sounds_enabled": True,
     "sound_refresh_complete": "sounds/refresh_complete.wav",
     "sound_refresh_error": "sounds/refresh_error.wav",
+    "preferred_soundcard": "",  # empty => use current OS default output device
     "skip_silence": True,
     "silence_vad_aggressiveness": 2,  # 0-3 (3 = most aggressive)
     "silence_vad_frame_ms": 30,  # 10, 20, or 30
@@ -74,6 +75,7 @@ DEFAULT_CONFIG = {
     "range_cache_dir": "",  # empty => use OS temp directory
     "range_cache_background_download": False,  # download ahead in background to make later seeks faster
     "range_cache_background_chunk_kb": 16384,  # chunk size for background download
+    "range_cache_debug": False,  # verbose local proxy debug logs (PROXY_DEBUG)
     "downloads_enabled": False,
     "download_path": os.path.join(APP_DIR, "podcasts"),
     "download_retention": "Unlimited",

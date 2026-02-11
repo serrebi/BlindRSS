@@ -4535,6 +4535,21 @@ class MainFrame(wx.Frame):
                 except Exception:
                     pass
 
+            if "preferred_soundcard" in data:
+                try:
+                    pw = getattr(self, "player_window", None)
+                    if pw:
+                        pw.apply_preferred_soundcard()
+                except Exception:
+                    pass
+
+            if "range_cache_debug" in data:
+                try:
+                    from core.range_cache_proxy import get_range_cache_proxy
+                    get_range_cache_proxy(debug_logs=bool(data.get("range_cache_debug", False)))
+                except Exception:
+                    pass
+
             # If provider credentials/provider selection changed, recreate provider and refresh tree/articles
             try:
                 new_provider = self.config_manager.get("active_provider", "local")

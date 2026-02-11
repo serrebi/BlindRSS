@@ -27,6 +27,18 @@ class MinifluxProvider(RSSProvider):
         self.headers.update(utils.HEADERS)
         # Ensure Accept stays JSON for API calls.
         self.headers["Accept"] = "application/json"
+
+    def _request_timeout_seconds(self, endpoint: str = "") -> int:
+        """Return request timeout, with a longer floor for refresh endpoints."""
+        try:
+            base_timeout = int(self.config.get("feed_timeout_seconds", 15))
+        except Exception:
+            base_timeout = 15
+        base_timeout = max(5, min(120, int(base_timeout)))
+        if "refresh" in str(endpoint or ""):
+            # Miniflux refresh endpoints can take longer on busy/self-hosted instances.
+            return max(base_timeout, 25)
+        return base_timeout
         
     def get_name(self) -> str:
         return "Miniflux"
@@ -42,9 +54,10 @@ class MinifluxProvider(RSSProvider):
         if not self.base_url:
             return None
         url = f"{self.base_url}{endpoint}"
+        timeout_s = self._request_timeout_seconds(endpoint)
         try:
             # Uses self.headers which includes a browser-like User-Agent
-            resp = requests.request(method, url, headers=self.headers, json=json, params=params, timeout=10)
+            resp = requests.request(method, url, headers=self.headers, json=json, params=params, timeout=timeout_s)
             resp.raise_for_status()
 
             if resp.status_code == 204:
@@ -63,6 +76,13 @@ class MinifluxProvider(RSSProvider):
                 log.debug(f"Miniflux endpoint failed for {url} (500). Server might be overloaded.")
             else:
                 log.error(f"Miniflux error for {url}: {e}")
+            return None
+        except requests.Timeout as e:
+            # Refresh timeouts are usually transient server load; keep logs less severe.
+            if "refresh" in str(endpoint or ""):
+                log.warning(f"Miniflux refresh timeout for {url} (timeout={timeout_s}s): {e}")
+            else:
+                log.error(f"Miniflux timeout for {url} (timeout={timeout_s}s): {e}")
             return None
         except Exception as e:
             log.error(f"Miniflux error for {url}: {e}")

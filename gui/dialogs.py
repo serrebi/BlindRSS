@@ -3,11 +3,14 @@ import copy
 import threading
 import webbrowser
 import time
+import logging
 from urllib.parse import urlparse
 from core.discovery import discover_feed, is_ytdlp_supported
 from core import utils
 from core.casting import CastingManager
 from core import inoreader_oauth
+
+log = logging.getLogger(__name__)
 
 
 class AddFeedDialog(wx.Dialog):
@@ -186,46 +189,6 @@ class SettingsDialog(wx.Dialog):
         retry_sizer.Add(self.retry_ctrl, 0, wx.ALL, 5)
         general_sizer.Add(retry_sizer, 0, wx.EXPAND | wx.ALL, 5)
         
-        self.skip_silence_chk = wx.CheckBox(general_panel, label="Skip Silence (Experimental)")
-        self.skip_silence_chk.SetValue(config.get("skip_silence", False))
-        general_sizer.Add(self.skip_silence_chk, 0, wx.ALL, 5)
-        
-        # Playback speed
-        speed_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        speed_sizer.Add(wx.StaticText(general_panel, label="Default Playback Speed:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
-        
-        # Build speed choices using utils
-        speeds = utils.build_playback_speeds()
-        self.speed_choices = [f"{s:.2f}x" for s in speeds]
-        current_speed = float(config.get("playback_speed", 1.0))
-        
-        self.speed_ctrl = wx.ComboBox(general_panel, choices=self.speed_choices, style=wx.CB_READONLY)
-        
-        # Find nearest selection
-        sel_idx = 0
-        min_diff = 999.0
-        for i, s in enumerate(speeds):
-            diff = abs(s - current_speed)
-            if diff < min_diff:
-                min_diff = diff
-                sel_idx = i
-        self.speed_ctrl.SetSelection(sel_idx)
-        
-        speed_sizer.Add(self.speed_ctrl, 0, wx.ALL, 5)
-        general_sizer.Add(speed_sizer, 0, wx.EXPAND | wx.ALL, 5)
-
-        # Player window behavior
-        self.show_player_on_play_chk = wx.CheckBox(general_panel, label="Show player window when starting playback")
-        self.show_player_on_play_chk.SetValue(bool(config.get("show_player_on_play", True)))
-        general_sizer.Add(self.show_player_on_play_chk, 0, wx.ALL, 5)
-
-        # VLC network caching (helps on high latency streams)
-        cache_net_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        cache_net_sizer.Add(wx.StaticText(general_panel, label="Network Cache (ms):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
-        self.vlc_cache_ctrl = wx.SpinCtrl(general_panel, min=500, max=60000, initial=int(config.get("vlc_network_caching_ms", 5000)))
-        cache_net_sizer.Add(self.vlc_cache_ctrl, 0, wx.ALL, 5)
-        general_sizer.Add(cache_net_sizer, 0, wx.EXPAND | wx.ALL, 5)
-        
         # Cache views
         cache_sizer = wx.BoxSizer(wx.HORIZONTAL)
         cache_sizer.Add(wx.StaticText(general_panel, label="Max Cached Views:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
@@ -298,6 +261,73 @@ class SettingsDialog(wx.Dialog):
         
         general_panel.SetSizer(general_sizer)
         notebook.AddPage(general_panel, "General")
+
+        # Media Player Tab
+        media_panel = wx.Panel(notebook)
+        media_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Preferred soundcard
+        soundcard_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        soundcard_sizer.Add(wx.StaticText(media_panel, label="Preferred Soundcard:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        current_soundcard = str(config.get("preferred_soundcard", "") or "")
+        self._soundcard_choices = self._build_soundcard_choices(current_soundcard)
+        self._soundcard_labels = [label for label, _device_id in self._soundcard_choices]
+        self.soundcard_ctrl = wx.Choice(media_panel, choices=self._soundcard_labels)
+        sel_idx = 0
+        for i, (_label, device_id) in enumerate(self._soundcard_choices):
+            if str(device_id or "") == current_soundcard:
+                sel_idx = i
+                break
+        self.soundcard_ctrl.SetSelection(sel_idx)
+        soundcard_sizer.Add(self.soundcard_ctrl, 1, wx.ALL, 5)
+        media_sizer.Add(soundcard_sizer, 0, wx.EXPAND | wx.ALL, 5)
+
+        self.skip_silence_chk = wx.CheckBox(media_panel, label="Skip Silence (Experimental)")
+        self.skip_silence_chk.SetValue(config.get("skip_silence", False))
+        media_sizer.Add(self.skip_silence_chk, 0, wx.ALL, 5)
+
+        # Playback speed
+        speed_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        speed_sizer.Add(wx.StaticText(media_panel, label="Default Playback Speed:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+
+        # Build speed choices using utils
+        speeds = utils.build_playback_speeds()
+        self.speed_choices = [f"{s:.2f}x" for s in speeds]
+        current_speed = float(config.get("playback_speed", 1.0))
+
+        self.speed_ctrl = wx.ComboBox(media_panel, choices=self.speed_choices, style=wx.CB_READONLY)
+
+        # Find nearest selection
+        sel_idx = 0
+        min_diff = 999.0
+        for i, s in enumerate(speeds):
+            diff = abs(s - current_speed)
+            if diff < min_diff:
+                min_diff = diff
+                sel_idx = i
+        self.speed_ctrl.SetSelection(sel_idx)
+
+        speed_sizer.Add(self.speed_ctrl, 0, wx.ALL, 5)
+        media_sizer.Add(speed_sizer, 0, wx.EXPAND | wx.ALL, 5)
+
+        # Player window behavior
+        self.show_player_on_play_chk = wx.CheckBox(media_panel, label="Show player window when starting playback")
+        self.show_player_on_play_chk.SetValue(bool(config.get("show_player_on_play", True)))
+        media_sizer.Add(self.show_player_on_play_chk, 0, wx.ALL, 5)
+
+        # VLC network caching (helps on high latency streams)
+        cache_net_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        cache_net_sizer.Add(wx.StaticText(media_panel, label="Network Cache (ms):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        self.vlc_cache_ctrl = wx.SpinCtrl(media_panel, min=500, max=60000, initial=int(config.get("vlc_network_caching_ms", 5000)))
+        cache_net_sizer.Add(self.vlc_cache_ctrl, 0, wx.ALL, 5)
+        media_sizer.Add(cache_net_sizer, 0, wx.EXPAND | wx.ALL, 5)
+
+        self.range_cache_debug_chk = wx.CheckBox(media_panel, label="Verbose range-cache proxy debug logs")
+        self.range_cache_debug_chk.SetValue(bool(config.get("range_cache_debug", False)))
+        media_sizer.Add(self.range_cache_debug_chk, 0, wx.ALL, 5)
+
+        media_panel.SetSizer(media_sizer)
+        notebook.AddPage(media_panel, "Media Player")
         
         # Provider Tab
         provider_panel = wx.Panel(notebook)
@@ -607,6 +637,54 @@ class SettingsDialog(wx.Dialog):
         }
         self._set_inoreader_status("Not authorized", ok=False)
 
+    @staticmethod
+    def _decode_vlc_text(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return value.decode("utf-8", errors="ignore")
+            except Exception:
+                return ""
+        try:
+            return str(value)
+        except Exception:
+            return ""
+
+    def _build_soundcard_choices(self, selected_device_id: str) -> list[tuple[str, str]]:
+        choices: list[tuple[str, str]] = [("System Default", "")]
+        seen_ids = {""}
+        preferred = str(selected_device_id or "")
+        devices_ptr = None
+        try:
+            import vlc
+
+            instance = vlc.Instance("--no-video", "--aout=mmdevice")
+            devices_ptr = instance.audio_output_device_list_get("mmdevice")
+            cur = devices_ptr
+            while cur:
+                device_id = self._decode_vlc_text(cur.contents.device).strip()
+                description = self._decode_vlc_text(cur.contents.description).strip()
+                label = description or device_id or "Unnamed Device"
+                if device_id not in seen_ids:
+                    choices.append((label, device_id))
+                    seen_ids.add(device_id)
+                cur = cur.contents.next
+        except Exception:
+            log.exception("Failed to enumerate VLC soundcards")
+        finally:
+            if devices_ptr is not None:
+                try:
+                    import vlc
+                    vlc.libvlc_audio_output_device_list_release(devices_ptr)
+                except Exception:
+                    pass
+
+        # Keep unknown saved IDs visible so opening settings does not silently reset them.
+        if preferred and preferred not in seen_ids:
+            choices.append((f"Saved device (currently unavailable): {preferred}", preferred))
+        return choices
+
     def on_browse_dl_path(self, event):
         dlg = wx.DirDialog(self, "Choose download directory", self.dl_path_ctrl.GetValue(), style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST)
         if dlg.ShowModal() == wx.ID_OK:
@@ -620,6 +698,14 @@ class SettingsDialog(wx.Dialog):
             speed = float(speed_str)
         except ValueError:
             speed = 1.0
+
+        preferred_soundcard = ""
+        try:
+            idx = int(self.soundcard_ctrl.GetSelection())
+            if idx != wx.NOT_FOUND and 0 <= idx < len(getattr(self, "_soundcard_choices", [])):
+                preferred_soundcard = str(self._soundcard_choices[idx][1] or "")
+        except Exception:
+            preferred_soundcard = ""
             
         providers = {}
         try:
@@ -667,10 +753,12 @@ class SettingsDialog(wx.Dialog):
             "per_host_max_connections": self.per_host_ctrl.GetValue(),
             "feed_timeout_seconds": self.timeout_ctrl.GetValue(),
             "feed_retry_attempts": self.retry_ctrl.GetValue(),
+            "preferred_soundcard": preferred_soundcard,
             "skip_silence": self.skip_silence_chk.GetValue(),
             "playback_speed": speed,
             "show_player_on_play": self.show_player_on_play_chk.GetValue(),
             "vlc_network_caching_ms": self.vlc_cache_ctrl.GetValue(),
+            "range_cache_debug": self.range_cache_debug_chk.GetValue(),
             "max_cached_views": self.cache_ctrl.GetValue(),
             "cache_full_text": self.cache_full_text_chk.GetValue(),
             "downloads_enabled": self.downloads_chk.GetValue(),
