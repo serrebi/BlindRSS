@@ -65,6 +65,7 @@ You are a python expert skilled in yt-dlp, ffmpeg,  and rss.
         *   `get_articles`: Uses batch chapter fetching.
     *   `theoldreader.py`: Uses `?s=...` param for Stream IDs (fixes URL encoding bugs). Robust login/logging.
     *   `miniflux.py`, `inoreader.py`, `bazqux.py`: Implement standard interface + batch chapter fetching.
+    *   **Inoreader Notes:** `stream/contents` expects the `streamId` in the URL path segment (URL-encoded), not as the `s=` query parameter. OAuth Redirect URIs are often required to be HTTPS; for localhost HTTPS redirects, BlindRSS completes auth by prompting the user to paste the redirected URL back into the app (state is validated).
 
 ## Data Model (`rss.db`)
 *   **`feeds`**: `id` (UUID/String), `url`, `title`, `category`, `icon_url`, `etag`, `last_modified`.
@@ -78,6 +79,7 @@ You are a python expert skilled in yt-dlp, ffmpeg,  and rss.
 ### 1. Feed Refresh
 *   **Parallel:** `LocalProvider` spawns threads. Each has own DB connection.
 *   **Conditional:** Checks HTTP 304 Not Modified to skip parsing.
+*   **Cache Revalidation (CDNs):** Some feed hosts/CDNs (e.g. Simplecast) set long `Cache-Control: max-age=...` and can serve stale 200/304 responses until cache expiry. When doing conditional refreshes (and on forced refresh), BlindRSS sends `Cache-Control: no-cache` / `Pragma: no-cache` so intermediaries revalidate with the origin and new episodes appear without waiting for cache expiry/restart.
 *   **Parsing:** `feedparser` + `BeautifulSoup` (chapters).
 *   **Date Logic:** strict normalization. If parsed date != stored date, **Force Update**.
 
@@ -109,6 +111,8 @@ You are a python expert skilled in yt-dlp, ffmpeg,  and rss.
 3.  **Performance:** Use `get_chapters_batch` for lists. Never loop DB queries in UI threads.
 4.  **Network Safety:** In `RangeCacheProxy`, **NEVER** share `requests.Session` objects across threads. Instantiate fresh per-request.
 5.  **Naming:** App is **BlindRSS**.
+6.  **Timeouts:** All provider HTTP requests must set a finite timeout (typically `feed_timeout_seconds`). Missing timeouts can hang a refresh worker and keep the GUI refresh guard locked until restart.
+7.  **Inoreader OAuth:** Redirect URIs may be HTTPS-only. If using an HTTPS localhost redirect, do not rely on a local callback server; prompt for a pasted redirected URL and validate `state`.
 Tests scripts are in the /tests directory. Add new ones to it if you need to test something.
 
 ## Build & Release Agent

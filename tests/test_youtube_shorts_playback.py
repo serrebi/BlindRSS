@@ -31,7 +31,6 @@ def test_ytdlp_resolve():
     assert info.get('url'), "yt-dlp must return a direct media URL"
     assert info.get('title'), "yt-dlp must return a title"
     print(f"PASS: yt-dlp resolved Shorts URL -> {info['url'][:80]}...")
-    return True
 
 
 def test_should_resolve_defined_for_ytdlp():
@@ -124,10 +123,15 @@ def test_should_resolve_defined_for_ytdlp():
     print("\n=== SUMMARY ===")
     print(f"Playing: {results['playing']}")
     print(f"Error:   {results['error']}")
-    return results["playing"] and not results["error"]
+    assert results["error"] is None, f"Unexpected playback error: {results['error']}"
+    assert results["playing"], "Expected VLC to enter Playing state within timeout"
 
 
 if __name__ == "__main__":
-    ok1 = test_ytdlp_resolve()
-    ok2 = test_should_resolve_defined_for_ytdlp()
-    sys.exit(0 if (ok1 and ok2) else 1)
+    try:
+        test_ytdlp_resolve()
+        test_should_resolve_defined_for_ytdlp()
+        sys.exit(0)
+    except AssertionError as e:
+        print(f"FAIL: {e}")
+        sys.exit(1)

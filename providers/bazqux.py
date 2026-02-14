@@ -23,6 +23,18 @@ class BazQuxProvider(RSSProvider):
     def get_name(self) -> str:
         return "BazQux"
 
+    def _timeout_s(self) -> int:
+        """Default network timeout for BazQux API calls.
+
+        Without an explicit timeout, requests can hang indefinitely and keep the
+        refresh guard locked until the app restarts.
+        """
+        try:
+            base = int(self.config.get("feed_timeout_seconds", 15) or 15)
+        except Exception:
+            base = 15
+        return max(5, min(120, int(base)))
+
     def _login(self):
         if self.token: return True
         try:
@@ -33,7 +45,7 @@ class BazQuxProvider(RSSProvider):
                 "Passwd": self.password,
                 "service": "reader",
                 "output": "json"
-            })
+            }, timeout=self._timeout_s())
             resp.raise_for_status()
             
             # Try parsing as JSON first
@@ -125,6 +137,7 @@ class BazQuxProvider(RSSProvider):
                 f"{self.base_url}/stream/items/ids",
                 headers=self._headers(),
                 params=params,
+                timeout=self._timeout_s(),
             )
             resp.raise_for_status()
             data = resp.json() if resp is not None else {}
@@ -156,6 +169,7 @@ class BazQuxProvider(RSSProvider):
                     f"{self.base_url}/edit-tag",
                     headers=self._headers(),
                     data=data,
+                    timeout=self._timeout_s(),
                 )
                 if not resp.ok:
                     ok = False
@@ -174,7 +188,12 @@ class BazQuxProvider(RSSProvider):
         if not self._login(): return []
         try:
             # Fetch subscriptions
-            resp = self.session.get(f"{self.base_url}/subscription/list", headers=self._headers(), params={"output": "json"})
+            resp = self.session.get(
+                f"{self.base_url}/subscription/list",
+                headers=self._headers(),
+                params={"output": "json"},
+                timeout=self._timeout_s(),
+            )
             resp.raise_for_status()
             data = resp.json()
             
@@ -182,7 +201,12 @@ class BazQuxProvider(RSSProvider):
             unread_map = {}
             try:
                 # API: /unread-count?output=json
-                uc_resp = self.session.get(f"{self.base_url}/unread-count", headers=self._headers(), params={"output": "json"})
+                uc_resp = self.session.get(
+                    f"{self.base_url}/unread-count",
+                    headers=self._headers(),
+                    params={"output": "json"},
+                    timeout=self._timeout_s(),
+                )
                 if uc_resp.ok:
                     uc_data = uc_resp.json()
                     # format: {"unreadcounts": [{"id": "feed/...", "count": 123, "newestItemTimestampUsec": ...}, ...]}
@@ -265,7 +289,7 @@ class BazQuxProvider(RSSProvider):
                     params["it"] = "user/-/state/com.google/read"
 
             url = f"{self.base_url}/stream/contents/{real_feed_id}"
-            resp = self.session.get(url, headers=self._headers(), params=params)
+            resp = self.session.get(url, headers=self._headers(), params=params, timeout=self._timeout_s())
             resp.raise_for_status()
             data = resp.json()
             
@@ -359,7 +383,7 @@ class BazQuxProvider(RSSProvider):
             self.session.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
                 "i": article_id,
                 "a": "user/-/state/com.google/read"
-            })
+            }, timeout=self._timeout_s())
             return True
         except Exception as e:
             log.error(f"BazQux Mark Read Error: {e}")
@@ -371,7 +395,7 @@ class BazQuxProvider(RSSProvider):
             self.session.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
                 "i": article_id,
                 "r": "user/-/state/com.google/read"
-            })
+            }, timeout=self._timeout_s())
             return True
         except Exception as e:
             log.error(f"BazQux Mark Unread Error: {e}")
@@ -395,6 +419,7 @@ class BazQuxProvider(RSSProvider):
                 f"{self.base_url}/mark-all-as-read",
                 headers=self._headers(),
                 data={"s": stream_id, "ts": str(ts)},
+                timeout=self._timeout_s(),
             )
             if resp.ok:
                 return True
@@ -420,7 +445,7 @@ class BazQuxProvider(RSSProvider):
             self.session.post(f"{self.base_url}/edit-tag", headers=self._headers(), data={
                 "i": article_id,
                 action: "user/-/state/com.google/starred"
-            })
+            }, timeout=self._timeout_s())
             return True
         except Exception as e:
             log.error(f"BazQux Set Favorite Error: {e}")
@@ -428,7 +453,12 @@ class BazQuxProvider(RSSProvider):
 
     def toggle_favorite(self, article_id: str):
         try:
-            resp = self.session.get(f"{self.base_url}/stream/items/ids", headers=self._headers(), params={"i": article_id, "output": "json"})
+            resp = self.session.get(
+                f"{self.base_url}/stream/items/ids",
+                headers=self._headers(),
+                params={"i": article_id, "output": "json"},
+                timeout=self._timeout_s(),
+            )
             if resp.ok:
                 items = resp.json().get("items", [])
                 if items:
@@ -453,7 +483,12 @@ class BazQuxProvider(RSSProvider):
             if category:
                 data["t"] = category
             
-            resp = self.session.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data=data)
+            resp = self.session.post(
+                f"{self.base_url}/subscription/edit",
+                headers=self._headers(),
+                data=data,
+                timeout=self._timeout_s(),
+            )
             resp.raise_for_status()
             return True
         except Exception as e:
@@ -466,7 +501,7 @@ class BazQuxProvider(RSSProvider):
             self.session.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data={
                 "s": feed_id,
                 "ac": "unsubscribe"
-            })
+            }, timeout=self._timeout_s())
             return True
         except Exception as e:
             log.error(f"BazQux Remove Feed Error: {e}")
@@ -501,7 +536,12 @@ class BazQuxProvider(RSSProvider):
                     data["a"] = f"user/-/label/{category}"
 
         try:
-            resp = self.session.post(f"{self.base_url}/subscription/edit", headers=self._headers(), data=data)
+            resp = self.session.post(
+                f"{self.base_url}/subscription/edit",
+                headers=self._headers(),
+                data=data,
+                timeout=self._timeout_s(),
+            )
             return resp.ok
         except Exception as e:
             log.error(f"BazQux Update Feed Error: {e}")
@@ -513,7 +553,12 @@ class BazQuxProvider(RSSProvider):
             
         if not self._login(): return []
         try:
-            resp = self.session.get(f"{self.base_url}/tag/list", headers=self._headers(), params={"output": "json"})
+            resp = self.session.get(
+                f"{self.base_url}/tag/list",
+                headers=self._headers(),
+                params={"output": "json"},
+                timeout=self._timeout_s(),
+            )
             resp.raise_for_status()
             data = resp.json()
             cats = []
@@ -543,7 +588,7 @@ class BazQuxProvider(RSSProvider):
             resp = self.session.post(f"{self.base_url}/rename-tag", headers=self._headers(), data={
                 "s": source,
                 "dest": dest
-            })
+            }, timeout=self._timeout_s())
             return resp.ok
         except Exception as e:
             log.error(f"BazQux Rename Category Error: {e}")
@@ -555,7 +600,7 @@ class BazQuxProvider(RSSProvider):
             tag = f"user/-/label/{title}"
             self.session.post(f"{self.base_url}/disable-tag", headers=self._headers(), data={
                 "s": tag
-            })
+            }, timeout=self._timeout_s())
             return True
         except Exception as e:
             log.error(f"BazQux Delete Category Error: {e}")

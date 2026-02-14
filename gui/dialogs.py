@@ -1,5 +1,6 @@
 import wx
 import copy
+import queue
 import threading
 import webbrowser
 import time
@@ -396,11 +397,24 @@ class SettingsDialog(wx.Dialog):
             fg.Add(app_key_ctrl, 1, wx.EXPAND | wx.ALL, 2)
             ctrls["app_key"] = app_key_ctrl
 
+            default_redirect_uri = inoreader_oauth.get_redirect_uri(scheme="https")
+            redirect_uri_ctrl = wx.TextCtrl(pnl)
+            redirect_uri_ctrl.SetValue(str(p_cfg.get("redirect_uri", "") or "").strip() or default_redirect_uri)
+            fg.Add(wx.StaticText(pnl, label="Redirect URI:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+            fg.Add(redirect_uri_ctrl, 1, wx.EXPAND | wx.ALL, 2)
+            ctrls["redirect_uri"] = redirect_uri_ctrl
+
             outer.Add(fg, 0, wx.EXPAND | wx.ALL, 2)
 
-            redirect_uri = inoreader_oauth.get_redirect_uri()
-            redirect_lbl = wx.StaticText(pnl, label=f"Redirect URI: {redirect_uri}")
-            outer.Add(redirect_lbl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 2)
+            help_lbl = wx.StaticText(
+                pnl,
+                label=(
+                    "Note: If your Redirect URI uses HTTPS (common/required), your browser may fail to load\n"
+                    "localhost after authorization. Copy the full redirected URL from the address bar and paste it\n"
+                    "when prompted."
+                ),
+            )
+            outer.Add(help_lbl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 2)
 
             status_lbl = wx.StaticText(pnl, label="")
             outer.Add(status_lbl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 2)
@@ -419,6 +433,7 @@ class SettingsDialog(wx.Dialog):
 
             self._inoreader_app_id_ctrl = app_id_ctrl
             self._inoreader_app_key_ctrl = app_key_ctrl
+            self._inoreader_redirect_uri_ctrl = redirect_uri_ctrl
             self._inoreader_status_lbl = status_lbl
             self._inoreader_authorize_btn = auth_btn
             self._inoreader_clear_btn = clear_btn
@@ -540,10 +555,12 @@ class SettingsDialog(wx.Dialog):
     def _start_inoreader_authorize(self, event):
         app_id_ctrl = getattr(self, "_inoreader_app_id_ctrl", None)
         app_key_ctrl = getattr(self, "_inoreader_app_key_ctrl", None)
-        if not app_id_ctrl or not app_key_ctrl:
+        redirect_uri_ctrl = getattr(self, "_inoreader_redirect_uri_ctrl", None)
+        if not app_id_ctrl or not app_key_ctrl or not redirect_uri_ctrl:
             return
         app_id = (app_id_ctrl.GetValue() or "").strip()
         app_key = (app_key_ctrl.GetValue() or "").strip()
+        redirect_uri = (redirect_uri_ctrl.GetValue() or "").strip()
         if not app_id or not app_key:
             wx.MessageBox("Enter your Inoreader App ID and App Key first.", "Inoreader", wx.ICON_INFORMATION)
             return
@@ -556,25 +573,95 @@ class SettingsDialog(wx.Dialog):
         self._set_inoreader_status("Waiting for authorization...", ok=False)
         threading.Thread(
             target=self._inoreader_oauth_worker,
-            args=(app_id, app_key),
+            args=(app_id, app_key, redirect_uri),
             daemon=True,
         ).start()
 
-    def _inoreader_oauth_worker(self, app_id: str, app_key: str) -> None:
-        redirect_uri = inoreader_oauth.get_redirect_uri()
+    def _prompt_inoreader_redirect_paste(self, redirect_uri: str, result_q) -> None:
+        result = None
+        try:
+            dlg = wx.Dialog(self, title="Inoreader Authorization", size=(580, 320))
+            sizer = wx.BoxSizer(wx.VERTICAL)
+            msg = (
+                "After authorizing in your browser, it will redirect to your Redirect URI.\n"
+                "If the redirected page fails to load (common for HTTPS localhost), copy the full URL from the\n"
+                "browser address bar and paste it below.\n\n"
+                f"Redirect URI:\n{redirect_uri}"
+            )
+            sizer.Add(wx.StaticText(dlg, label=msg), 0, wx.ALL, 10)
+            tc = wx.TextCtrl(dlg, style=wx.TE_MULTILINE)
+            sizer.Add(tc, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+            btns = dlg.CreateButtonSizer(wx.OK | wx.CANCEL)
+            sizer.Add(btns, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+            dlg.SetSizer(sizer)
+            dlg.CentreOnParent()
+            try:
+                tc.SetFocus()
+            except Exception:
+                pass
+            if dlg.ShowModal() == wx.ID_OK:
+                result = (tc.GetValue() or "").strip()
+            dlg.Destroy()
+        except Exception:
+            result = None
+        try:
+            result_q.put_nowait(result)
+        except Exception:
+            pass
+
+    def _inoreader_oauth_worker(self, app_id: str, app_key: str, redirect_uri: str) -> None:
+        redirect_uri = (redirect_uri or "").strip() or inoreader_oauth.get_redirect_uri(scheme="https")
         try:
             auth_url, state = inoreader_oauth.create_authorization_url(app_id, redirect_uri)
-            ready_event = threading.Event()
+            parsed = urlparse(redirect_uri)
+            scheme = (parsed.scheme or "").lower()
+            host = (parsed.hostname or "").lower()
 
-            def _open_browser():
-                try:
-                    ready_event.wait(5)
-                except Exception:
-                    pass
+            use_local_http_callback = scheme == "http" and host in {"127.0.0.1", "localhost"}
+            if use_local_http_callback:
+                ready_event = threading.Event()
+
+                def _open_browser():
+                    try:
+                        ready_event.wait(5)
+                    except Exception:
+                        pass
+                    webbrowser.open(auth_url)
+
+                threading.Thread(target=_open_browser, daemon=True).start()
+                code = inoreader_oauth.wait_for_oauth_code(
+                    state,
+                    ready_event=ready_event,
+                    host=parsed.hostname or "127.0.0.1",
+                    port=parsed.port or 80,
+                    path=parsed.path or "/",
+                )
+            else:
                 webbrowser.open(auth_url)
+                wx.CallAfter(
+                    self._set_inoreader_status,
+                    "Complete authorization in your browser, then paste the redirected URL...",
+                    False,
+                )
+                result_q = queue.Queue(maxsize=1)
+                wx.CallAfter(self._prompt_inoreader_redirect_paste, redirect_uri, result_q)
+                try:
+                    pasted = result_q.get(timeout=300)
+                except queue.Empty as exc:
+                    raise TimeoutError("Timed out waiting for the redirected URL.") from exc
+                if not pasted:
+                    raise RuntimeError("Authorization cancelled.")
 
-            threading.Thread(target=_open_browser, daemon=True).start()
-            code = inoreader_oauth.wait_for_oauth_code(state, ready_event=ready_event)
+                code, returned_state, err = inoreader_oauth.parse_oauth_redirect(pasted)
+                if err:
+                    raise RuntimeError(f"Inoreader authorization failed: {err}")
+                if not code:
+                    raise RuntimeError("No authorization code found in the pasted URL.")
+                if not returned_state:
+                    raise RuntimeError("Missing state parameter; paste the full redirected URL from your browser address bar.")
+                if state and returned_state != state:
+                    raise RuntimeError("Invalid state (redirect does not match this authorization attempt).")
+
             token_data = inoreader_oauth.exchange_code_for_tokens(app_id, app_key, code, redirect_uri)
             access_token = token_data.get("access_token")
             if not access_token:

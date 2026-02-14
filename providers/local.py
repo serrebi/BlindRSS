@@ -167,13 +167,26 @@ class LocalProvider(RSSProvider):
         final_title = feed_title or "Unknown Feed"
 
         headers = {}
-        use_conditional = (not force) and (not npr_mod.is_npr_url(feed_url))
+        is_npr_feed = npr_mod.is_npr_url(feed_url)
+
+        # Some RSS/podcast CDNs set long cache lifetimes and may serve cached 200/304 responses
+        # until their max-age expires. Sending "no-cache" forces intermediary revalidation so
+        # new episodes appear promptly (instead of only after restart / cache expiry).
+        if force:
+            headers["Cache-Control"] = "no-cache"
+            headers["Pragma"] = "no-cache"
+
+        use_conditional = (not force) and (not is_npr_feed)
         if use_conditional:
             if etag:
                 headers['If-None-Match'] = etag
             if last_modified:
                 headers['If-Modified-Since'] = last_modified
-        elif not force and (etag or last_modified):
+
+            if etag or last_modified:
+                headers.setdefault("Cache-Control", "no-cache")
+                headers.setdefault("Pragma", "no-cache")
+        elif not force and is_npr_feed and (etag or last_modified):
             log.debug("Skipping conditional headers for NPR feed %s", feed_url)
 
         host = urlparse(feed_url).hostname or feed_url

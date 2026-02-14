@@ -90,7 +90,6 @@ def test_add_feed_and_get_articles():
     assert len(articles_with_media) > 0, "Podcast feed should have articles with media URLs"
     
     print("\n✓ TEST PASSED: Feed add + refresh workflow works correctly")
-    return True
 
 
 def test_paged_articles_after_add():
@@ -131,7 +130,6 @@ def test_paged_articles_after_add():
     assert len(page) > 0, "Page should have articles"
     
     print("\n✓ TEST PASSED: Paged articles work correctly")
-    return True
 
 
 if __name__ == "__main__":

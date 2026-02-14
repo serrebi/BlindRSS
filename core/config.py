@@ -100,7 +100,11 @@ DEFAULT_CONFIG = {
             "app_id": "",
             "app_key": "",
             "refresh_token": "",
-            "token_expires_at": 0
+            "token_expires_at": 0,
+            # Inoreader redirect URIs are typically required to be HTTPS. For localhost callbacks we
+            # use an HTTPS URL and complete authorization by pasting the redirected URL back into
+            # BlindRSS (no local TLS server needed).
+            "redirect_uri": "https://127.0.0.1:18423/inoreader/oauth",
         },
         "bazqux": {
             "email": "",

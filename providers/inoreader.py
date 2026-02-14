@@ -2,6 +2,7 @@ import requests
 import logging
 import time
 import threading
+import urllib.parse
 from email.utils import parsedate_to_datetime
 from typing import List, Dict, Any
 from .base import RSSProvider
@@ -39,6 +40,19 @@ class InoreaderProvider(RSSProvider):
 
     def get_name(self) -> str:
         return "Inoreader"
+
+    def _timeout_s(self) -> int:
+        """Default network timeout for Inoreader API calls.
+
+        Without a timeout, requests can hang indefinitely and effectively stall refresh/get_feeds
+        until the app is restarted.
+        """
+        try:
+            base = int(self.config.get("feed_timeout_seconds", 15) or 15)
+        except Exception:
+            base = 15
+        # Keep a sane floor/ceiling for UI responsiveness.
+        return max(5, min(120, int(base)))
 
     def _parse_timestamp(self, value) -> float:
         try:
@@ -143,6 +157,8 @@ class InoreaderProvider(RSSProvider):
         allow_sleep = threading.current_thread() is not threading.main_thread()
         self._respect_rate_limit(allow_sleep)
         headers = kwargs.pop("headers", None)
+        # Always set a timeout unless explicitly overridden by the caller.
+        kwargs.setdefault("timeout", self._timeout_s())
         req_headers = self._headers()
         if headers:
             req_headers.update(headers)
@@ -227,6 +243,23 @@ class InoreaderProvider(RSSProvider):
                 if access_token:
                     self._set_tokens(access_token, new_refresh, expires_in)
                     return True
+            except requests.HTTPError as e:
+                # Inoreader returns {"error":"invalid_grant", ...} when the refresh token is
+                # revoked/expired. Clear it so the UI shows "Not authorized" instead of
+                # looping and logging on every refresh.
+                try:
+                    resp = getattr(e, "response", None)
+                    data = resp.json() if resp is not None else None
+                except Exception:
+                    data = None
+
+                if isinstance(data, dict) and data.get("error") == "invalid_grant":
+                    log.warning("Inoreader refresh token invalid; please re-authorize in Settings.")
+                    self._set_tokens("", "", 0)
+                    return False
+
+                log.error(f"Inoreader Refresh Token Error: {e}")
+                return False
             except Exception as e:
                 log.error(f"Inoreader Refresh Token Error: {e}")
                 return False
@@ -394,8 +427,10 @@ class InoreaderProvider(RSSProvider):
             else:
                 stream_id = real_feed_id
 
-            url = f"{self.base_url}/stream/contents"
-            params["s"] = stream_id
+            # Inoreader docs: streamId is part of the path (not a query parameter).
+            # It must be URL-encoded as it contains slashes/colons.
+            encoded_stream_id = urllib.parse.quote(str(stream_id or ""), safe="")
+            url = f"{self.base_url}/stream/contents/{encoded_stream_id}"
             resp = self._request("get", url, params=params)
             data = resp.json()
             

@@ -15,19 +15,27 @@ REDIRECT_HOST = "127.0.0.1"
 REDIRECT_PORT = 18423
 REDIRECT_PATH = "/inoreader/oauth"
 
+DEFAULT_SCOPE = "read write"
 
 def get_redirect_uri(
     host: str = REDIRECT_HOST,
     port: int = REDIRECT_PORT,
     path: str = REDIRECT_PATH,
+    scheme: str = "https",
 ) -> str:
-    return f"http://{host}:{port}{path}"
+    scheme_norm = str(scheme or "https").strip().lower()
+    if scheme_norm not in {"http", "https"}:
+        scheme_norm = "https"
+    path_norm = str(path or "")
+    if path_norm and not path_norm.startswith("/"):
+        path_norm = "/" + path_norm
+    return f"{scheme_norm}://{host}:{port}{path_norm}"
 
 
 def create_authorization_url(
     app_id: str,
     redirect_uri: str,
-    scope: str = "",
+    scope: str | None = DEFAULT_SCOPE,
 ) -> Tuple[str, str]:
     state = secrets.token_urlsafe(16)
     params = {
@@ -36,9 +44,60 @@ def create_authorization_url(
         "response_type": "code",
         "state": state,
     }
-    if scope is not None:
+    # Scope is optional in Inoreader, but BlindRSS generally needs read+write access
+    # (mark read/unread, favorites, subscription management). Only send it when present.
+    if scope:
         params["scope"] = scope
     return f"{AUTH_URL}?{urllib.parse.urlencode(params)}", state
+
+
+def parse_oauth_redirect(value: str) -> tuple[str | None, str | None, str | None]:
+    """Parse an OAuth redirect URL or query string and extract `code` and `state`.
+
+    Accepts:
+    - Full URL: "https://127.0.0.1:18423/inoreader/oauth?code=...&state=..."
+    - Query string: "code=...&state=..."
+    - Code only: "..." (state will be None)
+
+    Returns: (code, state, error)
+    """
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("Empty redirect value.")
+
+    query = ""
+    if "://" in text or "?" in text or "#" in text:
+        parsed = urllib.parse.urlparse(text)
+        query = parsed.query or ""
+        if not query and parsed.fragment:
+            # Some OAuth providers return params in fragment; keep it as fallback.
+            query = parsed.fragment
+    else:
+        # Treat as a raw query string or a bare code.
+        query = text
+
+    if "code=" not in query and "state=" not in query and "error=" not in query and "?" not in text:
+        # Bare code.
+        return text, None, None
+
+    if query.startswith("?"):
+        query = query[1:]
+
+    params = urllib.parse.parse_qs(query, keep_blank_values=True)
+    code = (params.get("code") or [None])[0]
+    state = (params.get("state") or [None])[0]
+    err = (params.get("error") or [None])[0]
+
+    code_s = str(code).strip() if code is not None else None
+    if code_s == "":
+        code_s = None
+    state_s = str(state).strip() if state is not None else None
+    if state_s == "":
+        state_s = None
+    err_s = str(err).strip() if err is not None else None
+    if err_s == "":
+        err_s = None
+    return code_s, state_s, err_s
 
 
 class _OAuthHTTPServer(HTTPServer):

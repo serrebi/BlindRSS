@@ -34,12 +34,8 @@ def test_proxify_blocking():
     print(f"Proxied URL: {proxied_url}")
     
     # Should complete in under 500ms (no network blocking)
-    if elapsed > 0.5:
-        print(f"FAIL: proxify() blocked for {elapsed:.3f}s - should be <0.5s")
-        return False
-    else:
-        print(f"PASS: proxify() completed quickly ({elapsed:.3f}s)")
-        return True
+    assert elapsed <= 0.5, f"proxify() blocked for {elapsed:.3f}s - should be <=0.5s"
+    print(f"PASS: proxify() completed quickly ({elapsed:.3f}s)")
 
 
 def test_maybe_range_cache_url_nonblocking():
@@ -76,12 +72,8 @@ def test_maybe_range_cache_url_nonblocking():
     frame.Destroy()
     
     # Should complete in under 500ms
-    if elapsed > 0.5:
-        print(f"FAIL: _maybe_range_cache_url() blocked for {elapsed:.3f}s - should be <0.5s")
-        return False
-    else:
-        print(f"PASS: _maybe_range_cache_url() completed quickly ({elapsed:.3f}s)")
-        return True
+    assert elapsed <= 0.5, f"_maybe_range_cache_url() blocked for {elapsed:.3f}s - should be <=0.5s"
+    print(f"PASS: _maybe_range_cache_url() completed quickly ({elapsed:.3f}s)")
 
 
 if __name__ == "__main__":
@@ -89,19 +81,13 @@ if __name__ == "__main__":
     print("Testing player load blocking behavior")
     print("=" * 60)
     
-    results = []
-    
-    print("\n1. Testing proxify() blocking...")
-    results.append(("proxify blocking", test_proxify_blocking()))
-    
-    print("\n2. Testing _maybe_range_cache_url() blocking...")
-    results.append(("_maybe_range_cache_url blocking", test_maybe_range_cache_url_nonblocking()))
-    
-    print("\n" + "=" * 60)
-    print("Results:")
-    for name, passed in results:
-        status = "PASS" if passed else "FAIL"
-        print(f"  {name}: {status}")
-    
-    all_passed = all(r[1] for r in results)
-    sys.exit(0 if all_passed else 1)
+    try:
+        print("\n1. Testing proxify() blocking...")
+        test_proxify_blocking()
+        print("\n2. Testing _maybe_range_cache_url() blocking...")
+        test_maybe_range_cache_url_nonblocking()
+        print("\nPASS: all checks passed")
+        sys.exit(0)
+    except AssertionError as e:
+        print(f"\nFAIL: {e}")
+        sys.exit(1)

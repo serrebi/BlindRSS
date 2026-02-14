@@ -140,9 +140,15 @@ def test_playback():
     for ts, state, pos in results["states"][-5:]:
         print(f"  {state} @ {pos}ms")
     
-    return results["playing"] and not results["error"]
+    assert results["started"], "Expected load_media to run without throwing"
+    assert results["error"] is None, f"Unexpected playback error: {results['error']}"
+    assert results["playing"], "Expected VLC to enter Playing state within timeout"
 
 
 if __name__ == "__main__":
-    success = test_playback()
-    sys.exit(0 if success else 1)
+    try:
+        test_playback()
+        sys.exit(0)
+    except AssertionError as e:
+        print(f"FAIL: {e}")
+        sys.exit(1)
