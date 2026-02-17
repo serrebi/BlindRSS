@@ -69,7 +69,7 @@ class BazQuxProvider(RSSProvider):
     def _headers(self):
         # We return a dict of headers to overlay on the session.
         # utils.HEADERS is already in session, but we need Authorization.
-        h = {}
+        h = utils.add_revalidation_headers({})
         if self.token:
             h["Authorization"] = f"GoogleLogin auth={self.token}"
         return h

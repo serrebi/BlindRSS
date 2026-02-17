@@ -21,6 +21,16 @@ HEADERS = {
     'Accept': 'application/rss+xml,application/xml,application/atom+xml,text/xml;q=0.9,*/*;q=0.8'
 }
 
+
+def add_revalidation_headers(headers: dict | None = None) -> dict:
+    """Return headers with cache-bypass directives for proxy/CDN revalidation."""
+    merged = dict(headers or {})
+    # Include both directives for older intermediaries and stricter caches.
+    merged.setdefault("Cache-Control", "no-cache, max-age=0")
+    merged.setdefault("Pragma", "no-cache")
+    merged.setdefault("Expires", "0")
+    return merged
+
 # Common timezone abbreviations mapping for dateutil
 TZINFOS = {
     "UTC": 0,

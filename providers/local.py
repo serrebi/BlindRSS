@@ -173,8 +173,7 @@ class LocalProvider(RSSProvider):
         # until their max-age expires. Sending "no-cache" forces intermediary revalidation so
         # new episodes appear promptly (instead of only after restart / cache expiry).
         if force:
-            headers["Cache-Control"] = "no-cache"
-            headers["Pragma"] = "no-cache"
+            headers = utils.add_revalidation_headers(headers)
 
         use_conditional = (not force) and (not is_npr_feed)
         if use_conditional:
@@ -184,8 +183,7 @@ class LocalProvider(RSSProvider):
                 headers['If-Modified-Since'] = last_modified
 
             if etag or last_modified:
-                headers.setdefault("Cache-Control", "no-cache")
-                headers.setdefault("Pragma", "no-cache")
+                headers = utils.add_revalidation_headers(headers)
         elif not force and is_npr_feed and (etag or last_modified):
             log.debug("Skipping conditional headers for NPR feed %s", feed_url)
 

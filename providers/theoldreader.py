@@ -74,7 +74,7 @@ class TheOldReaderProvider(RSSProvider):
             return False
 
     def _headers(self):
-        h = utils.HEADERS.copy()
+        h = utils.add_revalidation_headers(utils.HEADERS)
         if self.token:
             h["Authorization"] = f"GoogleLogin auth={self.token}"
         return h

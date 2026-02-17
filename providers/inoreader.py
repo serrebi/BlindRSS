@@ -61,7 +61,7 @@ class InoreaderProvider(RSSProvider):
             return 0.0
 
     def _headers(self):
-        h = utils.HEADERS.copy()
+        h = utils.add_revalidation_headers(utils.HEADERS)
         if self.app_id:
             h["AppId"] = self.app_id
         if self.app_key:

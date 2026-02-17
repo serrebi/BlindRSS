@@ -27,6 +27,7 @@ class MinifluxProvider(RSSProvider):
         self.headers.update(utils.HEADERS)
         # Ensure Accept stays JSON for API calls.
         self.headers["Accept"] = "application/json"
+        self.headers = utils.add_revalidation_headers(self.headers)
 
     def _request_timeout_seconds(self, endpoint: str = "") -> int:
         """Return request timeout, with a longer floor for refresh endpoints."""
@@ -55,9 +56,10 @@ class MinifluxProvider(RSSProvider):
             return None
         url = f"{self.base_url}{endpoint}"
         timeout_s = self._request_timeout_seconds(endpoint)
+        req_headers = utils.add_revalidation_headers(self.headers)
         try:
             # Uses self.headers which includes a browser-like User-Agent
-            resp = requests.request(method, url, headers=self.headers, json=json, params=params, timeout=timeout_s)
+            resp = requests.request(method, url, headers=req_headers, json=json, params=params, timeout=timeout_s)
             resp.raise_for_status()
 
             if resp.status_code == 204:
@@ -252,6 +254,17 @@ class MinifluxProvider(RSSProvider):
             return True
         return False
 
+    def _parse_checked_at(self, value: str | None):
+        if not value:
+            return None
+        try:
+            dt = dateparser.parse(value)
+            if dt and dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
     def refresh(self, progress_cb=None, force: bool = False) -> bool:
         # Kick off a global refresh on the Miniflux server.
         self._req("PUT", "/v1/feeds/refresh")
@@ -259,12 +272,38 @@ class MinifluxProvider(RSSProvider):
         # After triggering, fetch feed metadata so we can surface stale/error
         # feeds in the UI and optionally retry them individually.
         feeds = self._req("GET", "/v1/feeds") or []
-        counters_data = self._req("GET", "/v1/feeds/counters") or {}
-        unread_map = counters_data.get("unreads", {}) if isinstance(counters_data, dict) else {}
-
         now = datetime.now(timezone.utc)
         stale_cutoff = now - timedelta(hours=3)
-        retry_budget = 15  # avoid hammering the server if many feeds are failing
+        retry_budget = len(feeds) if force else 15
+        per_feed_retry_ids = []
+
+        for feed in feeds:
+            feed_id = str(feed.get("id"))
+            status = "ok"
+
+            checked_dt = self._parse_checked_at(feed.get("checked_at"))
+
+            if (feed.get("parsing_error_count") or 0) > 0:
+                status = "error"
+            elif checked_dt and checked_dt < stale_cutoff:
+                status = "stale"
+
+            # Manual refresh in BlindRSS sets force=True. Respect it by explicitly
+            # refreshing every feed so CDN-cached feeds (e.g., Simplecast) update
+            # immediately instead of waiting for Miniflux's next scheduled check.
+            if force:
+                per_feed_retry_ids.append(feed_id)
+            elif status in ("error", "stale"):
+                per_feed_retry_ids.append(feed_id)
+
+        if retry_budget > 0:
+            for feed_id in per_feed_retry_ids[:retry_budget]:
+                self._req("PUT", f"/v1/feeds/{feed_id}/refresh")
+
+        # Re-read feed/counter metadata after targeted refresh requests.
+        feeds = self._req("GET", "/v1/feeds") or feeds
+        counters_data = self._req("GET", "/v1/feeds/counters") or {}
+        unread_map = counters_data.get("unreads", {}) if isinstance(counters_data, dict) else {}
 
         for feed in feeds:
             feed_id = str(feed.get("id"))
@@ -273,39 +312,25 @@ class MinifluxProvider(RSSProvider):
 
             status = "ok"
             error_msg = None
-
-            checked_at = feed.get("checked_at")
-            checked_dt = None
-            if checked_at:
-                try:
-                    checked_dt = dateparser.parse(checked_at)
-                    if checked_dt and checked_dt.tzinfo is None:
-                        checked_dt = checked_dt.replace(tzinfo=timezone.utc)
-                except Exception:
-                    checked_dt = None
-
+            checked_dt = self._parse_checked_at(feed.get("checked_at"))
             if (feed.get("parsing_error_count") or 0) > 0:
                 status = "error"
                 error_msg = feed.get("parsing_error_message")
             elif checked_dt and checked_dt < stale_cutoff:
                 status = "stale"
 
-            state = {
-                "id": feed_id,
-                "title": feed.get("title") or "",
-                "category": category,
-                "unread_count": unread,
-                "status": status,
-                "new_items": None,
-                "error": error_msg,
-            }
-            self._emit_progress(progress_cb, state)
-
-            # If Miniflux reports an error or the feed hasn't been checked in a while,
-            # re-issue a per-feed refresh to force an immediate retry.
-            if status in ("error", "stale") and retry_budget > 0:
-                self._req("PUT", f"/v1/feeds/{feed_id}/refresh")
-                retry_budget -= 1
+            self._emit_progress(
+                progress_cb,
+                {
+                    "id": feed_id,
+                    "title": feed.get("title") or "",
+                    "category": category,
+                    "unread_count": unread,
+                    "status": status,
+                    "new_items": None,
+                    "error": error_msg,
+                },
+            )
 
         return True
 
