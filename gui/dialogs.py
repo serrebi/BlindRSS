@@ -1,10 +1,12 @@
 import wx
+import wx.adv
 import copy
 import queue
 import threading
 import webbrowser
 import time
 import logging
+import sys
 from urllib.parse import urlparse
 from core.discovery import discover_feed, is_ytdlp_supported
 from core import utils
@@ -93,11 +95,223 @@ class AddFeedDialog(wx.Dialog):
         return self.url_ctrl.GetValue(), self.cat_ctrl.GetValue()
 
 
+class AddShortcutsDialog(wx.Dialog):
+    def __init__(self, parent):
+        super().__init__(parent, title="Add BlindRSS Shortcuts", size=(460, 280))
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        intro = (
+            "Choose where to add BlindRSS shortcuts.\n"
+            "Taskbar pinning may be limited by your Windows version/policies."
+        )
+        sizer.Add(wx.StaticText(self, label=intro), 0, wx.ALL, 10)
+
+        self.desktop_chk = wx.CheckBox(self, label="Desktop")
+        self.desktop_chk.SetValue(True)
+        sizer.Add(self.desktop_chk, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+        self.start_menu_chk = wx.CheckBox(self, label="Start Menu")
+        self.start_menu_chk.SetValue(True)
+        sizer.Add(self.start_menu_chk, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+        self.taskbar_chk = wx.CheckBox(self, label="Taskbar")
+        self.taskbar_chk.SetValue(False)
+        sizer.Add(self.taskbar_chk, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+        if not sys.platform.startswith("win"):
+            self.desktop_chk.Disable()
+            self.start_menu_chk.Disable()
+            self.taskbar_chk.Disable()
+
+        btn_sizer = self.CreateButtonSizer(wx.OK | wx.CANCEL)
+        if btn_sizer:
+            sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+
+        self.SetSizer(sizer)
+        self.Centre()
+
+    def get_data(self):
+        return {
+            "desktop": bool(self.desktop_chk.GetValue()),
+            "start_menu": bool(self.start_menu_chk.GetValue()),
+            "taskbar": bool(self.taskbar_chk.GetValue()),
+        }
+
+
+class ExcludeNotificationFeedsDialog(wx.Dialog):
+    def __init__(self, parent, feed_entries=None, excluded_ids=None):
+        super().__init__(parent, title="Exclude Feeds from Notifications", size=(480, 420))
+        self._feed_entries = list(feed_entries or [])
+        self._excluded_ids = {str(x) for x in (excluded_ids or []) if str(x or "").strip()}
+        self._feed_id_by_index = {}
+        self._feed_base_labels = []
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(
+            wx.StaticText(
+                self,
+                label=(
+                    "Feeds are checked by default.\n"
+                    "Uncheck feeds that should not send notifications."
+                ),
+            ),
+            0,
+            wx.ALL,
+            10,
+        )
+
+        labels = []
+        for idx, (feed_id, title) in enumerate(self._feed_entries):
+            fid = str(feed_id or "").strip()
+            t = str(title or "").strip() or fid
+            if not fid:
+                continue
+            self._feed_id_by_index[len(labels)] = fid
+            self._feed_base_labels.append(t)
+            labels.append(t)
+
+        self.feed_list = wx.CheckListBox(self, choices=labels)
+        sizer.Add(self.feed_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
+        for idx, fid in self._feed_id_by_index.items():
+            should_notify = fid not in self._excluded_ids
+            try:
+                self.feed_list.Check(idx, should_notify)
+            except Exception:
+                pass
+
+        self._selection_status = wx.StaticText(self, label="")
+        sizer.Add(self._selection_status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
+        self._refresh_item_labels()
+        self.feed_list.Bind(wx.EVT_LISTBOX, self.on_feed_selected)
+        self.feed_list.Bind(wx.EVT_CHECKLISTBOX, self.on_feed_toggled)
+
+        actions = wx.BoxSizer(wx.HORIZONTAL)
+        check_all_btn = wx.Button(self, label="Check All")
+        uncheck_all_btn = wx.Button(self, label="Uncheck All")
+        actions.Add(check_all_btn, 0, wx.RIGHT, 8)
+        actions.Add(uncheck_all_btn, 0)
+        sizer.Add(actions, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
+        check_all_btn.Bind(wx.EVT_BUTTON, self.on_check_all)
+        uncheck_all_btn.Bind(wx.EVT_BUTTON, self.on_uncheck_all)
+
+        btn_sizer = self.CreateButtonSizer(wx.OK | wx.CANCEL)
+        if btn_sizer:
+            sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+
+        self.SetSizer(sizer)
+        self.Centre()
+
+        if not labels:
+            self.feed_list.Disable()
+            check_all_btn.Disable()
+            uncheck_all_btn.Disable()
+            self._selection_status.SetLabel("No feeds available.")
+        else:
+            try:
+                self.feed_list.SetSelection(0)
+            except Exception:
+                pass
+            self._update_selection_status()
+
+    def _is_checked(self, index):
+        try:
+            return bool(self.feed_list.IsChecked(index))
+        except Exception:
+            return True
+
+    def _build_item_label(self, index):
+        if index < 0 or index >= len(self._feed_base_labels):
+            return ""
+        checked = self._is_checked(index)
+        check_state = "checked" if checked else "unchecked"
+        return f"{self._feed_base_labels[index]} - {check_state}"
+
+    def _refresh_item_labels(self):
+        for i in range(self.feed_list.GetCount()):
+            checked = self._is_checked(i)
+            label = self._build_item_label(i)
+            try:
+                self.feed_list.SetString(i, label)
+                self.feed_list.Check(i, checked)
+            except Exception:
+                pass
+
+    def _update_selection_status(self, index=None):
+        if index is None or index == wx.NOT_FOUND:
+            try:
+                index = self.feed_list.GetSelection()
+            except Exception:
+                index = wx.NOT_FOUND
+        if index == wx.NOT_FOUND:
+            self._selection_status.SetLabel("No feed selected.")
+            return
+        if index < 0 or index >= len(self._feed_base_labels):
+            self._selection_status.SetLabel("")
+            return
+        checked = self._is_checked(index)
+        check_state = "checked" if checked else "unchecked"
+        self._selection_status.SetLabel(
+            f"Selected feed: {self._feed_base_labels[index]}. {check_state}."
+        )
+
+    def on_feed_selected(self, event):
+        self._update_selection_status(event.GetInt())
+        event.Skip()
+
+    def on_feed_toggled(self, event):
+        index = event.GetInt()
+        checked = self._is_checked(index)
+        label = self._build_item_label(index)
+        try:
+            self.feed_list.SetString(index, label)
+            self.feed_list.Check(index, checked)
+        except Exception:
+            pass
+        self._update_selection_status(index)
+        event.Skip()
+
+    def on_check_all(self, event):
+        try:
+            for i in range(self.feed_list.GetCount()):
+                self.feed_list.Check(i, True)
+        except Exception:
+            pass
+        self._refresh_item_labels()
+        self._update_selection_status()
+
+    def on_uncheck_all(self, event):
+        try:
+            for i in range(self.feed_list.GetCount()):
+                self.feed_list.Check(i, False)
+        except Exception:
+            pass
+        self._refresh_item_labels()
+        self._update_selection_status()
+
+    def get_excluded_feed_ids(self):
+        excluded = []
+        for idx, fid in self._feed_id_by_index.items():
+            try:
+                checked = bool(self.feed_list.IsChecked(idx))
+            except Exception:
+                checked = True
+            if not checked:
+                excluded.append(fid)
+        return excluded
+
+
 class SettingsDialog(wx.Dialog):
-    def __init__(self, parent, config):
+    def __init__(self, parent, config, notification_feeds=None):
         super().__init__(parent, title="Settings", size=(500, 450))
         
         self.config = config
+        self._notification_feed_entries = list(notification_feeds or [])
+        self._notification_excluded_feed_ids = {
+            str(x) for x in (config.get("windows_notifications_excluded_feeds", []) or []) if str(x or "").strip()
+        }
         
         notebook = wx.Notebook(self)
         
@@ -255,6 +469,12 @@ class SettingsDialog(wx.Dialog):
         self.refresh_startup_chk = wx.CheckBox(general_panel, label="Automatically refresh feeds upon start")
         self.refresh_startup_chk.SetValue(bool(config.get("refresh_on_startup", True)))
         general_sizer.Add(self.refresh_startup_chk, 0, wx.ALL, 5)
+
+        self.start_on_login_chk = wx.CheckBox(general_panel, label="Start BlindRSS when Windows starts")
+        self.start_on_login_chk.SetValue(bool(config.get("start_on_windows_login", False)))
+        if not sys.platform.startswith("win"):
+            self.start_on_login_chk.Disable()
+        general_sizer.Add(self.start_on_login_chk, 0, wx.ALL, 5)
 
         self.remember_last_feed_chk = wx.CheckBox(general_panel, label="Remember last selected feed/folder on startup")
         self.remember_last_feed_chk.SetValue(bool(config.get("remember_last_feed", False)))
@@ -506,6 +726,77 @@ class SettingsDialog(wx.Dialog):
         sounds_panel.SetSizer(sounds_sizer)
         notebook.AddPage(sounds_panel, "Sounds")
 
+        # Notifications Tab
+        notifications_panel = wx.Panel(notebook)
+        notifications_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        notice_txt = (
+            "Windows toast notifications for new articles.\n"
+            "Disabled by default."
+        )
+        notifications_sizer.Add(wx.StaticText(notifications_panel, label=notice_txt), 0, wx.ALL, 8)
+
+        self.windows_notifications_chk = wx.CheckBox(
+            notifications_panel,
+            label="Enable notifications for new articles",
+        )
+        self.windows_notifications_chk.SetValue(bool(config.get("windows_notifications_enabled", False)))
+        if not sys.platform.startswith("win"):
+            self.windows_notifications_chk.Disable()
+        notifications_sizer.Add(self.windows_notifications_chk, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self.windows_notifications_feed_chk = wx.CheckBox(
+            notifications_panel,
+            label="Include feed name in notification text",
+        )
+        self.windows_notifications_feed_chk.SetValue(
+            bool(config.get("windows_notifications_include_feed_name", True))
+        )
+        notifications_sizer.Add(self.windows_notifications_feed_chk, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        cap_row = wx.BoxSizer(wx.HORIZONTAL)
+        cap_row.Add(
+            wx.StaticText(notifications_panel, label="Max notifications per refresh (0 = no limit):"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            8,
+        )
+        self.windows_notifications_max_ctrl = wx.SpinCtrl(
+            notifications_panel,
+            min=0,
+            max=200,
+            initial=int(config.get("windows_notifications_max_per_refresh", 0)),
+        )
+        cap_row.Add(self.windows_notifications_max_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
+        notifications_sizer.Add(cap_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self.windows_notifications_summary_chk = wx.CheckBox(
+            notifications_panel,
+            label="Show a summary notification when notification cap is reached",
+        )
+        self.windows_notifications_summary_chk.SetValue(
+            bool(config.get("windows_notifications_show_summary_when_capped", True))
+        )
+        notifications_sizer.Add(self.windows_notifications_summary_chk, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self.test_notification_btn = wx.Button(notifications_panel, label="Test Notification")
+        self.test_notification_btn.Bind(wx.EVT_BUTTON, self.on_test_notification)
+        notifications_sizer.Add(self.test_notification_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self.exclude_feeds_btn = wx.Button(notifications_panel, label="Exclude Feeds...")
+        self.exclude_feeds_btn.Bind(wx.EVT_BUTTON, self.on_exclude_notification_feeds)
+        notifications_sizer.Add(self.exclude_feeds_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self.exclude_feeds_lbl = wx.StaticText(notifications_panel, label="")
+        notifications_sizer.Add(self.exclude_feeds_lbl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self._update_excluded_feeds_label()
+
+        self.windows_notifications_chk.Bind(wx.EVT_CHECKBOX, self._on_toggle_windows_notifications)
+        self._update_notification_controls()
+
+        notifications_panel.SetSizer(notifications_sizer)
+        notebook.AddPage(notifications_panel, "Notifications")
+
         # Main Sizer
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         main_sizer.Add(notebook, 1, wx.EXPAND | wx.ALL, 5)
@@ -520,6 +811,118 @@ class SettingsDialog(wx.Dialog):
 
     def on_provider_choice(self, event):
         self._update_provider_panels()
+
+    def _on_toggle_windows_notifications(self, event):
+        self._update_notification_controls()
+
+    def _sorted_notification_feed_entries(self):
+        entries = []
+        seen = set()
+        for item in (self._notification_feed_entries or []):
+            try:
+                feed_id, title = item
+            except Exception:
+                continue
+            fid = str(feed_id or "").strip()
+            if not fid or fid in seen:
+                continue
+            seen.add(fid)
+            label = str(title or "").strip() or fid
+            entries.append((fid, label))
+        entries.sort(key=lambda x: (x[1] or "").lower())
+        return entries
+
+    def _update_excluded_feeds_label(self):
+        total = len(self._sorted_notification_feed_entries())
+        excluded = len(getattr(self, "_notification_excluded_feed_ids", set()) or set())
+        if total <= 0:
+            text = "No feeds available."
+        else:
+            text = f"Excluded feeds: {excluded} of {total}"
+        try:
+            self.exclude_feeds_lbl.SetLabel(text)
+        except Exception:
+            pass
+
+    def on_exclude_notification_feeds(self, event):
+        entries = self._sorted_notification_feed_entries()
+        dlg = ExcludeNotificationFeedsDialog(
+            self,
+            feed_entries=entries,
+            excluded_ids=self._notification_excluded_feed_ids,
+        )
+        try:
+            if dlg.ShowModal() == wx.ID_OK:
+                self._notification_excluded_feed_ids = {
+                    str(x) for x in (dlg.get_excluded_feed_ids() or []) if str(x or "").strip()
+                }
+                self._update_excluded_feeds_label()
+        finally:
+            dlg.Destroy()
+
+    def on_test_notification(self, event):
+        if not sys.platform.startswith("win"):
+            wx.MessageBox("Windows notifications are only available on Windows.", "Notifications", wx.ICON_INFORMATION)
+            return
+
+        title = "BlindRSS notification test"
+        body = "If you can read this, notifications are working."
+        shown = False
+
+        parent = self.GetParent()
+        try:
+            tray = getattr(parent, "tray_icon", None)
+            if tray and hasattr(tray, "show_notification"):
+                shown = bool(tray.show_notification(title, body))
+        except Exception:
+            shown = False
+
+        if not shown:
+            try:
+                note = wx.adv.NotificationMessage(title, body, parent=parent if parent else self)
+                try:
+                    note.SetFlags(wx.ICON_INFORMATION)
+                except Exception:
+                    pass
+                shown = bool(note.Show(timeout=wx.adv.NotificationMessage.Timeout_Auto))
+            except Exception:
+                shown = False
+
+        if not shown:
+            wx.MessageBox(
+                "Notification APIs were unavailable. Check Windows notification permissions and Focus Assist.",
+                "Notifications",
+                wx.ICON_WARNING,
+            )
+
+    def _update_notification_controls(self):
+        enabled = bool(getattr(self, "windows_notifications_chk", None) and self.windows_notifications_chk.GetValue())
+        if not sys.platform.startswith("win"):
+            enabled = False
+        controls = [
+            getattr(self, "windows_notifications_feed_chk", None),
+            getattr(self, "windows_notifications_max_ctrl", None),
+            getattr(self, "windows_notifications_summary_chk", None),
+        ]
+        for ctrl in controls:
+            if not ctrl:
+                continue
+            try:
+                ctrl.Enable(enabled)
+            except Exception:
+                pass
+        try:
+            test_btn = getattr(self, "test_notification_btn", None)
+            if test_btn:
+                test_btn.Enable(bool(sys.platform.startswith("win")))
+        except Exception:
+            pass
+        try:
+            exclude_btn = getattr(self, "exclude_feeds_btn", None)
+            if exclude_btn:
+                exclude_btn.Enable(bool(sys.platform.startswith("win")))
+        except Exception:
+            pass
 
     def _update_provider_panels(self):
         try:
@@ -857,11 +1260,17 @@ class SettingsDialog(wx.Dialog):
             "start_maximized": self.start_maximized_chk.GetValue(),
             "debug_mode": self.debug_mode_chk.GetValue(),
             "refresh_on_startup": self.refresh_startup_chk.GetValue(),
+            "start_on_windows_login": self.start_on_login_chk.GetValue(),
             "remember_last_feed": self.remember_last_feed_chk.GetValue(),
             "auto_check_updates": self.auto_update_chk.GetValue(),
             "sounds_enabled": self.sounds_enabled_chk.GetValue(),
             "sound_refresh_complete": self.sound_complete_ctrl.GetValue(),
             "sound_refresh_error": self.sound_error_ctrl.GetValue(),
+            "windows_notifications_enabled": self.windows_notifications_chk.GetValue(),
+            "windows_notifications_include_feed_name": self.windows_notifications_feed_chk.GetValue(),
+            "windows_notifications_max_per_refresh": self.windows_notifications_max_ctrl.GetValue(),
+            "windows_notifications_show_summary_when_capped": self.windows_notifications_summary_chk.GetValue(),
+            "windows_notifications_excluded_feeds": sorted(self._notification_excluded_feed_ids),
             "active_provider": self.provider_choice.GetStringSelection(),
             "providers": providers,
         }

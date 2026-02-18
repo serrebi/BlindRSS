@@ -1,6 +1,8 @@
 import requests
 import re
 import logging
+import time
+import copy
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
@@ -28,19 +30,82 @@ class MinifluxProvider(RSSProvider):
         # Ensure Accept stays JSON for API calls.
         self.headers["Accept"] = "application/json"
         self.headers = utils.add_revalidation_headers(self.headers)
+        self._cached_get_responses: dict[str, Any] = {}
+        self._last_request_info = {
+            "ok": False,
+            "used_cache": False,
+            "status_code": None,
+            "endpoint": "",
+            "method": "",
+        }
+
+    def _cacheable_get_endpoint(self, endpoint: str) -> str | None:
+        ep = str(endpoint or "").split("?", 1)[0].strip()
+        if ep in ("/v1/feeds", "/v1/feeds/counters", "/v1/categories"):
+            return ep
+        return None
+
+    def _save_cached_get_response(self, endpoint: str, payload: Any) -> None:
+        key = self._cacheable_get_endpoint(endpoint)
+        if not key:
+            return
+        if not isinstance(payload, (dict, list)):
+            return
+        try:
+            self._cached_get_responses[key] = copy.deepcopy(payload)
+        except Exception:
+            self._cached_get_responses[key] = payload
+
+    def _load_cached_get_response(self, endpoint: str):
+        key = self._cacheable_get_endpoint(endpoint)
+        if not key:
+            return None
+        cached = self._cached_get_responses.get(key)
+        if cached is None:
+            return None
+        try:
+            return copy.deepcopy(cached)
+        except Exception:
+            return cached
 
     def _request_timeout_seconds(self, endpoint: str = "") -> int:
-        """Return request timeout, with a longer floor for refresh endpoints."""
+        """Return request timeout, with endpoint-specific floors for refresh endpoints."""
         try:
             base_timeout = int(self.config.get("feed_timeout_seconds", 15))
         except Exception:
             base_timeout = 15
         base_timeout = max(5, min(120, int(base_timeout)))
-        if "refresh" in str(endpoint or ""):
-            # Miniflux refresh endpoints can take longer on busy/self-hosted instances.
-            return max(base_timeout, 25)
+        ep = str(endpoint or "").strip().lower()
+        if ep == "/v1/feeds/refresh":
+            # Global refresh can be slower on busy instances.
+            return max(base_timeout, 20)
+        if ep.endswith("/refresh"):
+            # Per-feed refresh should be quick; keep timeout tighter to avoid long UI stalls.
+            return max(base_timeout, 10)
         return base_timeout
-        
+
+    def _request_retry_attempts(self, endpoint: str = "") -> int:
+        try:
+            retries = int(self.config.get("feed_retry_attempts", 1) or 0)
+        except Exception:
+            retries = 1
+        retries = max(0, min(5, retries))
+        ep = str(endpoint or "").strip().lower()
+        if ep == "/v1/feeds/refresh":
+            # Keep global refresh retries conservative to avoid long blocking loops when server is down.
+            retries = min(retries, 2)
+        elif ep.endswith("/refresh"):
+            # Per-feed refresh retries can explode total refresh time; cap hard.
+            retries = min(retries, 1)
+        return retries
+
+    def _is_transient_status(self, status_code: int | None) -> bool:
+        return int(status_code or 0) in (429, 500, 502, 503, 504)
+
+    def _retry_backoff_seconds(self, attempt_index: int) -> float:
+        # attempt_index is 1-based
+        return min(4.0, 0.4 * (2 ** max(0, int(attempt_index) - 1)))
+
     def get_name(self) -> str:
         return "Miniflux"
 
@@ -53,42 +118,173 @@ class MinifluxProvider(RSSProvider):
 
     def _req(self, method, endpoint, json=None, params=None):
         if not self.base_url:
+            self._last_request_info = {
+                "ok": False,
+                "used_cache": False,
+                "status_code": None,
+                "endpoint": str(endpoint or ""),
+                "method": str(method or "").upper(),
+            }
             return None
         url = f"{self.base_url}{endpoint}"
         timeout_s = self._request_timeout_seconds(endpoint)
+        retries = self._request_retry_attempts(endpoint)
         req_headers = utils.add_revalidation_headers(self.headers)
-        try:
-            # Uses self.headers which includes a browser-like User-Agent
-            resp = requests.request(method, url, headers=req_headers, json=json, params=params, timeout=timeout_s)
-            resp.raise_for_status()
+        method_upper = str(method or "").upper()
+        is_get = method_upper == "GET"
+        last_error = None
+        last_status_code = None
 
-            if resp.status_code == 204:
-                return None
-
+        for attempt in range(1, retries + 2):
             try:
-                return resp.json()
-            except ValueError:
-                log.error(f"Miniflux JSON error for {url}. Status: {resp.status_code}")
-                return None
+                # Uses self.headers which includes a browser-like User-Agent
+                resp = requests.request(
+                    method_upper,
+                    url,
+                    headers=req_headers,
+                    json=json,
+                    params=params,
+                    timeout=timeout_s,
+                )
 
-        except requests.HTTPError as e:
-            # Silence 500 on refresh or general list endpoints as it's often a transient server issue.
-            is_silent_endpoint = any(x in endpoint for x in ("refresh", "/feeds", "/entries"))
-            if e.response is not None and e.response.status_code == 500 and is_silent_endpoint:
-                log.debug(f"Miniflux endpoint failed for {url} (500). Server might be overloaded.")
-            else:
+                status_code = int(getattr(resp, "status_code", 0) or 0)
+                last_status_code = status_code
+                if self._is_transient_status(status_code) and attempt <= retries:
+                    delay = self._retry_backoff_seconds(attempt)
+                    log.warning(
+                        "Miniflux transient HTTP %s for %s %s (attempt %s/%s); retrying in %.1fs",
+                        status_code,
+                        method_upper,
+                        url,
+                        attempt,
+                        retries + 1,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                resp.raise_for_status()
+
+                if status_code == 204:
+                    return None
+
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    log.error(f"Miniflux JSON error for {url}. Status: {status_code}")
+                    self._last_request_info = {
+                        "ok": False,
+                        "used_cache": False,
+                        "status_code": status_code,
+                        "endpoint": str(endpoint or ""),
+                        "method": method_upper,
+                    }
+                    return None
+
+                if is_get:
+                    self._save_cached_get_response(endpoint, payload)
+                self._last_request_info = {
+                    "ok": True,
+                    "used_cache": False,
+                    "status_code": status_code,
+                    "endpoint": str(endpoint or ""),
+                    "method": method_upper,
+                }
+                return payload
+
+            except requests.HTTPError as e:
+                last_error = e
+                status_code = None
+                try:
+                    status_code = int(getattr(getattr(e, "response", None), "status_code", 0) or 0)
+                except Exception:
+                    status_code = 0
+                last_status_code = status_code
+
+                if self._is_transient_status(status_code) and attempt <= retries:
+                    delay = self._retry_backoff_seconds(attempt)
+                    log.warning(
+                        "Miniflux transient HTTP %s for %s %s (attempt %s/%s); retrying in %.1fs",
+                        status_code,
+                        method_upper,
+                        url,
+                        attempt,
+                        retries + 1,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                if self._is_transient_status(status_code):
+                    log.warning("Miniflux transient HTTP %s for %s %s: %s", status_code, method_upper, url, e)
+                else:
+                    log.error(f"Miniflux error for {url}: {e}")
+                break
+            except requests.Timeout as e:
+                last_error = e
+                last_status_code = None
+                if attempt <= retries:
+                    delay = self._retry_backoff_seconds(attempt)
+                    log.warning(
+                        "Miniflux timeout for %s %s (timeout=%ss, attempt %s/%s); retrying in %.1fs",
+                        method_upper,
+                        url,
+                        timeout_s,
+                        attempt,
+                        retries + 1,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                log.warning(f"Miniflux timeout for {url} (timeout={timeout_s}s): {e}")
+                break
+            except requests.RequestException as e:
+                last_error = e
+                last_status_code = None
+                if attempt <= retries:
+                    delay = self._retry_backoff_seconds(attempt)
+                    log.warning(
+                        "Miniflux request error for %s %s (attempt %s/%s); retrying in %.1fs: %s",
+                        method_upper,
+                        url,
+                        attempt,
+                        retries + 1,
+                        delay,
+                        e,
+                    )
+                    time.sleep(delay)
+                    continue
                 log.error(f"Miniflux error for {url}: {e}")
-            return None
-        except requests.Timeout as e:
-            # Refresh timeouts are usually transient server load; keep logs less severe.
-            if "refresh" in str(endpoint or ""):
-                log.warning(f"Miniflux refresh timeout for {url} (timeout={timeout_s}s): {e}")
-            else:
-                log.error(f"Miniflux timeout for {url} (timeout={timeout_s}s): {e}")
-            return None
-        except Exception as e:
-            log.error(f"Miniflux error for {url}: {e}")
-            return None
+                break
+            except Exception as e:
+                last_error = e
+                last_status_code = None
+                log.error(f"Miniflux error for {url}: {e}")
+                break
+
+        if is_get:
+            cached = self._load_cached_get_response(endpoint)
+            if cached is not None:
+                log.warning("Miniflux using cached response for %s after request failure.", endpoint)
+                self._last_request_info = {
+                    "ok": False,
+                    "used_cache": True,
+                    "status_code": last_status_code,
+                    "endpoint": str(endpoint or ""),
+                    "method": method_upper,
+                }
+                return cached
+
+        self._last_request_info = {
+            "ok": False,
+            "used_cache": False,
+            "status_code": last_status_code,
+            "endpoint": str(endpoint or ""),
+            "method": method_upper,
+        }
+        if last_error is not None:
+            log.debug("Miniflux request failed with no fallback for %s %s", method_upper, url, exc_info=True)
+        return None
 
     def _get_entries_paged(self, endpoint: str, params: Dict[str, Any] = None, limit: int = 200) -> List[Dict[str, Any]]:
         """Retrieve all entries by paging with limit/offset until total is reached.
@@ -268,10 +464,24 @@ class MinifluxProvider(RSSProvider):
     def refresh(self, progress_cb=None, force: bool = False) -> bool:
         # Kick off a global refresh on the Miniflux server.
         self._req("PUT", "/v1/feeds/refresh")
+        refresh_info = dict(getattr(self, "_last_request_info", {}) or {})
+        global_refresh_ok = True
+        if (
+            str(refresh_info.get("endpoint", "")) == "/v1/feeds/refresh"
+            and str(refresh_info.get("method", "")).upper() == "PUT"
+        ):
+            global_refresh_ok = bool(refresh_info.get("ok", False))
 
         # After triggering, fetch feed metadata so we can surface stale/error
         # feeds in the UI and optionally retry them individually.
         feeds = self._req("GET", "/v1/feeds") or []
+        feeds_info = dict(getattr(self, "_last_request_info", {}) or {})
+        feeds_from_cache = False
+        if (
+            str(feeds_info.get("endpoint", "")) == "/v1/feeds"
+            and str(feeds_info.get("method", "")).upper() == "GET"
+        ):
+            feeds_from_cache = bool(feeds_info.get("used_cache", False))
         now = datetime.now(timezone.utc)
         stale_cutoff = now - timedelta(hours=3)
         retry_budget = len(feeds) if force else 15
@@ -296,7 +506,14 @@ class MinifluxProvider(RSSProvider):
             elif status in ("error", "stale"):
                 per_feed_retry_ids.append(feed_id)
 
-        if retry_budget > 0:
+        allow_targeted_refresh = bool(global_refresh_ok and (not feeds_from_cache))
+        if not allow_targeted_refresh and per_feed_retry_ids:
+            log.warning(
+                "Skipping Miniflux per-feed refresh retries due to upstream instability "
+                "(global refresh failed or feed list came from cache)."
+            )
+
+        if retry_budget > 0 and allow_targeted_refresh:
             for feed_id in per_feed_retry_ids[:retry_budget]:
                 self._req("PUT", f"/v1/feeds/{feed_id}/refresh")
 

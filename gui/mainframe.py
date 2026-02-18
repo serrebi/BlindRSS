@@ -12,7 +12,14 @@ from collections import deque
 from urllib.parse import urlsplit
 from bs4 import BeautifulSoup
 # from dateutil import parser as date_parser  # Removed unused import
-from .dialogs import AddFeedDialog, SettingsDialog, FeedPropertiesDialog, AboutDialog, PersistentSearchDialog
+from .dialogs import (
+    AddFeedDialog,
+    AddShortcutsDialog,
+    SettingsDialog,
+    FeedPropertiesDialog,
+    AboutDialog,
+    PersistentSearchDialog,
+)
 from .player import PlayerFrame
 from .tray import BlindRSSTrayIcon
 from .hotkeys import HoldRepeatHotkeys
@@ -21,6 +28,7 @@ from core.config import APP_DIR
 from core import utils
 from core import article_extractor
 from core import updater
+from core import windows_integration
 from core.version import APP_VERSION
 from core import dependency_check
 import core.discovery
@@ -89,6 +97,11 @@ class MainFrame(wx.Frame):
         self._persistent_search_items = {}
         self._search_visible = bool(self.config_manager.get("show_search_field", True))
         self._search_mode = self._normalize_search_mode(self.config_manager.get("search_mode", "title_content"))
+        self._article_sort_by = self._normalize_article_sort_by(self.config_manager.get("article_sort_by", "date"))
+        self._article_sort_ascending = bool(self.config_manager.get("article_sort_ascending", False))
+        self._sort_by_menu_items = {}
+        self._sort_ascending_item = None
+        self._active_notifications = deque(maxlen=50)
 
         self.init_ui()
         self.init_menus()
@@ -189,6 +202,42 @@ class MainFrame(wx.Frame):
         dlg = AboutDialog(self, APP_VERSION)
         dlg.ShowModal()
         dlg.Destroy()
+
+    def on_add_shortcuts(self, event):
+        dlg = AddShortcutsDialog(self)
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            data = dlg.get_data()
+        finally:
+            dlg.Destroy()
+
+        if not any(bool(v) for v in (data or {}).values()):
+            return
+
+        try:
+            results = windows_integration.create_shortcuts(
+                desktop=bool(data.get("desktop")),
+                start_menu=bool(data.get("start_menu")),
+                taskbar=bool(data.get("taskbar")),
+            )
+        except Exception as e:
+            wx.MessageBox(f"Could not add shortcuts:\n{e}", "Shortcuts", wx.ICON_ERROR)
+            return
+
+        lines = []
+        for key, label in (("desktop", "Desktop"), ("start_menu", "Start Menu"), ("taskbar", "Taskbar")):
+            if key not in results:
+                continue
+            ok, message = results.get(key, (False, "Unknown error"))
+            prefix = "OK" if ok else "Failed"
+            detail = f": {message}" if message else ""
+            lines.append(f"{label}: {prefix}{detail}")
+        if not lines:
+            lines.append("No shortcut actions were performed.")
+
+        failed = any(not bool(results.get(k, (True, ""))[0]) for k in results.keys())
+        wx.MessageBox("\n".join(lines), "Shortcuts", wx.ICON_WARNING if failed else wx.ICON_INFORMATION)
 
     def init_ui(self):
         self.CreateStatusBar()
@@ -448,6 +497,95 @@ class MainFrame(wx.Frame):
             return "title_only"
         return "title_content"
 
+    def _normalize_article_sort_by(self, sort_by: str) -> str:
+        value = (sort_by or "").strip().lower()
+        valid = {"date", "name", "author", "description", "feed", "status"}
+        return value if value in valid else "date"
+
+    def _article_description_for_sort(self, article) -> str:
+        content = ""
+        try:
+            content = str(getattr(article, "content", "") or "")
+        except Exception:
+            content = ""
+        if not content:
+            return ""
+        try:
+            text = re.sub(r"<[^>]+>", " ", content)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text.lower()
+        except Exception:
+            return content.lower()
+
+    def _article_sort_primary_key(self, article):
+        sort_by = getattr(self, "_article_sort_by", "date")
+        if sort_by == "name":
+            return (getattr(article, "title", "") or "").strip().lower()
+        if sort_by == "author":
+            return (getattr(article, "author", "") or "").strip().lower()
+        if sort_by == "description":
+            return self._article_description_for_sort(article)
+        if sort_by == "feed":
+            try:
+                feed_id = getattr(article, "feed_id", None)
+                if feed_id:
+                    feed = self.feed_map.get(feed_id)
+                    if feed:
+                        return (getattr(feed, "title", "") or "").strip().lower()
+            except Exception:
+                pass
+            return ""
+        if sort_by == "status":
+            try:
+                return "read" if bool(getattr(article, "is_read", False)) else "unread"
+            except Exception:
+                return "unread"
+        # date
+        try:
+            return float(getattr(article, "timestamp", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    def _sort_articles_for_display(self, articles):
+        items = list(articles or [])
+        if len(items) <= 1:
+            return items
+
+        # Always stabilize by recency first, then apply user sort as a stable secondary sort.
+        items.sort(
+            key=lambda a: (
+                float(getattr(a, "timestamp", 0.0) or 0.0),
+                self._article_cache_id(a) or "",
+            ),
+            reverse=True,
+        )
+
+        sort_by = getattr(self, "_article_sort_by", "date")
+        ascending = bool(getattr(self, "_article_sort_ascending", False))
+        if sort_by == "date":
+            items.sort(
+                key=lambda a: (
+                    float(getattr(a, "timestamp", 0.0) or 0.0),
+                    self._article_cache_id(a) or "",
+                ),
+                reverse=(not ascending),
+            )
+            return items
+
+        items.sort(key=self._article_sort_primary_key, reverse=(not ascending))
+        return items
+
+    def _capture_top_article_for_restore(self, focused_article_id=None, selected_article_id=None):
+        top_article_id = None
+        top_idx = self.list_ctrl.GetTopItem()
+        if top_idx != wx.NOT_FOUND and 0 <= top_idx < len(self.current_articles):
+            # Avoid "jumping" at the top of a feed: when the view is still at row 0
+            # and the user has not anchored focus/selection, don't pin the old top row.
+            should_anchor = (top_idx > 0) or bool(focused_article_id) or bool(selected_article_id)
+            if should_anchor:
+                top_article_id = self._article_cache_id(self.current_articles[top_idx])
+        return top_article_id
+
     def _article_search_text(self, article) -> str:
         if not article:
             return ""
@@ -504,10 +642,7 @@ class MainFrame(wx.Frame):
         if (not selected_on_load_more) and selected_idx != wx.NOT_FOUND and 0 <= selected_idx < len(self.current_articles):
             selected_article_id = self._article_cache_id(self.current_articles[selected_idx])
 
-        top_article_id = None
-        top_idx = self.list_ctrl.GetTopItem()
-        if top_idx != wx.NOT_FOUND and 0 <= top_idx < len(self.current_articles):
-            top_article_id = self._article_cache_id(self.current_articles[top_idx])
+        top_article_id = self._capture_top_article_for_restore(focused_article_id, selected_article_id)
 
         return focused_article_id, top_article_id, selected_article_id, (focused_on_load_more or selected_on_load_more)
 
@@ -633,6 +768,59 @@ class MainFrame(wx.Frame):
         except Exception:
             self._set_search_visible(True)
 
+    def on_change_sort_by(self, event):
+        sort_by = self._sort_by_menu_items.get(int(event.GetId()), "date")
+        sort_by = self._normalize_article_sort_by(sort_by)
+        if sort_by == getattr(self, "_article_sort_by", "date"):
+            return
+        self._article_sort_by = sort_by
+        try:
+            self.config_manager.set("article_sort_by", sort_by)
+        except Exception:
+            pass
+        self._refresh_articles_for_sort_change()
+
+    def on_toggle_sort_direction(self, event):
+        self._article_sort_ascending = bool(event.IsChecked())
+        try:
+            self.config_manager.set("article_sort_ascending", self._article_sort_ascending)
+        except Exception:
+            pass
+        self._refresh_articles_for_sort_change()
+
+    def _refresh_articles_for_sort_change(self):
+        focused_id, top_id, selected_id, load_more_selected = self._capture_list_view_state()
+        base_articles = self._get_base_articles_for_current_view()
+        display_articles = list(base_articles or [])
+        if self._is_search_active():
+            display_articles = self._filter_articles(base_articles, self._search_query)
+        self.current_articles = self._sort_articles_for_display(display_articles)
+        self._remove_loading_more_placeholder()
+        empty_label = "No matches." if (self._is_search_active() and base_articles) else "No articles found."
+        self._render_articles_list(self.current_articles, empty_label=empty_label)
+
+        show_more = self._should_show_load_more_placeholder(len(base_articles))
+        if show_more:
+            self._add_loading_more_placeholder()
+
+        if load_more_selected and show_more:
+            wx.CallAfter(self._restore_load_more_focus)
+        else:
+            wx.CallAfter(self._restore_list_view, focused_id, top_id, selected_id)
+
+        if selected_id and not any(self._article_cache_id(a) == selected_id for a in self.current_articles):
+            self.selected_article_id = None
+            try:
+                self.content_ctrl.SetValue("")
+            except Exception:
+                pass
+
+        if self._is_search_active():
+            try:
+                self.SetStatusText(f"Filter: {len(self.current_articles)} of {len(base_articles)}")
+            except Exception:
+                pass
+
     def _apply_search_filter(self):
         if not self._is_search_active():
             return
@@ -648,11 +836,11 @@ class MainFrame(wx.Frame):
         focused_id, top_id, selected_id, load_more_selected = self._capture_list_view_state()
 
         filtered = self._filter_articles(base_articles, self._search_query)
-        self.current_articles = filtered
+        self.current_articles = self._sort_articles_for_display(filtered)
 
         self._remove_loading_more_placeholder()
         empty_label = "No matches." if base_articles else "No articles found."
-        self._render_articles_list(filtered, empty_label=empty_label)
+        self._render_articles_list(self.current_articles, empty_label=empty_label)
 
         show_more = self._should_show_load_more_placeholder(len(base_articles))
         if show_more:
@@ -668,7 +856,7 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
-        if not filtered or (selected_id and not any(self._article_cache_id(a) == selected_id for a in filtered)):
+        if not self.current_articles or (selected_id and not any(self._article_cache_id(a) == selected_id for a in self.current_articles)):
             self.selected_article_id = None
             try:
                 self.content_ctrl.SetValue("")
@@ -676,7 +864,7 @@ class MainFrame(wx.Frame):
                 pass
 
         try:
-            self.SetStatusText(f"Filter: {len(filtered)} of {len(base_articles)}")
+            self.SetStatusText(f"Filter: {len(self.current_articles)} of {len(base_articles)}")
         except Exception:
             pass
 
@@ -708,7 +896,7 @@ class MainFrame(wx.Frame):
 
         focused_id, top_id, selected_id, load_more_selected = self._capture_list_view_state()
 
-        self.current_articles = list(base_articles or [])
+        self.current_articles = self._sort_articles_for_display(list(base_articles or []))
         self._remove_loading_more_placeholder()
         self._render_articles_list(self.current_articles, empty_label="No articles found.")
         show_more = self._should_show_load_more_placeholder(len(base_articles))
@@ -880,13 +1068,13 @@ class MainFrame(wx.Frame):
             if self._is_search_active():
                 display_articles = self._filter_articles(base_articles, self._search_query)
 
-            self.current_articles = display_articles
+            self.current_articles = self._sort_articles_for_display(display_articles)
             self._remove_loading_more_placeholder()
             empty_label = "No matches." if (self._is_search_active() and base_articles) else "No articles found."
-            self._render_articles_list(display_articles, empty_label=empty_label)
+            self._render_articles_list(self.current_articles, empty_label=empty_label)
             if self._is_search_active():
                 try:
-                    self.SetStatusText(f"Filter: {len(display_articles)} of {len(base_articles)}")
+                    self.SetStatusText(f"Filter: {len(self.current_articles)} of {len(base_articles)}")
                 except Exception:
                     pass
 
@@ -1016,6 +1204,7 @@ class MainFrame(wx.Frame):
         export_opml_item = file_menu.Append(wx.ID_ANY, "E&xport OPML...", "Export feeds to OPML")
         file_menu.AppendSeparator()
         persistent_search_item = file_menu.Append(wx.ID_ANY, "Configure Persistent Search...", "Configure saved search queries")
+        add_shortcuts_item = file_menu.Append(wx.ID_ANY, "Add &Shortcuts...", "Create desktop, taskbar, or Start Menu shortcuts")
         file_menu.AppendSeparator()
         exit_item = file_menu.Append(wx.ID_EXIT, "E&xit", "Exit application")
         
@@ -1025,6 +1214,34 @@ class MainFrame(wx.Frame):
         self._show_search_item = show_search_item
         # Ctrl+P is handled globally (see main.py GlobalMediaKeyFilter). Do not make it a menu accelerator.
         player_item = view_menu.Append(wx.ID_ANY, "Show/Hide &Player (Ctrl+P)", "Show or hide the media player window")
+        view_menu.AppendSeparator()
+
+        sort_menu = wx.Menu()
+        self._sort_by_menu_items = {}
+        sort_choices = [
+            ("date", "Date"),
+            ("name", "Name"),
+            ("author", "Author"),
+            ("description", "Description"),
+            ("feed", "Feed"),
+            ("status", "Status"),
+        ]
+        for key, label in sort_choices:
+            item = sort_menu.AppendRadioItem(wx.ID_ANY, label, f"Sort articles by {label.lower()}")
+            self._sort_by_menu_items[int(item.GetId())] = key
+            if key == getattr(self, "_article_sort_by", "date"):
+                item.Check(True)
+            self.Bind(wx.EVT_MENU, self.on_change_sort_by, item)
+
+        sort_menu.AppendSeparator()
+        self._sort_ascending_item = sort_menu.AppendCheckItem(
+            wx.ID_ANY,
+            "Ascending",
+            "Sort in ascending order (default is descending by date)",
+        )
+        self._sort_ascending_item.Check(bool(getattr(self, "_article_sort_ascending", False)))
+        self.Bind(wx.EVT_MENU, self.on_toggle_sort_direction, self._sort_ascending_item)
+        view_menu.AppendSubMenu(sort_menu, "Sort &By")
 
         # Player menu (media controls)
         player_menu = wx.Menu()
@@ -1067,6 +1284,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_import_opml, import_opml_item)
         self.Bind(wx.EVT_MENU, self.on_export_opml, export_opml_item)
         self.Bind(wx.EVT_MENU, self.on_configure_persistent_search, persistent_search_item)
+        self.Bind(wx.EVT_MENU, self.on_add_shortcuts, add_shortcuts_item)
         self.Bind(wx.EVT_MENU, self.on_toggle_search_field, show_search_item)
         self.Bind(wx.EVT_MENU, self.on_show_player, player_item)
         self.Bind(wx.EVT_MENU, self.on_show_player, player_toggle_item)
@@ -1257,20 +1475,321 @@ class MainFrame(wx.Frame):
             except Exception:
                 log.exception(f"Failed to play sound: {path}")
 
+    def _get_notification_excluded_feed_ids(self) -> set[str]:
+        try:
+            items = self.config_manager.get("windows_notifications_excluded_feeds", []) or []
+        except Exception:
+            items = []
+        out = set()
+        for item in items:
+            fid = str(item or "").strip()
+            if fid:
+                out.add(fid)
+        return out
+
+    def _set_notification_excluded_feed_ids(self, feed_ids) -> None:
+        cleaned = sorted({str(x or "").strip() for x in (feed_ids or []) if str(x or "").strip()})
+        try:
+            self.config_manager.set("windows_notifications_excluded_feeds", cleaned)
+        except Exception:
+            pass
+
+    def _is_feed_notifications_enabled(self, feed_id: str | None) -> bool:
+        fid = str(feed_id or "").strip()
+        if not fid:
+            return True
+        return fid not in self._get_notification_excluded_feed_ids()
+
+    def _set_feed_notifications_enabled(self, feed_id: str, enabled: bool) -> None:
+        fid = str(feed_id or "").strip()
+        if not fid:
+            return
+        excluded = self._get_notification_excluded_feed_ids()
+        if enabled:
+            excluded.discard(fid)
+        else:
+            excluded.add(fid)
+        self._set_notification_excluded_feed_ids(excluded)
+
+    def _collect_notification_feed_entries(self):
+        entries = []
+        seen = set()
+        try:
+            for feed in (self.feed_map or {}).values():
+                fid = str(getattr(feed, "id", "") or "").strip()
+                if not fid or fid in seen:
+                    continue
+                seen.add(fid)
+                title = str(getattr(feed, "title", "") or "").strip() or fid
+                entries.append((fid, title))
+        except Exception:
+            pass
+
+        if not entries:
+            try:
+                for feed in (self.provider.get_feeds() or []):
+                    fid = str(getattr(feed, "id", "") or "").strip()
+                    if not fid or fid in seen:
+                        continue
+                    seen.add(fid)
+                    title = str(getattr(feed, "title", "") or "").strip() or fid
+                    entries.append((fid, title))
+            except Exception:
+                pass
+
+        entries.sort(key=lambda x: (x[1] or "").lower())
+        return entries
+
+    def on_toggle_feed_notifications(self, event, feed_id: str):
+        enabled = bool(event.IsChecked())
+        self._set_feed_notifications_enabled(feed_id, enabled)
+
+    def _windows_notifications_enabled(self) -> bool:
+        if not sys.platform.startswith("win"):
+            return False
+        try:
+            return bool(self.config_manager.get("windows_notifications_enabled", False))
+        except Exception:
+            return False
+
+    def _show_windows_notification(self, title: str, message: str):
+        if not self._windows_notifications_enabled():
+            return
+        shown = False
+        try:
+            tray = getattr(self, "tray_icon", None)
+            if tray and hasattr(tray, "show_notification"):
+                shown = bool(tray.show_notification(str(title or "BlindRSS"), str(message or "")))
+        except Exception:
+            shown = False
+
+        if shown:
+            return
+
+        try:
+            note = wx.adv.NotificationMessage(
+                str(title or "BlindRSS"),
+                str(message or ""),
+                parent=self,
+            )
+            try:
+                note.SetFlags(wx.ICON_INFORMATION)
+            except Exception:
+                pass
+            shown = note.Show(timeout=wx.adv.NotificationMessage.Timeout_Auto)
+            if shown:
+                try:
+                    self._active_notifications.append(note)
+                except Exception:
+                    pass
+        except Exception:
+            log.debug("Failed to show Windows notification", exc_info=True)
+
+    def _notification_preview_text(self, raw_text: str, max_len: int = 180) -> str:
+        text = str(raw_text or "").strip()
+        if not text:
+            return ""
+        try:
+            text = BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
+        except Exception:
+            text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > max_len:
+            text = text[: max_len - 3].rstrip() + "..."
+        return text
+
+    def _build_notification_body(self, preview: str, feed_title: str, include_feed: bool) -> str:
+        preview_text = str(preview or "").strip()
+        feed_text = str(feed_title or "").strip()
+        if include_feed and feed_text and preview_text:
+            return f"{feed_text} - {preview_text}"
+        if include_feed and feed_text:
+            return feed_text
+        if preview_text:
+            return preview_text
+        return "New article available."
+
+    def _load_recent_notification_items(self, feed_id: str, count: int, notified_ids: set[str]):
+        desired = max(0, int(count or 0))
+        if desired <= 0:
+            return []
+        fid = str(feed_id or "").strip()
+        if not fid:
+            return []
+
+        view_id = f"unread:{fid}"
+        fetch_limit = min(80, max(desired * 3, desired + 8))
+        articles = []
+        try:
+            page, _total = self.provider.get_articles_page(view_id, offset=0, limit=fetch_limit)
+            articles = list(page or [])
+        except Exception:
+            try:
+                articles = list((self.provider.get_articles(view_id) or [])[:fetch_limit])
+            except Exception:
+                articles = []
+
+        out = []
+        seen = set()
+        for article in articles:
+            article_id = str(self._article_cache_id(article) or getattr(article, "id", "") or "").strip()
+            if article_id and (article_id in notified_ids or article_id in seen):
+                continue
+            seen.add(article_id)
+            title = str(getattr(article, "title", "") or "").strip() or "New article"
+            preview = self._notification_preview_text(getattr(article, "content", "") or "")
+            out.append(
+                {
+                    "id": article_id,
+                    "title": title,
+                    "preview": preview,
+                }
+            )
+            if len(out) >= desired:
+                break
+        return out
+
+    def _queue_new_article_notifications_from_state(
+        self,
+        state: dict,
+        notified_ids: set[str],
+        notify_budget: dict[str, int | None],
+        suppressed_counter: dict[str, int],
+        fallback_new_count: int = 0,
+    ):
+        if not self._windows_notifications_enabled():
+            return
+        if not isinstance(state, dict):
+            return
+
+        feed_id = str(state.get("id") or "").strip()
+        if feed_id and not self._is_feed_notifications_enabled(feed_id):
+            return
+
+        feed_title = str(state.get("title", "") or "").strip()
+        include_feed = bool(self.config_manager.get("windows_notifications_include_feed_name", True))
+        remaining_raw = notify_budget.get("remaining", None)
+        unlimited = remaining_raw is None
+        remaining = 0 if unlimited else max(0, int(remaining_raw or 0))
+        if (not unlimited) and remaining <= 0:
+            return
+
+        items = state.get("new_articles") or []
+        if not isinstance(items, list):
+            items = []
+
+        if not items:
+            generic_count = 0
+            try:
+                generic_count = max(0, int(state.get("new_items") or 0))
+            except Exception:
+                generic_count = 0
+            if generic_count <= 0:
+                try:
+                    generic_count = max(0, int(fallback_new_count or 0))
+                except Exception:
+                    generic_count = 0
+            if generic_count <= 0:
+                return
+            if (not unlimited) and generic_count > remaining:
+                suppressed_counter["count"] = int(suppressed_counter.get("count", 0)) + (generic_count - remaining)
+                generic_count = remaining
+
+            resolved_items = self._load_recent_notification_items(feed_id, generic_count, notified_ids)
+            sent = 0
+            for item in resolved_items:
+                if not isinstance(item, dict):
+                    continue
+                article_id = str(item.get("id") or "").strip()
+                if article_id:
+                    if article_id in notified_ids:
+                        continue
+                    notified_ids.add(article_id)
+                title = str(item.get("title") or "New article").strip() or "New article"
+                preview = self._notification_preview_text(item.get("preview") or "")
+                body = self._build_notification_body(preview, feed_title, include_feed)
+                wx.CallAfter(self._show_windows_notification, title, body)
+                sent += 1
+                if not unlimited:
+                    remaining = max(0, remaining - 1)
+
+            for _ in range(max(0, generic_count - sent)):
+                body = feed_title if (include_feed and feed_title) else "New article available."
+                wx.CallAfter(self._show_windows_notification, "New article", body)
+                if not unlimited:
+                    remaining = max(0, remaining - 1)
+            if not unlimited:
+                notify_budget["remaining"] = remaining
+            return
+
+        for item in items:
+            if (not unlimited) and remaining <= 0:
+                suppressed_counter["count"] = int(suppressed_counter.get("count", 0)) + 1
+                continue
+            if not isinstance(item, dict):
+                continue
+            article_id = str(item.get("id") or "").strip()
+            if article_id:
+                if article_id in notified_ids:
+                    continue
+                notified_ids.add(article_id)
+            article_title = str(item.get("title") or "New article").strip() or "New article"
+            preview = self._notification_preview_text(
+                item.get("preview") or item.get("content") or item.get("summary") or ""
+            )
+            body = self._build_notification_body(preview, feed_title, include_feed)
+            wx.CallAfter(self._show_windows_notification, article_title, body)
+            if not unlimited:
+                remaining -= 1
+
+        if not unlimited:
+            notify_budget["remaining"] = remaining
+
+    def _sync_windows_startup_setting(self, enabled: bool) -> tuple[bool, str]:
+        if not sys.platform.startswith("win"):
+            return True, ""
+        return windows_integration.set_startup_enabled(bool(enabled))
+
     def _refresh_single_feed_thread(self, feed_id):
         try:
             unread_snapshot = self._capture_unread_snapshot()
             new_items_total = 0
             seen_ids = set()
+            notified_ids = set()
+            max_notifications = max(0, int(self.config_manager.get("windows_notifications_max_per_refresh", 0) or 0))
+            notify_budget = {
+                "remaining": None if max_notifications <= 0 else max_notifications
+            }
+            suppressed = {"count": 0}
+            progress_lock = threading.Lock()
 
             def progress_cb(state):
                 nonlocal new_items_total
-                new_items_total += self._extract_new_items(state, unread_snapshot, seen_ids)
+                with progress_lock:
+                    detected_new_items = self._extract_new_items(state, unread_snapshot, seen_ids)
+                    new_items_total += detected_new_items
+                    self._queue_new_article_notifications_from_state(
+                        state,
+                        notified_ids,
+                        notify_budget,
+                        suppressed,
+                        fallback_new_count=detected_new_items,
+                    )
                 self._on_feed_refresh_progress(state)
 
             # Re-use the existing progress callback mechanism
             self.provider.refresh_feed(feed_id, progress_cb=progress_cb)
             wx.CallAfter(self._flush_feed_refresh_progress) # Ensure it flushes immediately
+            if (
+                suppressed.get("count", 0) > 0
+                and bool(self.config_manager.get("windows_notifications_show_summary_when_capped", True))
+            ):
+                hidden = int(suppressed.get("count", 0))
+                wx.CallAfter(
+                    self._show_windows_notification,
+                    "BlindRSS",
+                    f"{hidden} new article notification(s) were suppressed by your cap.",
+                )
             # We don't need to call refresh_feeds() (full tree rebuild) if we just updated one feed.
             # The progress callback updates the tree item label.
             if new_items_total > 0:
@@ -1330,14 +1849,40 @@ class MainFrame(wx.Frame):
             unread_snapshot = self._capture_unread_snapshot()
             new_items_total = 0
             seen_ids = set()
+            notified_ids = set()
+            max_notifications = max(0, int(self.config_manager.get("windows_notifications_max_per_refresh", 0) or 0))
+            notify_budget = {
+                "remaining": None if max_notifications <= 0 else max_notifications
+            }
+            suppressed = {"count": 0}
+            progress_lock = threading.Lock()
 
             def progress_cb(state):
                 nonlocal new_items_total
-                new_items_total += self._extract_new_items(state, unread_snapshot, seen_ids)
+                with progress_lock:
+                    detected_new_items = self._extract_new_items(state, unread_snapshot, seen_ids)
+                    new_items_total += detected_new_items
+                    self._queue_new_article_notifications_from_state(
+                        state,
+                        notified_ids,
+                        notify_budget,
+                        suppressed,
+                        fallback_new_count=detected_new_items,
+                    )
                 self._on_feed_refresh_progress(state)
 
             if self.provider.refresh(progress_cb, force=force):
                 wx.CallAfter(self.refresh_feeds)
+            if (
+                suppressed.get("count", 0) > 0
+                and bool(self.config_manager.get("windows_notifications_show_summary_when_capped", True))
+            ):
+                hidden = int(suppressed.get("count", 0))
+                wx.CallAfter(
+                    self._show_windows_notification,
+                    "BlindRSS",
+                    f"{hidden} new article notification(s) were suppressed by your cap.",
+                )
             if new_items_total > 0:
                 self._play_sound("sound_refresh_complete")
             return True
@@ -1446,6 +1991,7 @@ class MainFrame(wx.Frame):
             self.Bind(wx.EVT_MENU, lambda e: self.on_import_opml(e, target_category=cat_title), import_item)
             
         elif data["type"] == "feed":
+            feed_id = str(data.get("id") or "").strip()
             refresh_feed_item = menu.Append(wx.ID_ANY, "Refresh Feed")
             self.Bind(wx.EVT_MENU, self.on_refresh_single_feed, refresh_feed_item)
 
@@ -1454,6 +2000,10 @@ class MainFrame(wx.Frame):
 
             copy_url_item = menu.Append(wx.ID_ANY, "Copy Feed URL")
             self.Bind(wx.EVT_MENU, self.on_copy_feed_url, copy_url_item)
+
+            notifications_item = menu.AppendCheckItem(wx.ID_ANY, "Notifications for This Feed")
+            notifications_item.Check(self._is_feed_notifications_enabled(feed_id))
+            self.Bind(wx.EVT_MENU, lambda e, fid=feed_id: self.on_toggle_feed_notifications(e, fid), notifications_item)
 
             remove_item = menu.Append(wx.ID_ANY, "Remove Feed")
             self.Bind(wx.EVT_MENU, self.on_remove_feed, remove_item)
@@ -2458,13 +3008,13 @@ class MainFrame(wx.Frame):
         if self._is_search_active():
             display_articles = self._filter_articles(base_articles, self._search_query)
 
-        self.current_articles = display_articles
+        self.current_articles = self._sort_articles_for_display(display_articles)
         self.list_ctrl.DeleteAllItems()
         empty_label = "No matches." if (self._is_search_active() and base_articles) else "No articles found."
-        self._render_articles_list(display_articles, empty_label=empty_label)
+        self._render_articles_list(self.current_articles, empty_label=empty_label)
         if self._is_search_active():
             try:
-                self.SetStatusText(f"Filter: {len(display_articles)} of {len(base_articles)}")
+                self.SetStatusText(f"Filter: {len(self.current_articles)} of {len(base_articles)}")
             except Exception:
                 pass
 
@@ -2570,11 +3120,8 @@ class MainFrame(wx.Frame):
         if selected_article_id is None and not selected_on_load_more:
             selected_article_id = getattr(self, "selected_article_id", None)
 
-        # Capture the top item in the view to preserve scroll position
-        top_idx = self.list_ctrl.GetTopItem()
-        top_article_id = None
-        if top_idx != wx.NOT_FOUND and 0 <= top_idx < len(self.current_articles):
-            top_article_id = self._article_cache_id(self.current_articles[top_idx])
+        # Capture top item when appropriate; avoid anchoring row 0 to prevent top-of-feed jumping.
+        top_article_id = self._capture_top_article_for_restore(focused_article_id, selected_article_id)
 
         self._remove_loading_more_placeholder()
 
@@ -2586,13 +3133,13 @@ class MainFrame(wx.Frame):
         display_articles = combined
         if self._is_search_active():
             display_articles = self._filter_articles(combined, self._search_query)
-        self.current_articles = display_articles
+        self.current_articles = self._sort_articles_for_display(display_articles)
 
         empty_label = "No matches." if (self._is_search_active() and combined) else "No articles found."
-        self._render_articles_list(display_articles, empty_label=empty_label)
+        self._render_articles_list(self.current_articles, empty_label=empty_label)
         if self._is_search_active():
             try:
-                self.SetStatusText(f"Filter: {len(display_articles)} of {len(combined)}")
+                self.SetStatusText(f"Filter: {len(self.current_articles)} of {len(combined)}")
             except Exception:
                 pass
 
@@ -2897,11 +3444,8 @@ class MainFrame(wx.Frame):
         if (not focused_on_load_more) and focused_idx != wx.NOT_FOUND and 0 <= focused_idx < len(self.current_articles):
              focused_article_id = self._article_cache_id(self.current_articles[focused_idx])
 
-        # Capture Top Item for scroll restoration
-        top_idx = self.list_ctrl.GetTopItem()
-        top_article_id = None
-        if top_idx != wx.NOT_FOUND and 0 <= top_idx < len(self.current_articles):
-            top_article_id = self._article_cache_id(self.current_articles[top_idx])
+        # Capture top item when appropriate; avoid anchoring row 0 to prevent top-of-feed jumping.
+        top_article_id = self._capture_top_article_for_restore(focused_article_id, selected_id)
 
         self._updating_list = True
         try:
@@ -2932,16 +3476,16 @@ class MainFrame(wx.Frame):
             display_articles = combined
             if self._is_search_active():
                 display_articles = self._filter_articles(combined, self._search_query)
-            self.current_articles = display_articles
+            self.current_articles = self._sort_articles_for_display(display_articles)
             
             # Reset placeholder state since we are doing a full rebuild
             self._remove_loading_more_placeholder()
 
             empty_label = "No matches." if (self._is_search_active() and combined) else "No articles found."
-            self._render_articles_list(display_articles, empty_label=empty_label)
+            self._render_articles_list(self.current_articles, empty_label=empty_label)
             if self._is_search_active():
                 try:
-                    self.SetStatusText(f"Filter: {len(display_articles)} of {len(combined)}")
+                    self.SetStatusText(f"Filter: {len(self.current_articles)} of {len(combined)}")
                 except Exception:
                     pass
 
@@ -4491,8 +5035,13 @@ class MainFrame(wx.Frame):
             old_search_mode = self._normalize_search_mode(self.config_manager.get("search_mode", "title_content"))
         except Exception:
             old_search_mode = "title_content"
+        try:
+            old_start_on_login = bool(self.config_manager.get("start_on_windows_login", False))
+        except Exception:
+            old_start_on_login = False
 
-        dlg = SettingsDialog(self, self.config_manager.config)
+        notification_feed_entries = self._collect_notification_feed_entries()
+        dlg = SettingsDialog(self, self.config_manager.config, notification_feeds=notification_feed_entries)
         if dlg.ShowModal() == wx.ID_OK:
             data = dlg.get_data()
 
@@ -4502,6 +5051,19 @@ class MainFrame(wx.Frame):
                     self.config_manager.set(k, v)
             except Exception:
                 pass
+
+            try:
+                new_start_on_login = bool(self.config_manager.get("start_on_windows_login", False))
+            except Exception:
+                new_start_on_login = old_start_on_login
+            if new_start_on_login != old_start_on_login:
+                ok, msg = self._sync_windows_startup_setting(new_start_on_login)
+                if not ok:
+                    try:
+                        self.config_manager.set("start_on_windows_login", old_start_on_login)
+                    except Exception:
+                        pass
+                    wx.MessageBox(msg or "Could not update startup registration.", "Settings", wx.ICON_WARNING)
 
             try:
                 new_cache_full_text = bool(self.config_manager.get("cache_full_text", False))

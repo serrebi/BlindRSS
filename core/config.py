@@ -32,9 +32,15 @@ DEFAULT_CONFIG = {
     "debug_mode": False,
     "refresh_on_startup": True,
     "auto_check_updates": True,
+    "start_on_windows_login": False,
     "sounds_enabled": True,
     "sound_refresh_complete": "sounds/refresh_complete.wav",
     "sound_refresh_error": "sounds/refresh_error.wav",
+    "windows_notifications_enabled": False,
+    "windows_notifications_include_feed_name": True,
+    "windows_notifications_max_per_refresh": 0,  # 0 = unlimited
+    "windows_notifications_show_summary_when_capped": True,
+    "windows_notifications_excluded_feeds": [],
     "preferred_soundcard": "",  # empty => use current OS default output device
     "skip_silence": True,
     "silence_vad_aggressiveness": 2,  # 0-3 (3 = most aggressive)
@@ -83,6 +89,8 @@ DEFAULT_CONFIG = {
     "persistent_searches": [],
     "show_search_field": True,
     "search_mode": "title_content",
+    "article_sort_by": "date",
+    "article_sort_ascending": False,
     "providers": {
         "local": {
             "feeds": []  # List of feed URLs/data

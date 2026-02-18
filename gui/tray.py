@@ -147,3 +147,12 @@ class BlindRSSTrayIcon(wx.adv.TaskBarIcon):
     def on_exit(self, event):
         self.RemoveIcon()
         self.frame.real_close()
+
+    def show_notification(self, title: str, message: str, timeout_ms: int = 10000) -> bool:
+        """Best-effort native tray notification on Windows."""
+        try:
+            if hasattr(self, "ShowBalloon"):
+                return bool(self.ShowBalloon(str(title or "BlindRSS"), str(message or ""), int(timeout_ms), wx.ICON_INFORMATION))
+        except Exception:
+            return False
+        return False

@@ -163,8 +163,37 @@ class LocalProvider(RSSProvider):
         feed_id, feed_url, feed_title, feed_category, etag, last_modified = feed_row
         status = "ok"
         new_items = 0
+        new_article_summaries = []
         error_msg = None
         final_title = feed_title or "Unknown Feed"
+
+        def _preview_for_notification(raw_text):
+            text = str(raw_text or "").strip()
+            if not text:
+                return ""
+            try:
+                text = BS(text, "html.parser").get_text(" ", strip=True)
+            except Exception:
+                pass
+            text = " ".join(text.split())
+            if len(text) > 180:
+                text = text[:177].rstrip() + "..."
+            return text
+
+        def _record_new_article(article_id, title, author, preview=""):
+            if len(new_article_summaries) >= 500:
+                return
+            try:
+                new_article_summaries.append(
+                    {
+                        "id": str(article_id or ""),
+                        "title": str(title or "New article"),
+                        "author": str(author or ""),
+                        "preview": str(preview or ""),
+                    }
+                )
+            except Exception:
+                pass
 
         headers = {}
         is_npr_feed = npr_mod.is_npr_url(feed_url)
@@ -304,6 +333,7 @@ class LocalProvider(RSSProvider):
                                 (article_id, feed_id, title, url, "", date, author, None, None),
                             )
                             new_items += 1
+                            _record_new_article(article_id, title, author)
 
                             if i % 5 == 0 or i == total_entries - 1:
                                 conn.commit()
@@ -445,6 +475,7 @@ class LocalProvider(RSSProvider):
                                 (article_id, feed_id, title, url, "", date, author, None, None),
                             )
                             new_items += 1
+                            _record_new_article(article_id, title, author)
 
                             if i % 5 == 0 or i == total_entries - 1:
                                 conn.commit()
@@ -709,6 +740,7 @@ class LocalProvider(RSSProvider):
                             (article_id, feed_id, title, url, content, date, author, media_url, media_type),
                         )
                         new_items += 1
+                        _record_new_article(article_id, title, author, _preview_for_notification(content))
                         existing_articles[article_id] = date
                     except sqlite3.IntegrityError as e:
                         if _rollback_and_abort_on_foreign_key(conn, e):
@@ -737,6 +769,7 @@ class LocalProvider(RSSProvider):
                                     )
                                     article_id = scoped_id
                                     new_items += 1
+                                    _record_new_article(article_id, title, author, _preview_for_notification(content))
                                     existing_articles[article_id] = date
                                 except sqlite3.IntegrityError:
                                     continue
@@ -769,10 +802,18 @@ class LocalProvider(RSSProvider):
             status = "error"
             log.error(f"Error processing feed {feed_url}: {e}")
         finally:
-            state = self._collect_feed_state(feed_id, final_title, feed_category, status, new_items, error_msg)
+            state = self._collect_feed_state(
+                feed_id,
+                final_title,
+                feed_category,
+                status,
+                new_items,
+                error_msg,
+                new_article_summaries,
+            )
             self._emit_progress(progress_cb, state)
 
-    def _collect_feed_state(self, feed_id, title, category, status, new_items, error_msg):
+    def _collect_feed_state(self, feed_id, title, category, status, new_items, error_msg, new_articles=None):
         unread = 0
         conn = None
         try:
@@ -800,6 +841,7 @@ class LocalProvider(RSSProvider):
             "unread_count": unread,
             "status": status,
             "new_items": new_items,
+            "new_articles": list(new_articles or []),
             "error": error_msg,
         }
 

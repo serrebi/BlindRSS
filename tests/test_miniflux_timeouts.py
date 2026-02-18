@@ -1,6 +1,7 @@
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+import requests
 
 # Ensure repo root on path
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -16,6 +17,10 @@ class _DummyResp:
         self._payload = payload if payload is not None else {}
 
     def raise_for_status(self):
+        if int(self.status_code or 0) >= 400:
+            err = requests.HTTPError(f"{self.status_code} error")
+            err.response = self
+            raise err
         return None
 
     def json(self):
@@ -58,7 +63,7 @@ def test_miniflux_refresh_uses_longer_timeout_floor(monkeypatch):
 
     monkeypatch.setattr("providers.miniflux.requests.request", _fake_request)
     p._req("PUT", "/v1/feeds/123/refresh")
-    assert seen.get("timeout") == 25
+    assert seen.get("timeout") == 10
 
 
 def test_miniflux_req_adds_revalidation_headers(monkeypatch):
@@ -150,3 +155,95 @@ def test_miniflux_refresh_non_force_only_retries_stale_or_error(monkeypatch):
     assert ("PUT", "/v1/feeds/10/refresh") in calls
     assert ("PUT", "/v1/feeds/11/refresh") in calls
     assert ("PUT", "/v1/feeds/12/refresh") not in calls
+
+
+def test_miniflux_req_retries_transient_502_then_succeeds(monkeypatch):
+    p = _provider(feed_timeout_seconds=10)
+    p.config["feed_retry_attempts"] = 2
+    seen = {"calls": 0}
+
+    def _fake_request(method, url, headers=None, json=None, params=None, timeout=None):
+        seen["calls"] += 1
+        if seen["calls"] < 3:
+            return _DummyResp(status_code=502, payload={})
+        return _DummyResp(status_code=200, payload={"ok": True})
+
+    monkeypatch.setattr("providers.miniflux.requests.request", _fake_request)
+    monkeypatch.setattr("providers.miniflux.time.sleep", lambda _s: None)
+
+    data = p._req("GET", "/v1/me")
+    assert data == {"ok": True}
+    assert seen["calls"] == 3
+
+
+def test_miniflux_req_uses_cached_get_response_on_502(monkeypatch):
+    p = _provider(feed_timeout_seconds=10)
+    p.config["feed_retry_attempts"] = 0
+    responses = iter(
+        [
+            _DummyResp(status_code=200, payload=[{"id": 1, "title": "Feed 1"}]),
+            _DummyResp(status_code=502, payload={}),
+        ]
+    )
+
+    def _fake_request(method, url, headers=None, json=None, params=None, timeout=None):
+        return next(responses)
+
+    monkeypatch.setattr("providers.miniflux.requests.request", _fake_request)
+    monkeypatch.setattr("providers.miniflux.time.sleep", lambda _s: None)
+
+    first = p._req("GET", "/v1/feeds")
+    second = p._req("GET", "/v1/feeds")
+
+    assert first == [{"id": 1, "title": "Feed 1"}]
+    assert second == first
+
+
+def test_miniflux_refresh_skips_targeted_refresh_when_unhealthy(monkeypatch):
+    p = _provider(feed_timeout_seconds=10)
+    calls = []
+    now = datetime.now(timezone.utc)
+    stale = (now - timedelta(hours=4)).isoformat()
+
+    def _fake_req(method, endpoint, json=None, params=None):
+        calls.append((method, endpoint))
+        if endpoint == "/v1/feeds/refresh":
+            p._last_request_info = {
+                "ok": False,
+                "used_cache": False,
+                "status_code": 502,
+                "endpoint": endpoint,
+                "method": method,
+            }
+            return None
+        if endpoint == "/v1/feeds":
+            p._last_request_info = {
+                "ok": False,
+                "used_cache": True,
+                "status_code": 502,
+                "endpoint": endpoint,
+                "method": method,
+            }
+            return [{"id": 10, "title": "Stale", "category": {"title": "Podcasts"}, "checked_at": stale, "parsing_error_count": 0}]
+        if endpoint == "/v1/feeds/counters":
+            p._last_request_info = {
+                "ok": True,
+                "used_cache": False,
+                "status_code": 200,
+                "endpoint": endpoint,
+                "method": method,
+            }
+            return {"unreads": {"10": 0}}
+        p._last_request_info = {
+            "ok": True,
+            "used_cache": False,
+            "status_code": 204,
+            "endpoint": endpoint,
+            "method": method,
+        }
+        return None
+
+    monkeypatch.setattr(p, "_req", _fake_req)
+    p.refresh(force=False)
+
+    assert ("PUT", "/v1/feeds/10/refresh") not in calls
