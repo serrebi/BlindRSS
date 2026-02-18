@@ -1,4 +1,4 @@
-# BlindRSS
+  # BlindRSS
 
 BlindRSS is a screen-reader-friendly desktop RSS and podcast app. It is built for fast feed reading and reliable audio playback.
 
@@ -16,21 +16,11 @@ BlindRSS is a screen-reader-friendly desktop RSS and podcast app. It is built fo
 - Supports Windows notifications for new articles with per-feed exclusions and per-refresh limits.
 - Includes a built-in updater that verifies SHA-256 and Authenticode before applying updates.
 
-## Recently Added / Improved
+## I accept pull requests!
 
-- Remember last selected feed/folder on startup.
-- Favorites handling improvements across list and provider actions.
-- Skip Silence playback option (experimental).
-- Better refresh reliability: explicit timeouts and cache revalidation headers for stale CDN feeds.
-- Inoreader OAuth flow that supports HTTPS localhost redirects by pasting the redirected URL back into BlindRSS.
-- More robust handling for YouTube Shorts, Rumble, and Odysee media/feed discovery.
-- Stronger Windows integration options (startup and shortcut tooling).
-
+If BlindRSS has helped you, feel free to submit pull requests with fixes or features you want, and I will consider them.
 ## Quick Start
-
-### Windows (Easy)
-
-1. Download the latest `.zip` asset from [GitHub Releases](https://github.com/serrebi/BlindRSS/releases) (not the `.exe`).
+1. Download the latest `.zip` asset from [GitHub Releases](https://github.com/serrebi/BlindRSS/releases).
 2. Extract the `.zip` anywhere.
 3. Run `BlindRSS.exe`.
 
@@ -40,8 +30,5 @@ BlindRSS is a screen-reader-friendly desktop RSS and podcast app. It is built fo
 2. Install dependencies: `pip install -r requirements.txt`
 3. Run: `python main.py`
 
-## Build and Release
-
-Build and release instructions were moved out of this file.
-
-Use [`build.md`](build.md).
+## How to build
+[`build.md`](build.md).
