@@ -45,10 +45,9 @@ except Exception:
     EVT_NOTIFICATION_MESSAGE_ACTION = None
     EVT_NOTIFICATION_MESSAGE_DISMISSED = None
 
-try:
-    NOTIFICATION_TIMEOUT_NEVER = wx.adv.NotificationMessage.Timeout_Never
-except Exception:
-    NOTIFICATION_TIMEOUT_NEVER = wx.adv.NotificationMessage.Timeout_Auto
+# Use a long, finite timeout for actionable toasts.
+# On some backends Timeout_Never can be treated as immediate-dismiss.
+ACTIONABLE_NOTIFICATION_TIMEOUT_SECONDS = 25
 
 
 class MainFrame(wx.Frame):
@@ -116,7 +115,9 @@ class MainFrame(wx.Frame):
         self._article_sort_ascending = bool(self.config_manager.get("article_sort_ascending", False))
         self._sort_by_menu_items = {}
         self._sort_ascending_item = None
-        self._active_notifications = deque(maxlen=50)
+        # Keep more live notification objects so Windows can retain interactive
+        # Action Center entries while refresh is processing many new items.
+        self._active_notifications = deque(maxlen=500)
         self._notification_payloads = {}
 
         self.init_ui()
@@ -1715,7 +1716,11 @@ class MainFrame(wx.Frame):
             if activation_payload:
                 if self._bind_notification_payload(note, activation_payload):
                     note_key = id(note)
-            timeout_value = NOTIFICATION_TIMEOUT_NEVER if activation_payload else wx.adv.NotificationMessage.Timeout_Auto
+            timeout_value = (
+                max(1, int(ACTIONABLE_NOTIFICATION_TIMEOUT_SECONDS))
+                if activation_payload
+                else wx.adv.NotificationMessage.Timeout_Auto
+            )
             shown = note.Show(timeout=timeout_value)
             if shown:
                 try:
