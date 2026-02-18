@@ -167,6 +167,45 @@ def _pin_shortcut_to_taskbar(shortcut_path: str) -> tuple[bool, str]:
     return _run_powershell(script, timeout_s=20)
 
 
+def _desktop_dir() -> str:
+    # Prefer Windows-known Desktop path (handles OneDrive redirection/localization).
+    if is_windows():
+        script = "\n".join(
+            [
+                "$ErrorActionPreference = 'Stop'",
+                "$p = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)",
+                "if (-not $p) {",
+                "  $ws = New-Object -ComObject WScript.Shell",
+                "  $p = $ws.SpecialFolders.Item('Desktop')",
+                "}",
+                "if ($p) { Write-Output $p }",
+            ]
+        )
+        ok, msg = _run_powershell(script, timeout_s=10)
+        if ok and msg:
+            for line in str(msg).splitlines():
+                path = str(line or "").strip()
+                if path:
+                    return path
+
+    candidates = []
+    one_drive = str(os.environ.get("OneDrive", "") or "").strip()
+    if one_drive:
+        candidates.append(os.path.join(one_drive, "Desktop"))
+    one_drive_consumer = str(os.environ.get("OneDriveConsumer", "") or "").strip()
+    if one_drive_consumer:
+        candidates.append(os.path.join(one_drive_consumer, "Desktop"))
+    candidates.append(os.path.join(os.path.expanduser("~"), "Desktop"))
+
+    for path in candidates:
+        if path and os.path.isdir(path):
+            return path
+    for path in candidates:
+        if path:
+            return path
+    return os.path.join(os.path.expanduser("~"), "Desktop")
+
+
 def create_shortcuts(
     *,
     desktop: bool = False,
@@ -189,7 +228,7 @@ def create_shortcuts(
     lnk_name = f"{app_name}.lnk"
 
     if desktop:
-        desktop_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+        desktop_dir = _desktop_dir()
         desktop_lnk = os.path.join(desktop_dir, lnk_name)
         results["desktop"] = _create_shortcut(desktop_lnk, target, args, working_dir, icon_path)
 
@@ -223,4 +262,3 @@ def create_shortcuts(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     return results
-
