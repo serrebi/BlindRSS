@@ -180,7 +180,7 @@ class LocalProvider(RSSProvider):
                 text = text[:177].rstrip() + "..."
             return text
 
-        def _record_new_article(article_id, title, author, preview=""):
+        def _record_new_article(article_id, title, author, preview="", url="", media_url="", media_type=""):
             if len(new_article_summaries) >= 500:
                 return
             try:
@@ -190,6 +190,9 @@ class LocalProvider(RSSProvider):
                         "title": str(title or "New article"),
                         "author": str(author or ""),
                         "preview": str(preview or ""),
+                        "url": str(url or ""),
+                        "media_url": str(media_url or ""),
+                        "media_type": str(media_type or ""),
                     }
                 )
             except Exception:
@@ -333,7 +336,7 @@ class LocalProvider(RSSProvider):
                                 (article_id, feed_id, title, url, "", date, author, None, None),
                             )
                             new_items += 1
-                            _record_new_article(article_id, title, author)
+                            _record_new_article(article_id, title, author, url=url)
 
                             if i % 5 == 0 or i == total_entries - 1:
                                 conn.commit()
@@ -475,7 +478,7 @@ class LocalProvider(RSSProvider):
                                 (article_id, feed_id, title, url, "", date, author, None, None),
                             )
                             new_items += 1
-                            _record_new_article(article_id, title, author)
+                            _record_new_article(article_id, title, author, url=url)
 
                             if i % 5 == 0 or i == total_entries - 1:
                                 conn.commit()
@@ -740,7 +743,15 @@ class LocalProvider(RSSProvider):
                             (article_id, feed_id, title, url, content, date, author, media_url, media_type),
                         )
                         new_items += 1
-                        _record_new_article(article_id, title, author, _preview_for_notification(content))
+                        _record_new_article(
+                            article_id,
+                            title,
+                            author,
+                            _preview_for_notification(content),
+                            url=url,
+                            media_url=media_url,
+                            media_type=media_type,
+                        )
                         existing_articles[article_id] = date
                     except sqlite3.IntegrityError as e:
                         if _rollback_and_abort_on_foreign_key(conn, e):
@@ -769,7 +780,15 @@ class LocalProvider(RSSProvider):
                                     )
                                     article_id = scoped_id
                                     new_items += 1
-                                    _record_new_article(article_id, title, author, _preview_for_notification(content))
+                                    _record_new_article(
+                                        article_id,
+                                        title,
+                                        author,
+                                        _preview_for_notification(content),
+                                        url=url,
+                                        media_url=media_url,
+                                        media_type=media_type,
+                                    )
                                     existing_articles[article_id] = date
                                 except sqlite3.IntegrityError:
                                     continue
@@ -1105,6 +1124,46 @@ class LocalProvider(RSSProvider):
                     chapters=chapters
                 ))
             return articles, total
+        finally:
+            conn.close()
+
+    def get_article_by_id(self, article_id: str) -> Optional[Article]:
+        aid = str(article_id or "").strip()
+        if not aid:
+            return None
+
+        conn = get_connection()
+        try:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id, feed_id, title, url, content, date, author, is_read, is_favorite, media_url, media_type "
+                "FROM articles WHERE id = ? LIMIT 1",
+                (aid,),
+            )
+            row = c.fetchone()
+            if not row:
+                return None
+
+            c.execute(
+                "SELECT start, title, href FROM chapters WHERE article_id = ? ORDER BY start",
+                (aid,),
+            )
+            chapters = [{"start": r[0], "title": r[1], "href": r[2]} for r in c.fetchall()]
+
+            return Article(
+                id=row[0],
+                feed_id=row[1],
+                title=row[2],
+                url=row[3],
+                content=row[4],
+                date=row[5],
+                author=row[6],
+                is_read=bool(row[7]),
+                is_favorite=bool(row[8]),
+                media_url=row[9],
+                media_type=row[10],
+                chapters=chapters,
+            )
         finally:
             conn.close()
 

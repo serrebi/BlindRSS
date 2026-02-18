@@ -68,6 +68,10 @@ class RSSProvider(abc.ABC):
         limit = int(limit)
         return articles[offset:offset + limit], total
 
+    # Optional: providers can override for fast single-article lookup.
+    def get_article_by_id(self, article_id: str) -> Optional[Article]:
+        return None
+
     @abc.abstractmethod
     def mark_read(self, article_id: str) -> bool:
         pass

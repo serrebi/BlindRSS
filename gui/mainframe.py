@@ -25,6 +25,7 @@ from .tray import BlindRSSTrayIcon
 from .hotkeys import HoldRepeatHotkeys
 from providers.base import RSSProvider
 from core.config import APP_DIR
+from core.models import Article
 from core import utils
 from core import article_extractor
 from core import updater
@@ -34,6 +35,15 @@ from core import dependency_check
 import core.discovery
 
 log = logging.getLogger(__name__)
+
+try:
+    EVT_NOTIFICATION_MESSAGE_CLICK = wx.PyEventBinder(wx.adv.wxEVT_NOTIFICATION_MESSAGE_CLICK, 1)
+    EVT_NOTIFICATION_MESSAGE_ACTION = wx.PyEventBinder(wx.adv.wxEVT_NOTIFICATION_MESSAGE_ACTION, 1)
+    EVT_NOTIFICATION_MESSAGE_DISMISSED = wx.PyEventBinder(wx.adv.wxEVT_NOTIFICATION_MESSAGE_DISMISSED, 1)
+except Exception:
+    EVT_NOTIFICATION_MESSAGE_CLICK = None
+    EVT_NOTIFICATION_MESSAGE_ACTION = None
+    EVT_NOTIFICATION_MESSAGE_DISMISSED = None
 
 
 class MainFrame(wx.Frame):
@@ -102,6 +112,7 @@ class MainFrame(wx.Frame):
         self._sort_by_menu_items = {}
         self._sort_ascending_item = None
         self._active_notifications = deque(maxlen=50)
+        self._notification_payloads = {}
 
         self.init_ui()
         self.init_menus()
@@ -1552,20 +1563,148 @@ class MainFrame(wx.Frame):
         except Exception:
             return False
 
-    def _show_windows_notification(self, title: str, message: str):
+    def _notification_note_key(self, event_or_note) -> int | None:
+        if event_or_note is None:
+            return None
+        note_obj = event_or_note
+        try:
+            getter = getattr(event_or_note, "GetEventObject", None)
+            if callable(getter):
+                note_obj = getter()
+        except Exception:
+            note_obj = None
+        if note_obj is None:
+            return None
+        return id(note_obj)
+
+    def _bind_notification_payload(self, note, payload: dict) -> bool:
+        if note is None or not isinstance(payload, dict):
+            return False
+        key = id(note)
+        self._notification_payloads[key] = dict(payload)
+        bound_click = False
+        try:
+            if EVT_NOTIFICATION_MESSAGE_CLICK:
+                note.Bind(EVT_NOTIFICATION_MESSAGE_CLICK, self._on_windows_notification_click)
+                bound_click = True
+        except Exception:
+            bound_click = False
+        try:
+            if EVT_NOTIFICATION_MESSAGE_ACTION:
+                note.Bind(EVT_NOTIFICATION_MESSAGE_ACTION, self._on_windows_notification_click)
+                bound_click = True
+        except Exception:
+            pass
+        try:
+            if EVT_NOTIFICATION_MESSAGE_DISMISSED:
+                note.Bind(EVT_NOTIFICATION_MESSAGE_DISMISSED, self._on_windows_notification_dismissed)
+        except Exception:
+            pass
+        if not bound_click:
+            self._notification_payloads.pop(key, None)
+            return False
+        return True
+
+    def _consume_notification_payload(self, event_or_note, pop: bool = True) -> dict | None:
+        key = self._notification_note_key(event_or_note)
+        if key is None:
+            return None
+        if pop:
+            return self._notification_payloads.pop(key, None)
+        return self._notification_payloads.get(key)
+
+    def _prune_notification_payloads(self) -> None:
+        if not self._notification_payloads:
+            return
+        active_ids = {id(note) for note in (self._active_notifications or []) if note is not None}
+        stale_ids = [k for k in list(self._notification_payloads.keys()) if k not in active_ids]
+        for key in stale_ids:
+            self._notification_payloads.pop(key, None)
+
+    def _resolve_notification_article(self, payload: dict) -> Article | None:
+        if not isinstance(payload, dict):
+            return None
+
+        article_id = str(payload.get("article_id") or payload.get("id") or "").strip()
+        article_url = str(payload.get("url") or "").strip()
+
+        try:
+            for article in (self.current_articles or []):
+                cur_id = str(getattr(article, "id", "") or "").strip()
+                cur_cache_id = str(self._article_cache_id(article) or "").strip()
+                cur_url = str(getattr(article, "url", "") or "").strip()
+                if article_id and (article_id == cur_id or article_id == cur_cache_id):
+                    return article
+                if article_url and article_url == cur_url:
+                    return article
+        except Exception:
+            pass
+
+        if article_id:
+            getter = getattr(self.provider, "get_article_by_id", None)
+            if callable(getter):
+                try:
+                    resolved = getter(article_id)
+                    if resolved is not None:
+                        return resolved
+                except Exception:
+                    pass
+
+        media_url = str(payload.get("media_url") or "").strip()
+        media_type = str(payload.get("media_type") or "").strip()
+        if not (article_url or media_url):
+            return None
+
+        title = str(payload.get("title") or "New article").strip() or "New article"
+        feed_id = str(payload.get("feed_id") or "").strip()
+        return Article(
+            title=title,
+            url=article_url,
+            content="",
+            date="",
+            author="",
+            feed_id=feed_id,
+            is_read=False,
+            id=article_id or article_url or media_url,
+            media_url=media_url,
+            media_type=media_type,
+            chapters=[],
+        )
+
+    def _handle_notification_activation(self, payload: dict) -> None:
+        article = self._resolve_notification_article(payload)
+        if article is not None:
+            self._open_article(article)
+            return
+        url = str((payload or {}).get("url") or "").strip()
+        if url:
+            webbrowser.open(url)
+
+    def _on_windows_notification_click(self, event) -> None:
+        payload = self._consume_notification_payload(event, pop=True)
+        if payload:
+            self._handle_notification_activation(payload)
+
+    def _on_windows_notification_dismissed(self, event) -> None:
+        self._consume_notification_payload(event, pop=True)
+
+    def _show_windows_notification(self, title: str, message: str, activation_payload: dict | None = None):
         if not self._windows_notifications_enabled():
             return
         shown = False
-        try:
-            tray = getattr(self, "tray_icon", None)
-            if tray and hasattr(tray, "show_notification"):
-                shown = bool(tray.show_notification(str(title or "BlindRSS"), str(message or "")))
-        except Exception:
-            shown = False
+        if activation_payload is None:
+            try:
+                tray = getattr(self, "tray_icon", None)
+                if tray and hasattr(tray, "show_notification"):
+                    shown = bool(tray.show_notification(str(title or "BlindRSS"), str(message or "")))
+            except Exception:
+                shown = False
 
         if shown:
             return
 
+        note = None
+        note_key = None
         try:
             note = wx.adv.NotificationMessage(
                 str(title or "BlindRSS"),
@@ -1576,12 +1715,18 @@ class MainFrame(wx.Frame):
                 note.SetFlags(wx.ICON_INFORMATION)
             except Exception:
                 pass
+            if activation_payload:
+                if self._bind_notification_payload(note, activation_payload):
+                    note_key = id(note)
             shown = note.Show(timeout=wx.adv.NotificationMessage.Timeout_Auto)
             if shown:
                 try:
                     self._active_notifications.append(note)
+                    self._prune_notification_payloads()
                 except Exception:
                     pass
+            elif note_key is not None:
+                self._notification_payloads.pop(note_key, None)
         except Exception:
             log.debug("Failed to show Windows notification", exc_info=True)
 
@@ -1609,6 +1754,24 @@ class MainFrame(wx.Frame):
             return preview_text
         return "New article available."
 
+    def _build_notification_activation_payload(self, item: dict, feed_id: str = "") -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        article_id = str(item.get("id") or item.get("article_id") or "").strip()
+        url = str(item.get("url") or "").strip()
+        media_url = str(item.get("media_url") or "").strip()
+        media_type = str(item.get("media_type") or "").strip()
+        if not (article_id or url or media_url):
+            return None
+        return {
+            "article_id": article_id,
+            "title": str(item.get("title") or "New article").strip() or "New article",
+            "url": url,
+            "feed_id": str(feed_id or item.get("feed_id") or "").strip(),
+            "media_url": media_url,
+            "media_type": media_type,
+        }
+
     def _load_recent_notification_items(self, feed_id: str, count: int, notified_ids: set[str]):
         desired = max(0, int(count or 0))
         if desired <= 0:
@@ -1632,17 +1795,23 @@ class MainFrame(wx.Frame):
         out = []
         seen = set()
         for article in articles:
-            article_id = str(self._article_cache_id(article) or getattr(article, "id", "") or "").strip()
+            article_id = str(getattr(article, "id", "") or self._article_cache_id(article) or "").strip()
             if article_id and (article_id in notified_ids or article_id in seen):
                 continue
             seen.add(article_id)
             title = str(getattr(article, "title", "") or "").strip() or "New article"
             preview = self._notification_preview_text(getattr(article, "content", "") or "")
+            article_url = str(getattr(article, "url", "") or "").strip()
+            media_url = str(getattr(article, "media_url", "") or "").strip()
+            media_type = str(getattr(article, "media_type", "") or "").strip()
             out.append(
                 {
                     "id": article_id,
                     "title": title,
                     "preview": preview,
+                    "url": article_url,
+                    "media_url": media_url,
+                    "media_type": media_type,
                 }
             )
             if len(out) >= desired:
@@ -1708,7 +1877,8 @@ class MainFrame(wx.Frame):
                 title = str(item.get("title") or "New article").strip() or "New article"
                 preview = self._notification_preview_text(item.get("preview") or "")
                 body = self._build_notification_body(preview, feed_title, include_feed)
-                wx.CallAfter(self._show_windows_notification, title, body)
+                activation_payload = self._build_notification_activation_payload(item, feed_id=feed_id)
+                wx.CallAfter(self._show_windows_notification, title, body, activation_payload)
                 sent += 1
                 if not unlimited:
                     remaining = max(0, remaining - 1)
@@ -1738,7 +1908,8 @@ class MainFrame(wx.Frame):
                 item.get("preview") or item.get("content") or item.get("summary") or ""
             )
             body = self._build_notification_body(preview, feed_title, include_feed)
-            wx.CallAfter(self._show_windows_notification, article_title, body)
+            activation_payload = self._build_notification_activation_payload(item, feed_id=feed_id)
+            wx.CallAfter(self._show_windows_notification, article_title, body, activation_payload)
             if not unlimited:
                 remaining -= 1
 
@@ -4488,95 +4659,90 @@ class MainFrame(wx.Frame):
         if 0 <= idx < len(self.current_articles):
             article = self.current_articles[idx]
             self.mark_article_read(idx)
+            self._open_article(article)
 
-            if self._should_play_in_player(article):
-                # Decision logic for which URL to play
-                media_url = article.media_url
-                media_type = (article.media_type or "").lower()
-                use_ytdlp = media_type == "video/youtube"
+    def _open_article(self, article) -> None:
+        if article is None:
+            return
 
-                is_direct_media = False
-                try:
-                    if media_url:
-                        if media_type.startswith(("audio/", "video/")) or "podcast" in media_type:
+        if self._should_play_in_player(article):
+            # Decision logic for which URL to play
+            media_url = getattr(article, "media_url", None)
+            media_type = (getattr(article, "media_type", None) or "").lower()
+            use_ytdlp = media_type == "video/youtube"
+
+            is_direct_media = False
+            try:
+                if media_url:
+                    if media_type.startswith(("audio/", "video/")) or "podcast" in media_type:
+                        is_direct_media = True
+                    else:
+                        media_path = urlsplit(str(media_url)).path.lower()
+                        if media_path.endswith(
+                            (".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".wav", ".flac", ".mp4", ".m4v", ".webm", ".mkv", ".mov")
+                        ):
                             is_direct_media = True
+            except Exception:
+                is_direct_media = False
+
+            article_url = str(getattr(article, "url", "") or "").strip()
+            if article_url and core.discovery.is_ytdlp_supported(article_url):
+                if use_ytdlp or (not media_url) or (not is_direct_media):
+                    media_url = article_url
+                    use_ytdlp = True
+            elif not media_url and article_url:
+                media_url = article_url
+
+            if not media_url:
+                if article_url:
+                    webbrowser.open(article_url)
+                return
+
+            chapters = getattr(article, "chapters", None)
+
+            pw = self._ensure_player_window()
+            if not pw:
+                return
+
+            try:
+                if pw.is_current_media(getattr(article, "id", None), media_url):
+                    try:
+                        if pw.is_audio_playing():
+                            pw.pause()
                         else:
-                            media_path = urlsplit(str(media_url)).path.lower()
-                            if media_path.endswith((".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".wav", ".flac", ".mp4", ".m4v", ".webm", ".mkv", ".mov")):
-                                is_direct_media = True
-                except Exception:
-                    is_direct_media = False
-
-                # If main URL is yt-dlp supported, prefer it only when we don't already
-                # have a direct audio/video enclosure (e.g., YouTube thumbnails).
-                if article.url and core.discovery.is_ytdlp_supported(article.url):
-                    if use_ytdlp or (not media_url) or (not is_direct_media):
-                        media_url = article.url
-                        use_ytdlp = True
-                elif not media_url and article.url:
-                    # Fallback
-                    media_url = article.url
-
-                if not media_url:
-                    # Fallback: if we still have no media URL (and no article URL?), bail.
-                    # But if we have article.url and we reached here, it means we decided it's NOT a media/player item.
-                    # This shouldn't happen if we fall through to "else" below for non-player items.
-                    # However, if we are inside "if _should_play_in_player" but fail to find media, we should open browser.
-                    if article.url:
-                         webbrowser.open(article.url)
+                            pw.resume_or_reload_current()
+                    except Exception:
+                        log.exception("Error toggling play/pause for current article")
                     return
+            except Exception:
+                log.exception("Error checking if article is currently playing")
 
-                # Use cached chapters if available
-                chapters = getattr(article, "chapters", None)
-                
-                pw = self._ensure_player_window()
-                if not pw:
-                    return
+            pw.load_media(
+                media_url,
+                use_ytdlp,
+                chapters,
+                title=getattr(article, "title", None),
+                article_id=getattr(article, "id", None),
+            )
 
-                # If the selected episode is already loaded in the player, pause/resume it
-                # (and reload if VLC is in a stopped/ended state) instead of always restarting.
-                try:
-                    if pw.is_current_media(getattr(article, "id", None), media_url):
-                        try:
-                            if pw.is_audio_playing():
-                                pw.pause()
-                            else:
-                                pw.resume_or_reload_current()
-                        except Exception:
-                            log.exception("Error toggling play/pause for current article")
-                        return
-                except Exception:
-                    log.exception("Error checking if article is currently playing")
-
-                # Start playback immediately (avoid blocking)
-                pw.load_media(
-                    media_url,
-                    use_ytdlp,
-                    chapters,
-                    title=getattr(article, "title", None),
-                    article_id=getattr(article, "id", None),
-                )
-
-                # Respect the preference for showing/hiding the player on playback
-                if bool(self.config_manager.get("show_player_on_play", True)):
-                    self.toggle_player_visibility(force_show=True)
-                else:
-                    # Keep audio playing, but hide the window
-                    self.toggle_player_visibility(force_show=False)
-                
-                # Fetch chapters in background if missing
-                if not chapters:
-                    chapter_media_url = getattr(article, "media_url", None)
-                    chapter_media_type = getattr(article, "media_type", None)
-
-                    threading.Thread(
-                        target=self._fetch_chapters_for_player,
-                        args=(article.id, chapter_media_url, chapter_media_type),
-                        daemon=True,
-                    ).start()
+            if bool(self.config_manager.get("show_player_on_play", True)):
+                self.toggle_player_visibility(force_show=True)
             else:
-                # Non-podcast/news items open in the user's default browser
-                webbrowser.open(article.url)
+                self.toggle_player_visibility(force_show=False)
+
+            if not chapters:
+                chapter_media_url = getattr(article, "media_url", None)
+                chapter_media_type = getattr(article, "media_type", None)
+                threading.Thread(
+                    target=self._fetch_chapters_for_player,
+                    args=(getattr(article, "id", None), chapter_media_url, chapter_media_type),
+                    daemon=True,
+                ).start()
+            return
+
+        article_url = str(getattr(article, "url", "") or "").strip()
+        if article_url:
+            webbrowser.open(article_url)
 
     def _fetch_chapters_for_player(self, article_id, media_url: str | None = None, media_type: str | None = None):
         chapters = []
