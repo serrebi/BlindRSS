@@ -45,6 +45,11 @@ except Exception:
     EVT_NOTIFICATION_MESSAGE_ACTION = None
     EVT_NOTIFICATION_MESSAGE_DISMISSED = None
 
+try:
+    NOTIFICATION_TIMEOUT_NEVER = wx.adv.NotificationMessage.Timeout_Never
+except Exception:
+    NOTIFICATION_TIMEOUT_NEVER = wx.adv.NotificationMessage.Timeout_Auto
+
 
 class MainFrame(wx.Frame):
     def __init__(self, provider: RSSProvider, config_manager):
@@ -1595,11 +1600,6 @@ class MainFrame(wx.Frame):
                 bound_click = True
         except Exception:
             pass
-        try:
-            if EVT_NOTIFICATION_MESSAGE_DISMISSED:
-                note.Bind(EVT_NOTIFICATION_MESSAGE_DISMISSED, self._on_windows_notification_dismissed)
-        except Exception:
-            pass
         if not bound_click:
             self._notification_payloads.pop(key, None)
             return False
@@ -1685,9 +1685,6 @@ class MainFrame(wx.Frame):
         if payload:
             self._handle_notification_activation(payload)
 
-    def _on_windows_notification_dismissed(self, event) -> None:
-        self._consume_notification_payload(event, pop=True)
-
     def _show_windows_notification(self, title: str, message: str, activation_payload: dict | None = None):
         if not self._windows_notifications_enabled():
             return
@@ -1718,7 +1715,8 @@ class MainFrame(wx.Frame):
             if activation_payload:
                 if self._bind_notification_payload(note, activation_payload):
                     note_key = id(note)
-            shown = note.Show(timeout=wx.adv.NotificationMessage.Timeout_Auto)
+            timeout_value = NOTIFICATION_TIMEOUT_NEVER if activation_payload else wx.adv.NotificationMessage.Timeout_Auto
+            shown = note.Show(timeout=timeout_value)
             if shown:
                 try:
                     self._active_notifications.append(note)
