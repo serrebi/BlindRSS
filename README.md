@@ -1,48 +1,47 @@
 # BlindRSS
 
-BlindRSS is a Screen-reader friendly vibed RSS & Podcast player. It is fast, easy to use, and it supports all the rss feed providers you expect.
+BlindRSS is a screen-reader-friendly desktop RSS and podcast app. It is built for fast feed reading and reliable audio playback.
+
+## What BlindRSS Does
+
+- Reads RSS/Atom feeds and plays podcast/video enclosures.
+- Supports local feeds plus hosted providers: Miniflux, Inoreader, The Old Reader, and BazQux.
+- Includes All/Unread/Read/Favorites views, plus mark read/unread and mark all read.
+- Extracts full article text when feeds only provide summaries.
+- Finds feeds from URLs and search providers (Apple Podcasts, gPodder, Feedly, NewsBlur, Reddit, Fediverse, Feedsearch, and local discovery).
+- Supports YouTube, Rumble, and Odysee URL discovery/media handling through yt-dlp and local resolvers.
+- Uses a local range-cache proxy for faster seeking and smoother VLC playback.
+- Casts to Chromecast, DLNA/UPnP, and AirPlay.
+- Supports tray controls, media keys, saved searches, and startup restore of your last selected feed/folder.
+- Supports Windows notifications for new articles with per-feed exclusions and per-refresh limits.
+- Includes a built-in updater that verifies SHA-256 and Authenticode before applying updates.
+
+## Recently Added / Improved
+
+- Remember last selected feed/folder on startup.
+- Favorites handling improvements across list and provider actions.
+- Skip Silence playback option (experimental).
+- Better refresh reliability: explicit timeouts and cache revalidation headers for stale CDN feeds.
+- Inoreader OAuth flow that supports HTTPS localhost redirects by pasting the redirected URL back into BlindRSS.
+- More robust handling for YouTube Shorts, Rumble, and Odysee media/feed discovery.
+- Stronger Windows integration options (startup and shortcut tooling).
 
 ## Quick Start
 
 ### Windows (Easy)
-1. Download `BlindRSS.exe` from [releases](https://github.com/serrebi/BlindRSS/releases
-   .
-2. Extract it to a portable location of your choice, and Run `BlindRSS.exe`.
 
-## Updater (Windows)
-BlindRSS can check GitHub Releases for updates, verify integrity, and safely swap in new files when there is a new version available.
+1. Download the latest `.zip` asset from [GitHub Releases](https://github.com/serrebi/BlindRSS/releases) (not the `.exe`).
+2. Extract the `.zip` anywhere.
+3. Run `BlindRSS.exe`.
 
-- Checks GitHub Releases for `BlindRSS-update.json` and the versioned zip asset.
-- Verifies SHA-256 of the downloaded zip and Authenticode signature of `BlindRSS.exe`.
-- Uses `update_helper.bat` to stage, swap, keep a backup, and restart.
-- Toggle auto-check in Settings: "Check for updates on startup" (default ON).
-- Manual check: Tools → "Check for Updates..."
+## Run From Python (Any OS)
 
-### Build it yourself (PyInstaller)
-1. Install Python 3.12+ and requirements: `pip install -r requirements.txt`.
-2. Ensure **VLC Media Player (64-bit)** is installed at `C:\Program Files\VideoLAN\VLC`.
-3. Run the build script:
-### Prerequisites for the build.bat
-- Code signing certificate installed and accessible to `signtool`.
-- `signtool.exe` from Windows SDK (override path with `SIGNTOOL_PATH`).
-- GitHub CLI (`gh`) authenticated (`gh auth login`).
-
-### How to build with build.bat
-  `.\build.bat` with one of these options:
-- `build.bat build`   builds + signs + zips locally (no git/release).
-- `build.bat release` computes next version, bumps code, builds, signs, zips, generates update manifest, tags, pushes, and creates a GitHub release.
-- `build.bat dry-run` prints what it would do.
-
-4. The application will be generated in `dist/BlindRSS/`. Run `dist/BlindRSS/BlindRSS.exe`.
-
-### Python (All OS)
-1. Install Python 3.12.
-2. Run: `pip3 install -r requirements.txt`
+1. Install Python 3.12+.
+2. Install dependencies: `pip install -r requirements.txt`
 3. Run: `python main.py`
 
+## Build and Release
 
+Build and release instructions were moved out of this file.
 
-
-### Update Manifest
-Each release includes `BlindRSS-update.json` with:
-- version, asset name, download URL, SHA-256, publish date, and summary.
+Use [`build.md`](build.md).
