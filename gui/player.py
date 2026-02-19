@@ -190,6 +190,13 @@ class PlayerFrame(wx.Frame):
         self.duration = 0
         self.current_chapters = []
         self.chapter_marks = []
+        self._chapter_pending_idx = None
+        self._chapter_closeup_supported = False
+        self._chapter_last_commit_idx = None
+        self._chapter_last_commit_ts = 0.0
+        self._chapter_menu_show_item = None
+        self._chapter_menu_prev_item = None
+        self._chapter_menu_next_item = None
         self.current_url = None
         self.current_article_id = None
         self._load_seq = 0
@@ -1347,6 +1354,12 @@ class PlayerFrame(wx.Frame):
         self.cast_btn = wx.Button(panel, label="Cast")
         self.cast_btn.Bind(wx.EVT_BUTTON, self.on_cast)
         btn_sizer.Add(self.cast_btn, 0, wx.ALL, 5)
+
+        # Chapters menu
+        self.chapters_btn = wx.Button(panel, label="Chapters")
+        self.chapters_btn.SetName("Chapters Menu")
+        self.chapters_btn.Bind(wx.EVT_BUTTON, self.on_show_chapters_menu)
+        btn_sizer.Add(self.chapters_btn, 0, wx.ALL, 5)
         
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER)
 
@@ -1367,9 +1380,168 @@ class PlayerFrame(wx.Frame):
         self.chapter_choice = wx.ComboBox(panel, style=wx.CB_READONLY)
         self.chapter_choice.SetName("Chapters")
         self.chapter_choice.Bind(wx.EVT_COMBOBOX, self.on_chapter_select)
+        if hasattr(wx, "EVT_COMBOBOX_CLOSEUP"):
+            try:
+                self.chapter_choice.Bind(wx.EVT_COMBOBOX_CLOSEUP, self.on_chapter_closeup)
+                self._chapter_closeup_supported = True
+            except Exception:
+                self._chapter_closeup_supported = False
         sizer.Add(self.chapter_choice, 0, wx.EXPAND | wx.ALL, 5)
         
         panel.SetSizer(sizer)
+        self._init_player_menu_bar()
+        self._refresh_chapter_controls_state()
+
+    def _init_player_menu_bar(self) -> None:
+        try:
+            menubar = wx.MenuBar()
+            chapters_menu = wx.Menu()
+
+            self._chapter_menu_show_item = chapters_menu.Append(wx.ID_ANY, "Show &Chapters\tCtrl+M")
+            self._chapter_menu_prev_item = chapters_menu.Append(wx.ID_ANY, "&Previous Chapter\tCtrl+Shift+Left")
+            self._chapter_menu_next_item = chapters_menu.Append(wx.ID_ANY, "&Next Chapter\tCtrl+Shift+Right")
+
+            menubar.Append(chapters_menu, "&Chapters")
+            self.SetMenuBar(menubar)
+
+            self.Bind(wx.EVT_MENU, self.on_show_chapters_menu, self._chapter_menu_show_item)
+            self.Bind(wx.EVT_MENU, self.on_prev_chapter, self._chapter_menu_prev_item)
+            self.Bind(wx.EVT_MENU, self.on_next_chapter, self._chapter_menu_next_item)
+        except Exception:
+            log.exception("Failed to initialize player menu bar")
+        finally:
+            self._refresh_chapter_controls_state()
+
+    def _refresh_chapter_controls_state(self) -> None:
+        has_chapters = bool(getattr(self, "current_chapters", None))
+        try:
+            item = getattr(self, "_chapter_menu_prev_item", None)
+            if item is not None:
+                item.Enable(bool(has_chapters))
+        except Exception:
+            pass
+        try:
+            item = getattr(self, "_chapter_menu_next_item", None)
+            if item is not None:
+                item.Enable(bool(has_chapters))
+        except Exception:
+            pass
+
+    def _active_chapter_index(self) -> int:
+        try:
+            idx = int(self.chapter_choice.GetSelection())
+            if idx != wx.NOT_FOUND:
+                return int(idx)
+        except Exception:
+            pass
+
+        try:
+            chapters = list(getattr(self, "current_chapters", []) or [])
+            if not chapters:
+                return -1
+            cur_sec = float(self._current_position_ms()) / 1000.0
+            active = -1
+            for i, ch in enumerate(chapters):
+                if cur_sec >= float(ch.get("start", 0) or 0):
+                    active = i
+                else:
+                    break
+            return int(active)
+        except Exception:
+            return -1
+
+    def _format_chapter_menu_label(self, chapter: dict) -> str:
+        try:
+            start = float(chapter.get("start", 0) or 0)
+        except Exception:
+            start = 0.0
+        if start < 0:
+            start = 0.0
+        mins = int(start // 60)
+        secs = int(start % 60)
+        title = str(chapter.get("title", "") or "").strip() or f"Chapter {mins:02d}:{secs:02d}"
+        return f"{mins:02d}:{secs:02d}  {title}"
+
+    def _jump_to_chapter_index(self, idx: int) -> None:
+        try:
+            chapters = list(getattr(self, "current_chapters", []) or [])
+        except Exception:
+            chapters = []
+        if not chapters:
+            return
+        try:
+            target_idx = int(idx)
+        except Exception:
+            return
+        if target_idx < 0 or target_idx >= len(chapters):
+            return
+        try:
+            self.chapter_choice.SetSelection(int(target_idx))
+        except Exception:
+            pass
+        self._chapter_pending_idx = int(target_idx)
+        self._commit_chapter_selection()
+
+    def _show_chapters_popup_menu(self) -> None:
+        menu = wx.Menu()
+        try:
+            chapters = list(getattr(self, "current_chapters", []) or [])
+            if not chapters:
+                empty_item = menu.Append(wx.ID_ANY, "No chapters available")
+                empty_item.Enable(False)
+            else:
+                active_idx = self._active_chapter_index()
+                for i, ch in enumerate(chapters):
+                    label = self._format_chapter_menu_label(ch)
+                    if int(i) == int(active_idx):
+                        label = f"[Current] {label}"
+                    item = menu.Append(wx.ID_ANY, label)
+                    menu.Bind(wx.EVT_MENU, lambda evt, idx=i: self._jump_to_chapter_index(idx), item)
+            self.PopupMenu(menu)
+        finally:
+            try:
+                menu.Destroy()
+            except Exception:
+                pass
+
+    def show_chapters_menu(self) -> None:
+        self._show_chapters_popup_menu()
+
+    def jump_to_chapter(self, idx: int) -> None:
+        self._jump_to_chapter_index(int(idx))
+
+    def get_active_chapter_index(self) -> int:
+        return int(self._active_chapter_index())
+
+    def prev_chapter(self) -> None:
+        self.on_prev_chapter(None)
+
+    def next_chapter(self) -> None:
+        self.on_next_chapter(None)
+
+    def on_show_chapters_menu(self, event) -> None:
+        self._show_chapters_popup_menu()
+
+    def on_prev_chapter(self, event) -> None:
+        idx = self._active_chapter_index()
+        if idx <= 0:
+            return
+        self._jump_to_chapter_index(int(idx) - 1)
+
+    def on_next_chapter(self, event) -> None:
+        idx = self._active_chapter_index()
+        try:
+            total = len(getattr(self, "current_chapters", []) or [])
+        except Exception:
+            total = 0
+        if total <= 0:
+            return
+        if idx < 0:
+            self._jump_to_chapter_index(0)
+            return
+        if idx >= (total - 1):
+            return
+        self._jump_to_chapter_index(int(idx) + 1)
 
     def on_cast(self, event):
         if self.is_casting:
@@ -2614,6 +2786,10 @@ class PlayerFrame(wx.Frame):
         self.total_time_lbl.SetLabel("00:00")
         self.chapter_choice.Clear()
         self.chapter_choice.Disable()
+        self._chapter_pending_idx = None
+        self._chapter_last_commit_idx = None
+        self._chapter_last_commit_ts = 0.0
+        self._refresh_chapter_controls_state()
 
         try:
             self.current_title = title or "Loading media..."
@@ -2658,8 +2834,12 @@ class PlayerFrame(wx.Frame):
     def update_chapters(self, chapters):
         self.current_chapters = chapters
         self.chapter_choice.Clear()
+        self._chapter_pending_idx = None
+        self._chapter_last_commit_idx = None
+        self._chapter_last_commit_ts = 0.0
         if not chapters:
             self.chapter_choice.Disable()
+            self._refresh_chapter_controls_state()
             return
             
         self.chapter_choice.Enable()
@@ -2669,6 +2849,7 @@ class PlayerFrame(wx.Frame):
             secs = int(start % 60)
             title = ch.get("title", f"Chapter {start}")
             self.chapter_choice.Append(f"{title} - {mins:02d}:{secs:02d}", ch)
+        self._refresh_chapter_controls_state()
 
     def on_play_pause(self, event):
         self.toggle_play_pause()
@@ -3277,12 +3458,28 @@ class PlayerFrame(wx.Frame):
         self.config_manager.set("playback_speed", speed)
 
     def on_chapter_select(self, event):
-        # Do not seek on selection change (arrow-key browsing should be safe).
-        # Seeking is committed explicitly via Enter (see on_char_hook).
+        # Do not seek on selection change so arrow-key browsing is safe.
+        # Selection is committed on Enter (keyboard) or closeup (mouse/dropdown).
         try:
             self._chapter_pending_idx = int(self.chapter_choice.GetSelection())
         except Exception:
             self._chapter_pending_idx = None
+        try:
+            has_closeup = bool(getattr(self, "_chapter_closeup_supported", False))
+        except Exception:
+            has_closeup = False
+        if not has_closeup:
+            self._commit_chapter_selection()
+
+    def on_chapter_closeup(self, event) -> None:
+        try:
+            self._commit_chapter_selection()
+        except Exception:
+            log.exception("Error committing chapter selection on closeup")
+        try:
+            event.Skip()
+        except Exception:
+            pass
 
     def _is_focus_in_chapter_choice(self) -> bool:
         try:
@@ -3317,6 +3514,15 @@ class PlayerFrame(wx.Frame):
         if idx == wx.NOT_FOUND:
             return
 
+        now_ts = time.monotonic()
+        try:
+            last_idx = getattr(self, "_chapter_last_commit_idx", None)
+            last_ts = float(getattr(self, "_chapter_last_commit_ts", 0.0) or 0.0)
+            if last_idx == int(idx) and (now_ts - last_ts) < 0.35:
+                return
+        except Exception:
+            pass
+
         data = {}
         try:
             data = self.chapter_choice.GetClientData(int(idx)) or {}
@@ -3334,6 +3540,11 @@ class PlayerFrame(wx.Frame):
         if self.is_casting:
             # TODO: map chapters to casting seek when supported.
             return
+        try:
+            self._chapter_last_commit_idx = int(idx)
+            self._chapter_last_commit_ts = float(now_ts)
+        except Exception:
+            pass
 
         try:
             self._note_user_seek()
@@ -4234,6 +4445,20 @@ class PlayerFrame(wx.Frame):
                     return
             except Exception:
                 pass
+
+        if event.ControlDown() and event.ShiftDown() and not event.AltDown() and not event.MetaDown():
+            if key == wx.WXK_LEFT:
+                try:
+                    self.prev_chapter()
+                    return
+                except Exception:
+                    pass
+            elif key == wx.WXK_RIGHT:
+                try:
+                    self.next_chapter()
+                    return
+                except Exception:
+                    pass
 
         if event.ControlDown() and not event.ShiftDown() and not event.AltDown() and not event.MetaDown():
             if self.is_audio_playing():

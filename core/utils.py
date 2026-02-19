@@ -2,6 +2,7 @@ import requests
 import re
 import uuid
 import logging
+import sqlite3
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup as BS
 from datetime import datetime, timezone, timedelta
@@ -390,16 +391,25 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
     Stores them in DB linked to article_id.
     Returns list of chapter dicts.
     """
+    try:
+        article_key = str(article_id).strip() if article_id is not None else ""
+    except Exception:
+        article_key = ""
+    if not article_key:
+        article_key = None
+
     # Check DB first
     # Note: get_chapters_from_db opens its own connection. 
     # If we are in a transaction (cursor provided), we should probably use that cursor or skip this check if we know it's a fresh insert.
     # But for simplicity, we can just query using the provided cursor if available.
-    if cursor:
-        cursor.execute("SELECT start, title, href FROM chapters WHERE article_id = ? ORDER BY start", (article_id,))
+    if cursor and article_key:
+        cursor.execute("SELECT start, title, href FROM chapters WHERE article_id = ? ORDER BY start", (article_key,))
         rows = cursor.fetchall()
-        existing = [{"start": r[0], "title": r[1], "href": r[2]} for r in rows]
+        existing = [{"start": float(r[0] or 0), "title": r[1], "href": r[2]} for r in rows]
+    elif article_key:
+        existing = get_chapters_from_db(article_key)
     else:
-        existing = get_chapters_from_db(article_id)
+        existing = []
         
     if existing:
         return existing
@@ -414,26 +424,44 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
             data = resp.json()
             chapters = data.get("chapters", [])
             
-            if cursor:
-                c = cursor
-            else:
-                conn = get_connection()
-                c = conn.cursor()
+            persist_enabled = bool(article_key)
+            c = None
+            conn = None
+            if persist_enabled:
+                if cursor:
+                    c = cursor
+                else:
+                    conn = get_connection()
+                    c = conn.cursor()
                 
             try:
+                persist_blocked = False
                 for ch in chapters:
                     ch_id = str(uuid.uuid4())
                     start = ch.get("startTime") or ch.get("start_time") or 0
                     title_ch = ch.get("title", "")
                     href = ch.get("url") or ch.get("link")
-                    c.execute("INSERT OR REPLACE INTO chapters (id, article_id, start, title, href) VALUES (?, ?, ?, ?, ?)",
-                              (ch_id, article_id, float(start), title_ch, href))
-                    chapters_out.append({"start": float(start), "title": title_ch, "href": href})
+                    start_f = float(start)
+                    chapters_out.append({"start": start_f, "title": title_ch, "href": href})
+                    if c is None or persist_blocked:
+                        continue
+                    try:
+                        c.execute(
+                            "INSERT OR REPLACE INTO chapters (id, article_id, start, title, href) VALUES (?, ?, ?, ?, ?)",
+                            (ch_id, article_key, start_f, title_ch, href),
+                        )
+                    except sqlite3.IntegrityError as e:
+                        persist_blocked = True
+                        log.info(
+                            "Skipping chapter DB persistence for article_id=%s due to DB constraint: %s",
+                            article_key,
+                            e,
+                        )
                 
-                if not cursor:
+                if conn is not None:
                     conn.commit()
             finally:
-                if not cursor:
+                if conn is not None:
                     conn.close()
 
             if chapters_out:
@@ -512,34 +540,55 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
                 return chapters_out
 
             id3 = ID3(BytesIO(tag_bytes))
-            
-            if cursor:
-                c = cursor
-            else:
-                conn = get_connection()
-                c = conn.cursor()
+
+            parsed_chapters = []
+            for frame in id3.getall("CHAP"):
+                start = frame.start_time / 1000.0 if frame.start_time else 0
+                title_ch = ""
+                tit2 = frame.sub_frames.get("TIT2")
+                if tit2 and tit2.text:
+                    title_ch = tit2.text[0]
+                href = None
+                parsed_chapters.append({"start": float(start), "title": title_ch, "href": href})
+
+            if not parsed_chapters:
+                return chapters_out
+
+            chapters_out.extend(parsed_chapters)
+
+            persist_enabled = bool(article_key)
+            c = None
+            conn = None
+            if persist_enabled:
+                if cursor:
+                    c = cursor
+                else:
+                    conn = get_connection()
+                    c = conn.cursor()
             
             try:
-                for frame in id3.getall("CHAP"):
+                persist_blocked = False
+                for ch in parsed_chapters:
                     ch_id = str(uuid.uuid4())
-                    start = frame.start_time / 1000.0 if frame.start_time else 0
-                    title_ch = ""
-                    tit2 = frame.sub_frames.get("TIT2")
-                    if tit2 and tit2.text:
-                        title_ch = tit2.text[0]
-                    href = None
-                    # Extract URL from WXXX if needed? Usually just title.
+                    if c is None or persist_blocked:
+                        continue
+                    try:
+                        c.execute(
+                            "INSERT OR REPLACE INTO chapters (id, article_id, start, title, href) VALUES (?, ?, ?, ?, ?)",
+                            (ch_id, article_key, float(ch["start"]), ch.get("title", ""), ch.get("href")),
+                        )
+                    except sqlite3.IntegrityError as e:
+                        persist_blocked = True
+                        log.info(
+                            "Skipping chapter DB persistence for article_id=%s due to DB constraint: %s",
+                            article_key,
+                            e,
+                        )
 
-                    c.execute(
-                        "INSERT OR REPLACE INTO chapters (id, article_id, start, title, href) VALUES (?, ?, ?, ?, ?)",
-                        (ch_id, article_id, float(start), title_ch, href),
-                    )
-                    chapters_out.append({"start": float(start), "title": title_ch, "href": href})
-
-                if not cursor:
+                if conn is not None:
                     conn.commit()
             finally:
-                if not cursor:
+                if conn is not None:
                     conn.close()
         except ImportError:
             log.info("mutagen not installed, skipping ID3 chapter parse.")

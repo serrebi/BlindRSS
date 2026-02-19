@@ -1275,6 +1275,17 @@ class MainFrame(wx.Frame):
         player_menu.AppendSeparator()
         player_vol_up_item = player_menu.Append(wx.ID_ANY, "Volume Up (Ctrl+Up)", "Increase volume")
         player_vol_down_item = player_menu.Append(wx.ID_ANY, "Volume Down (Ctrl+Down)", "Decrease volume")
+        player_menu.AppendSeparator()
+        chapters_submenu = wx.Menu()
+        player_menu.AppendSubMenu(chapters_submenu, "Chapters")
+
+        self._player_menu = player_menu
+        self._player_chapters_submenu = chapters_submenu
+        self._player_chapter_dynamic_item_ids = []
+        self._player_chapter_static_item_ids = []
+        self._player_chapters_show_item = None
+        self._player_chapters_prev_item = None
+        self._player_chapters_next_item = None
         
         tools_menu = wx.Menu()
         find_feed_item = tools_menu.Append(wx.ID_ANY, "Find a &Podcast or RSS Feed...", "Find and add a podcast or RSS feed")
@@ -1316,6 +1327,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_exit, exit_item)
         self.Bind(wx.EVT_MENU, self.on_find_feed, find_feed_item)
         self.Bind(wx.EVT_MENU, self.on_about, about_item)
+        self.Bind(wx.EVT_MENU_OPEN, self.on_menu_open)
+        self._refresh_player_chapters_submenu()
 
     def init_shortcuts(self):
         # Add accelerator for Ctrl+R (F5 is handled by menu item text usually, but being explicit helps)
@@ -1374,6 +1387,27 @@ class MainFrame(wx.Frame):
             if focus == self.tree:
                 self.on_remove_feed(None)
                 return
+
+        if (
+            event.ControlDown()
+            and event.ShiftDown()
+            and not event.AltDown()
+            and not event.MetaDown()
+        ):
+            pw = getattr(self, "player_window", None)
+            if pw:
+                if key == wx.WXK_LEFT:
+                    try:
+                        self.on_player_prev_chapter(None)
+                        return
+                    except Exception:
+                        pass
+                elif key == wx.WXK_RIGHT:
+                    try:
+                        self.on_player_next_chapter(None)
+                        return
+                    except Exception:
+                        pass
 
         if event.ControlDown() and not event.ShiftDown() and not event.AltDown() and not event.MetaDown():
             pw = getattr(self, "player_window", None)
@@ -1446,6 +1480,165 @@ class MainFrame(wx.Frame):
         if pw:
             try:
                 pw.adjust_volume(-int(getattr(pw, "volume_step", 5)))
+            except Exception:
+                pass
+
+    def on_menu_open(self, event):
+        try:
+            opened_menu = event.GetMenu()
+        except Exception:
+            opened_menu = None
+        try:
+            player_menu = getattr(self, "_player_menu", None)
+            chapters_submenu = getattr(self, "_player_chapters_submenu", None)
+            if opened_menu is player_menu or opened_menu is chapters_submenu:
+                self._refresh_player_chapters_submenu()
+        except Exception:
+            pass
+        try:
+            event.Skip()
+        except Exception:
+            pass
+
+    def _format_player_chapter_menu_label(self, chapter: dict) -> str:
+        try:
+            start = float(chapter.get("start", 0) or 0)
+        except Exception:
+            start = 0.0
+        if start < 0:
+            start = 0.0
+        mins = int(start // 60)
+        secs = int(start % 60)
+        title = str(chapter.get("title", "") or "").strip() or f"Chapter {mins:02d}:{secs:02d}"
+        return f"{mins:02d}:{secs:02d}  {title}"
+
+    def _clear_menu_items(self, menu: wx.Menu) -> None:
+        try:
+            items = list(menu.GetMenuItems() or [])
+        except Exception:
+            items = []
+        for item in items:
+            try:
+                menu.Delete(int(item.GetId()))
+            except Exception:
+                pass
+
+    def _refresh_player_chapters_submenu(self) -> None:
+        submenu = getattr(self, "_player_chapters_submenu", None)
+        if submenu is None:
+            return
+
+        self._clear_menu_items(submenu)
+        self._player_chapter_dynamic_item_ids = []
+        self._player_chapter_static_item_ids = []
+        self._player_chapters_show_item = None
+        self._player_chapters_prev_item = None
+        self._player_chapters_next_item = None
+
+        pw = getattr(self, "player_window", None)
+        chapters = list(getattr(pw, "current_chapters", []) or []) if pw else []
+        has_chapters = bool(chapters)
+
+        if not has_chapters:
+            try:
+                empty_item = submenu.Append(wx.ID_ANY, "No chapters available")
+                empty_item.Enable(False)
+                self._player_chapter_dynamic_item_ids.append(int(empty_item.GetId()))
+            except Exception:
+                pass
+        else:
+            try:
+                active_idx = int(pw.get_active_chapter_index())
+            except Exception:
+                active_idx = -1
+
+            for i, ch in enumerate(chapters):
+                try:
+                    label = self._format_player_chapter_menu_label(ch)
+                    if int(i) == int(active_idx):
+                        label = f"[Current] {label}"
+                    item = submenu.Append(wx.ID_ANY, label)
+                    submenu.Bind(wx.EVT_MENU, lambda evt, idx=i: self.on_player_chapter_jump(evt, idx), item)
+                    self._player_chapter_dynamic_item_ids.append(int(item.GetId()))
+                except Exception:
+                    pass
+
+        try:
+            sep = submenu.AppendSeparator()
+            self._player_chapter_static_item_ids.append(int(sep.GetId()))
+        except Exception:
+            pass
+
+        try:
+            self._player_chapters_show_item = submenu.Append(
+                wx.ID_ANY,
+                "Show Chapters...",
+                "Show chapter list",
+            )
+            self.Bind(wx.EVT_MENU, self.on_player_show_chapters, self._player_chapters_show_item)
+            self._player_chapter_static_item_ids.append(int(self._player_chapters_show_item.GetId()))
+        except Exception:
+            self._player_chapters_show_item = None
+
+        try:
+            self._player_chapters_prev_item = submenu.Append(
+                wx.ID_ANY,
+                "Previous Chapter\tCtrl+Shift+Left",
+                "Jump to previous chapter",
+            )
+            self.Bind(wx.EVT_MENU, self.on_player_prev_chapter, self._player_chapters_prev_item)
+            self._player_chapter_static_item_ids.append(int(self._player_chapters_prev_item.GetId()))
+        except Exception:
+            self._player_chapters_prev_item = None
+
+        try:
+            self._player_chapters_next_item = submenu.Append(
+                wx.ID_ANY,
+                "Next Chapter\tCtrl+Shift+Right",
+                "Jump to next chapter",
+            )
+            self.Bind(wx.EVT_MENU, self.on_player_next_chapter, self._player_chapters_next_item)
+            self._player_chapter_static_item_ids.append(int(self._player_chapters_next_item.GetId()))
+        except Exception:
+            self._player_chapters_next_item = None
+
+        for attr in ("_player_chapters_show_item", "_player_chapters_prev_item", "_player_chapters_next_item"):
+            try:
+                item = getattr(self, attr, None)
+                if item is not None:
+                    item.Enable(bool(has_chapters))
+            except Exception:
+                pass
+
+    def on_player_show_chapters(self, event):
+        pw = getattr(self, "player_window", None)
+        if pw:
+            try:
+                pw.show_chapters_menu()
+            except Exception:
+                pass
+
+    def on_player_prev_chapter(self, event):
+        pw = getattr(self, "player_window", None)
+        if pw:
+            try:
+                pw.prev_chapter()
+            except Exception:
+                pass
+
+    def on_player_next_chapter(self, event):
+        pw = getattr(self, "player_window", None)
+        if pw:
+            try:
+                pw.next_chapter()
+            except Exception:
+                pass
+
+    def on_player_chapter_jump(self, event, idx: int):
+        pw = getattr(self, "player_window", None)
+        if pw:
+            try:
+                pw.jump_to_chapter(int(idx))
             except Exception:
                 pass
 
