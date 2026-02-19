@@ -1411,12 +1411,7 @@ class MainFrame(wx.Frame):
 
         if event.ControlDown() and not event.ShiftDown() and not event.AltDown() and not event.MetaDown():
             pw = getattr(self, "player_window", None)
-            playing = False
-            try:
-                playing = bool(getattr(pw, "is_audio_playing", lambda: False)()) if pw else False
-            except Exception:
-                playing = False
-            if pw and playing:
+            if pw:
                 actions = {
                     wx.WXK_UP: lambda: pw.adjust_volume(int(getattr(pw, "volume_step", 5))),
                     wx.WXK_DOWN: lambda: pw.adjust_volume(-int(getattr(pw, "volume_step", 5))),
@@ -1424,11 +1419,30 @@ class MainFrame(wx.Frame):
                     wx.WXK_RIGHT: lambda: pw.seek_relative_ms(int(getattr(pw, "seek_forward_ms", 10000))),
                 }
                 try:
-                    if getattr(self, "_media_hotkeys", None) and self._media_hotkeys.handle_ctrl_key(event, actions):
-                        return
+                    if key in (wx.WXK_LEFT, wx.WXK_RIGHT):
+                        has_media = bool(getattr(pw, "has_media_loaded", lambda: False)())
+                        if not has_media:
+                            event.Skip()
+                            return
                 except Exception:
-                    # Fall back to default behavior below
                     pass
+
+                handled = False
+                try:
+                    if getattr(self, "_media_hotkeys", None):
+                        handled = bool(self._media_hotkeys.handle_ctrl_key(event, actions))
+                except Exception:
+                    handled = False
+                if handled:
+                    return
+
+                action = actions.get(key)
+                if action is not None:
+                    try:
+                        action()
+                        return
+                    except Exception:
+                        pass
         event.Skip()
 
     # -----------------------------------------------------------------

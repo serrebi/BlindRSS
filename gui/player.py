@@ -4461,16 +4461,35 @@ class PlayerFrame(wx.Frame):
                     pass
 
         if event.ControlDown() and not event.ShiftDown() and not event.AltDown() and not event.MetaDown():
-            if self.is_audio_playing():
-                actions = {
-                    wx.WXK_UP: lambda: self.adjust_volume(int(getattr(self, "volume_step", 5))),
-                    wx.WXK_DOWN: lambda: self.adjust_volume(-int(getattr(self, "volume_step", 5))),
-                    wx.WXK_LEFT: lambda: self.seek_relative_ms(-int(getattr(self, "seek_back_ms", 10000))),
-                    wx.WXK_RIGHT: lambda: self.seek_relative_ms(int(getattr(self, "seek_forward_ms", 10000))),
-                }
-                try:
-                    if getattr(self, "_media_hotkeys", None) and self._media_hotkeys.handle_ctrl_key(event, actions):
+            actions = {
+                wx.WXK_UP: lambda: self.adjust_volume(int(getattr(self, "volume_step", 5))),
+                wx.WXK_DOWN: lambda: self.adjust_volume(-int(getattr(self, "volume_step", 5))),
+                wx.WXK_LEFT: lambda: self.seek_relative_ms(-int(getattr(self, "seek_back_ms", 10000))),
+                wx.WXK_RIGHT: lambda: self.seek_relative_ms(int(getattr(self, "seek_forward_ms", 10000))),
+            }
+
+            try:
+                if key in (wx.WXK_LEFT, wx.WXK_RIGHT):
+                    if not self.has_media_loaded():
+                        event.Skip()
                         return
+            except Exception:
+                pass
+
+            handled = False
+            try:
+                if getattr(self, "_media_hotkeys", None):
+                    handled = bool(self._media_hotkeys.handle_ctrl_key(event, actions))
+            except Exception:
+                handled = False
+            if handled:
+                return
+
+            action = actions.get(key)
+            if action is not None:
+                try:
+                    action()
+                    return
                 except Exception:
                     pass
         event.Skip()

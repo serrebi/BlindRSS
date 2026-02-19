@@ -48,6 +48,16 @@ class _HotkeysStub:
         return False
 
 
+class _HotkeysAlwaysFalse:
+    def __init__(self):
+        self.calls = []
+
+    def handle_ctrl_key(self, event, actions):
+        self.calls.append(int(event.GetKeyCode()))
+        _ = actions
+        return False
+
+
 class _PlayerStub:
     def __init__(self):
         self.volume_step = 6
@@ -63,6 +73,9 @@ class _PlayerStub:
 
     def seek_relative_ms(self, delta):
         self.calls.append(("seek", int(delta)))
+
+    def has_media_loaded(self):
+        return True
 
 
 class _DummyMain:
@@ -114,4 +127,19 @@ def test_mainframe_ctrl_arrows_trigger_player_volume_and_seek_shortcuts():
         ("volume", -6),
         ("seek", -9000),
         ("seek", 12000),
+    ]
+
+
+def test_mainframe_ctrl_up_down_fallback_runs_when_hotkeys_returns_false():
+    host = _DummyMain()
+    player = _PlayerStub()
+    host.player_window = player
+    host._media_hotkeys = _HotkeysAlwaysFalse()
+
+    host.on_char_hook(_DummyKeyEvent(mainframe.wx.WXK_UP, ctrl=True))
+    host.on_char_hook(_DummyKeyEvent(mainframe.wx.WXK_DOWN, ctrl=True))
+
+    assert player.calls == [
+        ("volume", 6),
+        ("volume", -6),
     ]

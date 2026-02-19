@@ -75,6 +75,16 @@ class _HotkeysStub:
         return False
 
 
+class _HotkeysAlwaysFalse:
+    def __init__(self):
+        self.calls = []
+
+    def handle_ctrl_key(self, event, actions):
+        self.calls.append(int(event.GetKeyCode()))
+        _ = actions
+        return False
+
+
 def test_on_chapter_select_keeps_keyboard_browse_safe_when_closeup_supported():
     class _Frame:
         def __init__(self):
@@ -254,3 +264,31 @@ def test_on_char_hook_enter_commits_chapter_when_choice_has_focus():
     PlayerFrame.on_char_hook(frame, _DummyKeyEvent(wx.WXK_RETURN))
     PlayerFrame.on_char_hook(frame, _DummyKeyEvent(wx.WXK_NUMPAD_ENTER))
     assert frame.commits == 2
+
+
+def test_on_char_hook_ctrl_up_down_fallback_runs_when_hotkeys_returns_false():
+    class _Frame:
+        def __init__(self):
+            self.calls = []
+            self.volume_step = 4
+            self.seek_back_ms = 10000
+            self.seek_forward_ms = 10000
+            self._media_hotkeys = _HotkeysAlwaysFalse()
+
+        def _is_focus_in_chapter_choice(self):
+            return False
+
+        def has_media_loaded(self):
+            return True
+
+        def adjust_volume(self, delta):
+            self.calls.append(("volume", int(delta)))
+
+        def seek_relative_ms(self, delta):
+            self.calls.append(("seek", int(delta)))
+
+    frame = _Frame()
+    PlayerFrame.on_char_hook(frame, _DummyKeyEvent(wx.WXK_UP, ctrl=True))
+    PlayerFrame.on_char_hook(frame, _DummyKeyEvent(wx.WXK_DOWN, ctrl=True))
+
+    assert frame.calls == [("volume", 4), ("volume", -4)]
