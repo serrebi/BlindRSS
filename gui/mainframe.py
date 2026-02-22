@@ -28,6 +28,7 @@ from core.config import APP_DIR
 from core.models import Article
 from core import utils
 from core import article_extractor
+from core import translation as translation_mod
 from core import updater
 from core import windows_integration
 from core.version import APP_VERSION
@@ -171,6 +172,8 @@ class MainFrame(wx.Frame):
 
     def _check_media_dependencies(self):
         try:
+            if not bool(self.config_manager.get("prompt_missing_dependencies_on_startup", True)):
+                return
             missing_vlc, missing_ffmpeg, missing_ytdlp = dependency_check.check_media_tools_status()
             if missing_vlc or missing_ffmpeg or missing_ytdlp:
                 msg = "Missing recommended tools:\n"
@@ -181,6 +184,7 @@ class MainFrame(wx.Frame):
                 if missing_ytdlp:
                     msg += "- yt-dlp (required for YouTube and many media sources)\n"
                 msg += "\nWould you like to install them automatically (via winget/Ninite) and add them to PATH?"
+                msg += "\n\nTip: You can disable this prompt in Settings > General."
                 
                 if wx.MessageBox(msg, "Install Dependencies", wx.YES_NO | wx.ICON_QUESTION) == wx.YES:
                     self.SetStatusText("Installing dependencies...")
@@ -1288,7 +1292,11 @@ class MainFrame(wx.Frame):
         self._player_chapters_next_item = None
         
         tools_menu = wx.Menu()
-        find_feed_item = tools_menu.Append(wx.ID_ANY, "Find a &Podcast or RSS Feed...", "Find and add a podcast or RSS feed")
+        find_feed_item = tools_menu.Append(
+            wx.ID_ANY,
+            "Find a &Podcast or RSS Feed...\tCtrl+Shift+F",
+            "Find and add a podcast or RSS feed",
+        )
         tools_menu.AppendSeparator()
         settings_item = tools_menu.Append(wx.ID_PREFERENCES, "&Settings...", "Configure application")
         
@@ -1387,6 +1395,28 @@ class MainFrame(wx.Frame):
             if focus == self.tree:
                 self.on_remove_feed(None)
                 return
+
+        if key == wx.WXK_F2 and not event.ControlDown() and not event.ShiftDown() and not event.AltDown() and not event.MetaDown():
+            focus = self._get_focused_window()
+            if focus == self.tree:
+                try:
+                    self.on_edit_feed(None)
+                    return
+                except Exception:
+                    log.exception("Error opening feed editor on F2")
+
+        if (
+            event.ControlDown()
+            and event.ShiftDown()
+            and not event.AltDown()
+            and not event.MetaDown()
+            and key in (ord("F"), ord("f"))
+        ):
+            try:
+                self.on_find_feed(None)
+                return
+            except Exception:
+                log.exception("Error opening feed search on Ctrl+Shift+F")
 
         if (
             event.ControlDown()
@@ -2370,14 +2400,24 @@ class MainFrame(wx.Frame):
             
             import_item = menu.Append(wx.ID_ANY, "Import OPML Here...")
             self.Bind(wx.EVT_MENU, lambda e: self.on_import_opml(e, target_category=cat_title), import_item)
+
+            export_item = menu.Append(wx.ID_ANY, "Export Category to OPML...")
+            self.Bind(wx.EVT_MENU, lambda e: self.on_export_category_opml(e, category_title=cat_title), export_item)
             
         elif data["type"] == "feed":
             feed_id = str(data.get("id") or "").strip()
             refresh_feed_item = menu.Append(wx.ID_ANY, "Refresh Feed")
             self.Bind(wx.EVT_MENU, self.on_refresh_single_feed, refresh_feed_item)
 
-            edit_item = menu.Append(wx.ID_ANY, "Edit Feed...")
+            edit_item = menu.Append(wx.ID_ANY, "Edit Feed...\tF2")
             self.Bind(wx.EVT_MENU, self.on_edit_feed, edit_item)
+
+            try:
+                if bool(getattr(self.provider, "supports_feed_title_reset", lambda: False)()):
+                    reset_title_item = menu.Append(wx.ID_ANY, "Reset Title to Feed Default")
+                    self.Bind(wx.EVT_MENU, lambda e, fid=feed_id: self.on_reset_feed_title(e, fid), reset_title_item)
+            except Exception:
+                pass
 
             copy_url_item = menu.Append(wx.ID_ANY, "Copy Feed URL")
             self.Bind(wx.EVT_MENU, self.on_copy_feed_url, copy_url_item)
@@ -3979,6 +4019,14 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
+        # When translation is enabled, automatically queue the async full-text pipeline so the
+        # content pane is replaced with translated text without requiring an extra focus action.
+        try:
+            if self._translation_enabled_for_content_view():
+                self._schedule_fulltext_load_for_index(idx, force=False)
+        except Exception:
+            pass
+
 
     def on_content_focus(self, event):
         """When the content field receives focus, force an immediate full-text load for the selected article."""
@@ -4005,7 +4053,101 @@ class MainFrame(wx.Frame):
         url = (getattr(article, "url", None) or "").strip()
         article_id = getattr(article, "id", None) or getattr(article, "article_id", None) or str(idx)
         cache_key = url if url else f"article:{article_id}"
+        suffix = self._translation_fulltext_cache_suffix()
+        if suffix:
+            cache_key = f"{cache_key}{suffix}"
         return cache_key, url, str(article_id)
+
+    def _translation_enabled_for_content_view(self) -> bool:
+        cfg = self._translation_runtime_config()
+        return bool(cfg)
+
+    def _translation_runtime_config(self) -> dict | None:
+        try:
+            enabled = bool(self.config_manager.get("translation_enabled", False))
+        except Exception:
+            enabled = False
+        if not enabled:
+            return None
+
+        try:
+            provider = str(self.config_manager.get("translation_provider", "grok") or "grok").strip().lower()
+        except Exception:
+            provider = "grok"
+        if not provider:
+            provider = "grok"
+
+        try:
+            api_key = str(self.config_manager.get("translation_grok_api_key", "") or "").strip()
+        except Exception:
+            api_key = ""
+        if not api_key:
+            return None
+
+        try:
+            target_language = str(self.config_manager.get("translation_target_language", "en") or "en").strip()
+        except Exception:
+            target_language = "en"
+        if not target_language:
+            target_language = "en"
+
+        try:
+            grok_model = str(self.config_manager.get("translation_grok_model", "") or "").strip()
+        except Exception:
+            grok_model = ""
+
+        try:
+            timeout_s = int(self.config_manager.get("translation_timeout_seconds", 45) or 45)
+        except Exception:
+            timeout_s = 45
+        timeout_s = max(5, min(180, timeout_s))
+
+        try:
+            chunk_chars = int(self.config_manager.get("translation_chunk_chars", 3500) or 3500)
+        except Exception:
+            chunk_chars = 3500
+        chunk_chars = max(500, min(8000, chunk_chars))
+
+        return {
+            "provider": provider,
+            "api_key": api_key,
+            "target_language": target_language,
+            "grok_model": grok_model,
+            "timeout_s": timeout_s,
+            "chunk_chars": chunk_chars,
+        }
+
+    def _translation_fulltext_cache_suffix(self) -> str:
+        cfg = self._translation_runtime_config()
+        if not cfg:
+            return ""
+        provider = str(cfg.get("provider") or "grok").strip().lower() or "grok"
+        lang = str(cfg.get("target_language") or "en").strip().lower() or "en"
+        model = str(cfg.get("grok_model") or "").strip().lower()
+        if model:
+            return f"::tr[{provider}:{lang}:{model}]"
+        return f"::tr[{provider}:{lang}]"
+
+    def _translate_rendered_text_if_enabled(self, rendered: str) -> str:
+        cfg = self._translation_runtime_config()
+        if not cfg:
+            return rendered
+        text = str(rendered or "")
+        if not text.strip():
+            return text
+        try:
+            return translation_mod.translate_text(
+                text,
+                provider=str(cfg.get("provider") or "grok"),
+                api_key=str(cfg.get("api_key") or ""),
+                target_language=str(cfg.get("target_language") or "en"),
+                grok_model=str(cfg.get("grok_model") or ""),
+                timeout_s=int(cfg.get("timeout_s") or 45),
+                chunk_chars=int(cfg.get("chunk_chars") or 3500),
+            )
+        except Exception as e:
+            log.warning("Translation failed; showing original text: %s", e)
+            return text
 
     def _fulltext_prefetch_enabled(self) -> bool:
         try:
@@ -4483,6 +4625,12 @@ class MainFrame(wx.Frame):
                 cacheable = render_source in ("web", "provider")
             cache_source = render_source or ("feed" if not is_web_eligible else "unknown")
 
+            # Optional automatic translation (runs inside the background full-text worker).
+            try:
+                rendered = self._translate_rendered_text_if_enabled(rendered)
+            except Exception:
+                pass
+
             if apply_to_ui:
                 def apply():
                     # Only apply if selection still matches.
@@ -4884,7 +5032,7 @@ class MainFrame(wx.Frame):
             is_direct_media = False
             try:
                 if media_url:
-                    if media_type.startswith(("audio/", "video/")) or "podcast" in media_type:
+                    if utils.media_type_is_audio_video_or_podcast(media_type):
                         is_direct_media = True
                     else:
                         media_path = urlsplit(str(media_url)).path.lower()
@@ -5010,7 +5158,7 @@ class MainFrame(wx.Frame):
 
         # 2. Check direct media attachments
         if article.media_url:
-            media_type = (article.media_type or "").lower()
+            media_type = utils.canonical_media_type(article.media_type)
             url = article.media_url.lower()
             audio_exts = (".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".wav", ".flac")
             
@@ -5019,7 +5167,7 @@ class MainFrame(wx.Frame):
                 if not core.discovery.is_ytdlp_supported(article.media_url):
                     return False
 
-            if media_type.startswith(("audio/", "video/")) or "podcast" in media_type:
+            if utils.media_type_is_audio_video_or_podcast(media_type):
                 return True
             if media_type == "video/youtube":
                 return True
@@ -5081,10 +5229,13 @@ class MainFrame(wx.Frame):
             "audio/opus": ".opus",
             "audio/x-wav": ".wav",
             "audio/wav": ".wav",
-            "audio/flac": ".flac"
+            "audio/flac": ".flac",
+            "audio/x-flac": ".flac",
+            "application/flac": ".flac",
+            "application/x-flac": ".flac",
         }
         if content_type:
-            ctype = content_type.split(";")[0].strip().lower()
+            ctype = utils.canonical_media_type(content_type)
             if ctype in mapping:
                 return mapping[ctype]
             for prefix, mapped in mapping.items():
@@ -5359,6 +5510,57 @@ class MainFrame(wx.Frame):
             msg = f"{msg}\n\n{err}"
         wx.MessageBox(msg, "Error", wx.ICON_ERROR)
 
+    def on_reset_feed_title(self, event=None, feed_id: str | None = None):
+        fid = str(feed_id or "").strip()
+        if not fid:
+            item = self.tree.GetSelection()
+            if item and item.IsOk():
+                data = self.tree.GetItemData(item)
+                if data and data.get("type") == "feed":
+                    fid = str(data.get("id") or "").strip()
+        if not fid:
+            return
+
+        try:
+            if not bool(getattr(self.provider, "supports_feed_title_reset", lambda: False)()):
+                wx.MessageBox(
+                    "This provider does not support resetting feed titles.",
+                    "Not supported",
+                    wx.ICON_INFORMATION,
+                )
+                return
+        except Exception:
+            return
+
+        threading.Thread(target=self._reset_feed_title_thread, args=(fid,), daemon=True).start()
+
+    def _reset_feed_title_thread(self, feed_id: str):
+        ok = False
+        err = None
+        try:
+            resetter = getattr(self.provider, "reset_feed_title", None)
+            if callable(resetter):
+                ok = bool(resetter(feed_id))
+            if ok and callable(getattr(self.provider, "refresh_feed", None)):
+                try:
+                    self.provider.refresh_feed(feed_id)
+                except Exception as refresh_exc:
+                    err = str(refresh_exc) or type(refresh_exc).__name__
+                    ok = False
+        except Exception as e:
+            err = str(e) or type(e).__name__
+            ok = False
+        wx.CallAfter(self._post_reset_feed_title, ok, err)
+
+    def _post_reset_feed_title(self, ok: bool, err: str | None = None):
+        if ok:
+            self.refresh_feeds()
+            return
+        msg = "Could not reset feed title."
+        if err:
+            msg = f"{msg}\n\n{err}"
+        wx.MessageBox(msg, "Error", wx.ICON_ERROR)
+
     def on_import_opml(self, event, target_category=None):
         dlg = wx.FileDialog(self, "Import OPML", wildcard="OPML files (*.opml)|*.opml", style=wx.FD_OPEN)
         if dlg.ShowModal() == wx.ID_OK:
@@ -5397,6 +5599,57 @@ class MainFrame(wx.Frame):
                 wx.EndBusyCursor()
         dlg.Destroy()
 
+    def _normalize_category_title_for_export(self, category_title: str | None) -> str:
+        cat = str(category_title or "").strip()
+        return cat or "Uncategorized"
+
+    def _collect_category_feeds_for_export(self, category_title: str | None):
+        target_cat = self._normalize_category_title_for_export(category_title)
+        target_key = target_cat.casefold()
+        feeds = list((self.provider.get_feeds() if self.provider else []) or [])
+        out = []
+        for feed in feeds:
+            feed_cat = str(getattr(feed, "category", "") or "").strip() or "Uncategorized"
+            if feed_cat.casefold() == target_key:
+                out.append(feed)
+        return out
+
+    def _export_category_opml_to_path(self, category_title: str | None, path: str):
+        target_cat = self._normalize_category_title_for_export(category_title)
+        feeds = self._collect_category_feeds_for_export(target_cat)
+        if not feeds:
+            return False, f'No feeds found in category "{target_cat}".'
+        ok = bool(utils.write_opml(feeds, path))
+        if ok:
+            return True, None
+        return False, f'Export failed for category "{target_cat}".'
+
+    def on_export_category_opml(self, event, category_title=None):
+        target_cat = self._normalize_category_title_for_export(category_title)
+        safe_cat = re.sub(r'[\\/:*?"<>|]+', "_", target_cat).strip().rstrip(".") or "category"
+        default_name = f"{safe_cat}.opml"
+        dlg = wx.FileDialog(
+            self,
+            f'Export "{target_cat}" Category OPML',
+            wildcard="OPML files (*.opml)|*.opml",
+            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
+            defaultFile=default_name,
+        )
+        if dlg.ShowModal() == wx.ID_OK:
+            path = dlg.GetPath()
+            wx.BeginBusyCursor()
+            try:
+                ok, err = self._export_category_opml_to_path(target_cat, path)
+                if ok:
+                    wx.MessageBox("Export successful.")
+                else:
+                    wx.MessageBox(err or "Export failed.")
+            except Exception as e:
+                wx.MessageBox(f"Export failed: {e}")
+            finally:
+                wx.EndBusyCursor()
+        dlg.Destroy()
+
     def on_settings(self, event):
         old_provider = None
         try:
@@ -5415,6 +5668,10 @@ class MainFrame(wx.Frame):
             old_start_on_login = bool(self.config_manager.get("start_on_windows_login", False))
         except Exception:
             old_start_on_login = False
+        try:
+            old_translation_suffix = self._translation_fulltext_cache_suffix()
+        except Exception:
+            old_translation_suffix = ""
 
         notification_feed_entries = self._collect_notification_feed_entries()
         dlg = SettingsDialog(self, self.config_manager.config, notification_feeds=notification_feed_entries)
@@ -5453,6 +5710,28 @@ class MainFrame(wx.Frame):
                         self._clear_fulltext_prefetch_queue()
                 except Exception:
                     pass
+
+            try:
+                new_translation_suffix = self._translation_fulltext_cache_suffix()
+            except Exception:
+                new_translation_suffix = old_translation_suffix
+            if new_translation_suffix != old_translation_suffix:
+                try:
+                    self._fulltext_cache.clear()
+                    self._fulltext_cache_source.clear()
+                    self._fulltext_loading_url = None
+                except Exception:
+                    pass
+                try:
+                    idx = self.list_ctrl.GetFirstSelected()
+                except Exception:
+                    idx = -1
+                if idx is not None and idx >= 0:
+                    try:
+                        self._fulltext_token += 1
+                        self._schedule_fulltext_load_for_index(int(idx), force=True)
+                    except Exception:
+                        pass
 
             try:
                 self._search_mode = self._normalize_search_mode(self.config_manager.get("search_mode", "title_content"))

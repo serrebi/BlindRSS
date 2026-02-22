@@ -9,6 +9,11 @@ def test_default_sort_and_notification_settings():
     assert int(DEFAULT_CONFIG.get("windows_notifications_max_per_refresh", -1)) == 0
     assert DEFAULT_CONFIG.get("windows_notifications_excluded_feeds", None) == []
     assert bool(DEFAULT_CONFIG.get("start_on_windows_login", True)) is False
+    assert bool(DEFAULT_CONFIG.get("translation_enabled", True)) is False
+    assert str(DEFAULT_CONFIG.get("translation_provider", "")) == "grok"
+    assert str(DEFAULT_CONFIG.get("translation_target_language", "")) == "en"
+    assert str(DEFAULT_CONFIG.get("translation_grok_model", "x")) == ""
+    assert str(DEFAULT_CONFIG.get("translation_grok_api_key", "x")) == ""
 
 
 def test_windows_integration_launch_parts_script_mode(monkeypatch, tmp_path):

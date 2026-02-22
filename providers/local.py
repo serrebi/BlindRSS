@@ -87,7 +87,11 @@ class LocalProvider(RSSProvider):
         conn = get_connection()
         try:
             c = conn.cursor()
-            c.execute("SELECT id, url, title, category, etag, last_modified FROM feeds WHERE id = ?", (feed_id,))
+            c.execute(
+                "SELECT id, url, title, category, etag, last_modified, COALESCE(title_is_custom, 0) "
+                "FROM feeds WHERE id = ?",
+                (feed_id,),
+            )
             row = c.fetchone()
         finally:
             conn.close()
@@ -112,7 +116,9 @@ class LocalProvider(RSSProvider):
         try:
             c = conn.cursor()
             # Fetch etag/last_modified for conditional get plus metadata for UI updates
-            c.execute("SELECT id, url, title, category, etag, last_modified FROM feeds")
+            c.execute(
+                "SELECT id, url, title, category, etag, last_modified, COALESCE(title_is_custom, 0) FROM feeds"
+            )
             feeds = c.fetchall()
         finally:
             conn.close()
@@ -160,7 +166,7 @@ class LocalProvider(RSSProvider):
 
     def _refresh_single_feed(self, feed_row, host_limits, feed_timeout, retries, progress_cb, force=False):
         # Each thread gets its own connection
-        feed_id, feed_url, feed_title, feed_category, etag, last_modified = feed_row
+        feed_id, feed_url, feed_title, feed_category, etag, last_modified, title_is_custom = feed_row
         status = "ok"
         new_items = 0
         new_article_summaries = []
@@ -304,9 +310,12 @@ class LocalProvider(RSSProvider):
                     c.execute("SELECT 1 FROM feeds WHERE id = ? LIMIT 1", (feed_id,))
                     if not c.fetchone():
                         return
+                    title_to_store = (
+                        str(feed_title or "").strip() if bool(int(title_is_custom or 0)) and str(feed_title or "").strip() else final_title
+                    )
                     c.execute(
                         "UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?",
-                        (final_title, None, None, feed_id),
+                        (title_to_store, None, None, feed_id),
                     )
                     conn.commit()
 
@@ -446,9 +455,12 @@ class LocalProvider(RSSProvider):
                     if not c.fetchone():
                         return
                     # Clear conditional-cache metadata (HTML listing refresh does not use ETag/Last-Modified)
+                    title_to_store = (
+                        str(feed_title or "").strip() if bool(int(title_is_custom or 0)) and str(feed_title or "").strip() else final_title
+                    )
                     c.execute(
                         "UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?",
-                        (final_title, None, None, feed_id),
+                        (title_to_store, None, None, feed_id),
                     )
                     conn.commit()
 
@@ -579,8 +591,11 @@ class LocalProvider(RSSProvider):
                     return
                 
                 final_title = d.feed.get('title', final_title)
+                title_to_store = (
+                    str(feed_title or "").strip() if bool(int(title_is_custom or 0)) and str(feed_title or "").strip() else final_title
+                )
                 c.execute("UPDATE feeds SET title = ?, etag = ?, last_modified = ? WHERE id = ?", 
-                          (final_title, new_etag, new_last_modified, feed_id))
+                          (title_to_store, new_etag, new_last_modified, feed_id))
                 
                 # Pre-fetch existing articles to avoid N+1 SELECTs
                 c.execute("SELECT id, date FROM articles WHERE feed_id = ?", (feed_id,))
@@ -707,30 +722,32 @@ class LocalProvider(RSSProvider):
                         if valid_enclosure:
                             enc_type = getattr(valid_enclosure, "type", "") or ""
                             enc_href = getattr(valid_enclosure, "href", None)
-                            if enc_type.startswith("audio/") or enc_type.startswith("video/"):
+                            enc_type_norm = utils.canonical_media_type(enc_type) or enc_type
+                            if utils.media_type_is_audio_video_or_podcast(enc_type_norm):
                                 media_url = enc_href
-                                media_type = enc_type
+                                media_type = enc_type_norm
                             elif enc_href and enc_href.lower().endswith(audio_exts):
                                 media_url = enc_href
-                                media_type = enc_type or "audio/mpeg"
+                                media_type = enc_type_norm or "audio/mpeg"
 
                     # 3. Check media:content (common in RSS 2.0 / MRSS)
                     if not media_url and 'media_content' in entry:
                         for mc in entry.media_content:
                             mc_url = mc.get('url')
                             mc_type = mc.get('type')
+                            mc_type_norm = utils.canonical_media_type(mc_type) or mc_type
                             if mc_url:
                                 # Skip thumbnails or images
-                                if mc_type and mc_type.startswith('image/'):
+                                if mc_type_norm and str(mc_type_norm).startswith('image/'):
                                     continue
                                 if any(mc_url.lower().endswith(ext) for ext in image_exts):
                                     continue
                                 
                                 # Accept if audio/video or looks like audio
-                                if (mc_type and (mc_type.startswith('audio/') or mc_type.startswith('video/'))) or \
+                                if utils.media_type_is_audio_video_or_podcast(mc_type_norm) or \
                                    mc_url.lower().endswith(audio_exts):
                                     media_url = mc_url
-                                    media_type = mc_type or "audio/mpeg"
+                                    media_type = mc_type_norm or "audio/mpeg"
                                     break
 
                     # 4. Check NPR-specific extraction if still no media
@@ -1411,29 +1428,60 @@ class LocalProvider(RSSProvider):
         conn = get_connection()
         try:
             c = conn.cursor()
-            c.execute("SELECT url, title, category FROM feeds WHERE id = ?", (feed_id,))
+            c.execute(
+                "SELECT url, title, category, COALESCE(title_is_custom, 0) FROM feeds WHERE id = ?",
+                (feed_id,),
+            )
             row = c.fetchone()
             if not row:
                 return False
-            cur_url, cur_title, cur_category = row[0], row[1], row[2]
+            cur_url, cur_title, cur_category, cur_title_is_custom = row[0], row[1], row[2], row[3]
             new_url = url if url is not None else cur_url
             new_title = title if title is not None else cur_title
             new_category = category if category is not None else cur_category
+            new_title_is_custom = int(cur_title_is_custom or 0)
+
+            # Preserve refresh-managed titles unless the user explicitly changes the title.
+            if title is not None and str(title) != str(cur_title):
+                new_title_is_custom = 1
 
             if str(new_url or "") != str(cur_url or ""):
                 c.execute(
-                    "UPDATE feeds SET url = ?, title = ?, category = ?, etag = NULL, last_modified = NULL WHERE id = ?",
-                    (new_url, new_title, new_category, feed_id),
+                    "UPDATE feeds SET url = ?, title = ?, title_is_custom = ?, category = ?, etag = NULL, last_modified = NULL WHERE id = ?",
+                    (new_url, new_title, new_title_is_custom, new_category, feed_id),
                 )
             else:
                 c.execute(
-                    "UPDATE feeds SET url = ?, title = ?, category = ? WHERE id = ?",
-                    (new_url, new_title, new_category, feed_id),
+                    "UPDATE feeds SET url = ?, title = ?, title_is_custom = ?, category = ? WHERE id = ?",
+                    (new_url, new_title, new_title_is_custom, new_category, feed_id),
                 )
             conn.commit()
             return True
         except Exception as e:
             log.error(f"Update feed error: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def supports_feed_title_reset(self) -> bool:
+        return True
+
+    def reset_feed_title(self, feed_id: str) -> bool:
+        if not feed_id:
+            return False
+        conn = get_connection()
+        try:
+            c = conn.cursor()
+            # Clear the custom-title flag so the next refresh restores the feed-provided title.
+            # Also clear validators so a subsequent refresh re-fetches metadata promptly.
+            c.execute(
+                "UPDATE feeds SET title_is_custom = 0, etag = NULL, last_modified = NULL WHERE id = ?",
+                (feed_id,),
+            )
+            conn.commit()
+            return int(c.rowcount or 0) > 0
+        except Exception as e:
+            log.error(f"Reset feed title error: {e}")
             return False
         finally:
             conn.close()

@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     "active_provider": "local",
     "debug_mode": False,
     "refresh_on_startup": True,
+    "prompt_missing_dependencies_on_startup": True,
     "auto_check_updates": True,
     "start_on_windows_login": False,
     "sounds_enabled": True,
@@ -89,6 +90,12 @@ DEFAULT_CONFIG = {
     "persistent_searches": [],
     "show_search_field": True,
     "search_mode": "title_content",
+    # Translation (future/experimental feature wiring)
+    "translation_enabled": False,
+    "translation_provider": "grok",
+    "translation_target_language": "en",
+    "translation_grok_model": "",
+    "translation_grok_api_key": "",
     "article_sort_by": "date",
     "article_sort_ascending": False,
     "providers": {
@@ -109,6 +116,13 @@ DEFAULT_CONFIG = {
             "app_key": "",
             "refresh_token": "",
             "token_expires_at": 0,
+            # Cache subscription/category metadata longer than local RSS providers to avoid
+            # exhausting Inoreader's low per-app API quotas during periodic UI refresh checks.
+            "metadata_cache_ttl_seconds": 3600,
+            # Short-lived per-view article cache to absorb repeated UI paging/selection requests.
+            "article_cache_ttl_seconds": 90,
+            # stream/contents page size; larger values reduce request count at the expense of payload size.
+            "article_request_page_size": 100,
             # Inoreader redirect URIs are typically required to be HTTPS. For localhost callbacks we
             # use an HTTPS URL and complete authorization by pasting the redirected URL back into
             # BlindRSS (no local TLS server needed).

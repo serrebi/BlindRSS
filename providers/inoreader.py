@@ -35,11 +35,59 @@ class InoreaderProvider(RSSProvider):
         self._categories_cache = None
         self._feeds_cache_time = 0.0
         self._categories_cache_time = 0.0
-        self._cache_ttl_s = 60
+        self._cache_ttl_s = self._metadata_cache_ttl_s()
         self._force_next_fetch = False
+        self._article_cache_lock = threading.Lock()
+        self._article_view_cache: Dict[str, Dict[str, Any]] = {}
+        self._article_cache_ttl_s = self._articles_cache_ttl_s()
+        self._article_page_n = self._articles_page_n()
 
     def get_name(self) -> str:
         return "Inoreader"
+
+    def _metadata_cache_ttl_s(self) -> int:
+        """Cache feed/category metadata aggressively to avoid burning Inoreader API quotas.
+
+        Inoreader provider refresh is server-backed (no local feed crawling), so polling
+        subscription metadata every UI refresh interval offers little value but can easily hit
+        the default 100 req/day app quota. Manual refresh still bypasses this via cache invalidation.
+        """
+        try:
+            raw = (
+                self.conf.get("metadata_cache_ttl_seconds")
+                if isinstance(self.conf, dict)
+                else None
+            )
+            ttl = int(raw if raw is not None else 3600)
+        except Exception:
+            ttl = 3600
+        return max(60, min(24 * 3600, ttl))
+
+    def _articles_cache_ttl_s(self) -> int:
+        """Short-lived per-view article cache to absorb repeated UI requests."""
+        try:
+            raw = (
+                self.conf.get("article_cache_ttl_seconds")
+                if isinstance(self.conf, dict)
+                else None
+            )
+            ttl = int(raw if raw is not None else 90)
+        except Exception:
+            ttl = 90
+        return max(5, min(900, ttl))
+
+    def _articles_page_n(self) -> int:
+        """API page size for stream/contents requests (larger pages reduce request count)."""
+        try:
+            raw = (
+                self.conf.get("article_request_page_size")
+                if isinstance(self.conf, dict)
+                else None
+            )
+            n = int(raw if raw is not None else 100)
+        except Exception:
+            n = 100
+        return max(20, min(1000, n))
 
     def _timeout_s(self) -> int:
         """Default network timeout for Inoreader API calls.
@@ -74,6 +122,11 @@ class InoreaderProvider(RSSProvider):
         if self._cache_ttl_s <= 0:
             return False
         return (time.time() - cache_time) < self._cache_ttl_s
+
+    def _article_cache_is_fresh(self, cache_time: float) -> bool:
+        if self._article_cache_ttl_s <= 0:
+            return False
+        return (time.time() - float(cache_time or 0.0)) < self._article_cache_ttl_s
 
     def _build_categories_from_feeds(self, feeds: List[Feed]) -> List[str]:
         categories = []
@@ -119,6 +172,13 @@ class InoreaderProvider(RSSProvider):
 
     def _mark_cache_dirty(self) -> None:
         self._force_next_fetch = True
+
+    def _clear_article_cache(self) -> None:
+        with self._article_cache_lock:
+            self._article_view_cache.clear()
+
+    def _invalidate_article_cache(self) -> None:
+        self._clear_article_cache()
 
     def _parse_retry_after(self, value: str | None) -> int | None:
         if not value:
@@ -310,6 +370,183 @@ class InoreaderProvider(RSSProvider):
         feed_id = self._resolve_item_feed_id(item, fallback_feed_id)
         return utils.build_cache_id(str(article_id), feed_id, self.get_name())
 
+    def _build_articles_request(self, feed_id: str):
+        real_feed_id = feed_id
+        params: Dict[str, Any] = {"output": "json"}
+
+        if feed_id.startswith("unread:"):
+            real_feed_id = feed_id[7:]
+            params["xt"] = "user/-/state/com.google/read"
+        elif feed_id.startswith("read:"):
+            real_feed_id = feed_id[5:]
+            params["it"] = "user/-/state/com.google/read"
+
+        if real_feed_id == "all":
+            stream_id = "user/-/state/com.google/reading-list"
+        elif real_feed_id.startswith("category:"):
+            label = real_feed_id.split(":", 1)[1]
+            stream_id = f"user/-/label/{label}"
+        elif real_feed_id.startswith("favorites:") or real_feed_id.startswith("starred:"):
+            stream_id = "user/-/state/com.google/starred"
+        else:
+            stream_id = real_feed_id
+
+        encoded_stream_id = urllib.parse.quote(str(stream_id or ""), safe="")
+        url = f"{self.base_url}/stream/contents/{encoded_stream_id}"
+        fallback_feed_id = real_feed_id or stream_id or feed_id
+        return url, params, fallback_feed_id
+
+    def _items_to_articles(self, items: List[Dict[str, Any]], fallback_feed_id: str) -> List[Article]:
+        if not items:
+            return []
+
+        article_ids = [item.get("id") for item in items if item.get("id") is not None]
+        chapters_map = utils.get_chapters_batch(article_ids)
+        articles: List[Article] = []
+
+        for item in items:
+            content = ""
+            if "summary" in item:
+                content = (item.get("summary") or {}).get("content", "")
+            if "content" in item:
+                content = (item.get("content") or {}).get("content", "")
+
+            media_url = None
+            media_type = None
+            if "enclosure" in item and item["enclosure"]:
+                encs = item["enclosure"]
+                if isinstance(encs, list) and encs:
+                    media_url = (encs[0] or {}).get("href")
+                    media_type = (encs[0] or {}).get("type")
+
+            article_id = item.get("id")
+            if article_id is None:
+                continue
+            article_feed_id = self._resolve_item_feed_id(item, fallback_feed_id)
+            cache_id = self._build_item_cache_id(item, fallback_feed_id)
+
+            alt = item.get("alternate") or [{}]
+            if not isinstance(alt, list):
+                alt = [{}]
+            first_alt = alt[0] if alt else {}
+            article_url = ""
+            try:
+                article_url = first_alt.get("href", "")
+            except Exception:
+                article_url = ""
+
+            date = utils.normalize_date(
+                str(item.get("published", "")),
+                item.get("title", ""),
+                content,
+                article_url,
+            )
+
+            chapters = chapters_map.get(article_id, [])
+
+            is_fav = False
+            is_read_flag = False
+            for cat in item.get("categories", []) or []:
+                if "starred" in str(cat):
+                    is_fav = True
+                if "read" in str(cat) and "com.google" in str(cat):
+                    is_read_flag = True
+
+            articles.append(Article(
+                id=article_id,
+                feed_id=article_feed_id,
+                title=item.get("title", "No Title"),
+                url=article_url,
+                content=content,
+                date=date,
+                author=item.get("author", "Unknown"),
+                is_read=is_read_flag,
+                is_favorite=is_fav,
+                media_url=media_url,
+                media_type=media_type,
+                chapters=chapters,
+                cache_id=cache_id,
+            ))
+
+        return articles
+
+    def _new_article_view_state(self, feed_id: str) -> Dict[str, Any]:
+        url, base_params, fallback_feed_id = self._build_articles_request(feed_id)
+        return {
+            "feed_id": str(feed_id or ""),
+            "url": url,
+            "base_params": dict(base_params),
+            "fallback_feed_id": fallback_feed_id,
+            "articles": [],
+            "id_set": set(),
+            "continuation": None,
+            "complete": False,
+            "updated_at": 0.0,
+        }
+
+    def _get_article_view_state(self, feed_id: str, require_fresh: bool = True) -> Dict[str, Any] | None:
+        key = str(feed_id or "")
+        with self._article_cache_lock:
+            state = self._article_view_cache.get(key)
+            if not state:
+                return None
+            if require_fresh and not self._article_cache_is_fresh(state.get("updated_at", 0.0)):
+                self._article_view_cache.pop(key, None)
+                return None
+            return state
+
+    def _save_article_view_state(self, feed_id: str, state: Dict[str, Any]) -> None:
+        key = str(feed_id or "")
+        state["updated_at"] = time.time()
+        with self._article_cache_lock:
+            self._article_view_cache[key] = state
+
+    def _fetch_articles_page_from_api(self, state: Dict[str, Any]) -> None:
+        params = dict(state.get("base_params") or {})
+        params["n"] = self._article_page_n
+        continuation = state.get("continuation")
+        if continuation:
+            params["c"] = continuation
+
+        resp = self._request("get", state["url"], params=params)
+        data = resp.json() if resp is not None else {}
+        items = data.get("items") or []
+        continuation = data.get("continuation")
+
+        new_articles = self._items_to_articles(items, state.get("fallback_feed_id", ""))
+        for article in new_articles:
+            cache_id = str(getattr(article, "cache_id", "") or "")
+            if not cache_id:
+                cache_id = str(getattr(article, "id", "") or "")
+            if not cache_id or cache_id in state["id_set"]:
+                continue
+            state["id_set"].add(cache_id)
+            state["articles"].append(article)
+
+        state["continuation"] = continuation
+        if not items or not continuation:
+            state["complete"] = True
+
+    def _get_articles_page_cached(self, feed_id: str, offset: int, limit: int):
+        target = max(0, int(offset)) + max(0, int(limit))
+        state = self._get_article_view_state(feed_id, require_fresh=True)
+        if state is None:
+            state = self._new_article_view_state(feed_id)
+
+        while (not state.get("complete")) and len(state.get("articles", [])) < target:
+            self._fetch_articles_page_from_api(state)
+            self._save_article_view_state(feed_id, state)
+
+        # Cache freshly built state even if no remote fetch was needed (keeps TTL current for repeated opens).
+        if state.get("updated_at", 0.0) <= 0:
+            self._save_article_view_state(feed_id, state)
+
+        articles = list(state.get("articles") or [])
+        total = len(articles) if state.get("complete") else None
+        start = max(0, int(offset))
+        end = start + max(0, int(limit))
+        return articles[start:end], total
+
     def _iter_unread_ids(self, stream_id: str):
         if not stream_id:
             return
@@ -361,6 +598,12 @@ class InoreaderProvider(RSSProvider):
     def refresh(self, progress_cb=None, force: bool = False) -> bool:
         if force:
             self._mark_cache_dirty()
+            self._clear_article_cache()
+            return True
+        # Inoreader is already server-synced; avoid triggering subscription/category fetches on
+        # every client refresh tick when metadata is still cached.
+        if self._get_cached_feeds(allow_stale=False) is not None:
+            return False
         return True
 
     def get_feeds(self) -> List[Feed]:
@@ -405,97 +648,33 @@ class InoreaderProvider(RSSProvider):
             raise
 
     def get_articles(self, feed_id: str) -> List[Article]:
-        if not self._has_required_auth(): return []
         try:
-            real_feed_id = feed_id
-            params = {"output": "json", "n": 50}
-
-            if feed_id.startswith("unread:"):
-                real_feed_id = feed_id[7:]
-                params["xt"] = "user/-/state/com.google/read"
-            elif feed_id.startswith("read:"):
-                real_feed_id = feed_id[5:]
-                params["it"] = "user/-/state/com.google/read"
-
-            if real_feed_id == "all":
-                stream_id = "user/-/state/com.google/reading-list"
-            elif real_feed_id.startswith("category:"):
-                label = real_feed_id.split(":", 1)[1]
-                stream_id = f"user/-/label/{label}"
-            elif real_feed_id.startswith("favorites:") or real_feed_id.startswith("starred:"):
-                stream_id = "user/-/state/com.google/starred"
-            else:
-                stream_id = real_feed_id
-
-            # Inoreader docs: streamId is part of the path (not a query parameter).
-            # It must be URL-encoded as it contains slashes/colons.
-            encoded_stream_id = urllib.parse.quote(str(stream_id or ""), safe="")
-            url = f"{self.base_url}/stream/contents/{encoded_stream_id}"
-            resp = self._request("get", url, params=params)
-            data = resp.json()
-            
-            items = data.get("items", [])
-            article_ids = [item["id"] for item in items]
-            chapters_map = utils.get_chapters_batch(article_ids)
-            
-            articles = []
-            fallback_feed_id = real_feed_id or stream_id or feed_id
-            for item in items:
-                content = ""
-                if "summary" in item: content = item["summary"]["content"]
-                if "content" in item: content = item["content"]["content"]
-                
-                # Media
-                media_url = None
-                media_type = None
-                if "enclosure" in item and item["enclosure"]:
-                    # Inoreader might return list or single? API says list usually.
-                    encs = item["enclosure"]
-                    if isinstance(encs, list) and encs:
-                        media_url = encs[0].get("href")
-                        media_type = encs[0].get("type")
-                
-                article_id = item["id"]
-                article_feed_id = self._resolve_item_feed_id(item, fallback_feed_id)
-                cache_id = self._build_item_cache_id(item, fallback_feed_id)
-                
-                # Date
-                date = utils.normalize_date(
-                    str(item.get("published", "")),
-                    item.get("title", ""),
-                    content,
-                    item.get("alternate", [{}])[0].get("href", ""),
-                )
-
-                chapters = chapters_map.get(article_id, [])
-
-                is_fav = False
-                is_read_flag = False
-                for cat in item.get("categories", []):
-                    if "starred" in cat:
-                        is_fav = True
-                    if "read" in cat and "com.google" in cat:
-                        is_read_flag = True
-
-                articles.append(Article(
-                    id=article_id,
-                    feed_id=article_feed_id,
-                    title=item.get("title", "No Title"),
-                    url=item.get("alternate", [{}])[0].get("href", ""),
-                    content=content,
-                    date=date,
-                    author=item.get("author", "Unknown"),
-                    is_read=is_read_flag,
-                    is_favorite=is_fav,
-                    media_url=media_url,
-                    media_type=media_type,
-                    chapters=chapters,
-                    cache_id=cache_id,
-                ))
+            articles, _total = self.get_articles_page(feed_id, offset=0, limit=50)
             return articles
         except Exception as e:
             log.error(f"Inoreader Articles Error: {e}")
             return []
+
+    def get_articles_page(self, feed_id: str, offset: int = 0, limit: int = 200):
+        if not self._has_required_auth():
+            return [], 0
+        try:
+            off = max(0, int(offset or 0))
+            lim = max(0, int(limit or 0))
+            if lim <= 0:
+                return [], 0
+            return self._get_articles_page_cached(feed_id, off, lim)
+        except RateLimitError:
+            stale = self._get_article_view_state(feed_id, require_fresh=False)
+            if stale:
+                articles = list(stale.get("articles") or [])
+                off = max(0, int(offset or 0))
+                lim = max(0, int(limit or 0))
+                return articles[off:off + lim], (len(articles) if stale.get("complete") else None)
+            raise
+        except Exception as e:
+            log.error(f"Inoreader Articles Page Error: {e}")
+            return [], 0
 
     def get_article_chapters(self, article_id: str) -> List[Dict]:
         # Similar to Miniflux, we need media info.
@@ -513,6 +692,7 @@ class InoreaderProvider(RSSProvider):
                 "i": article_id,
                 "a": "user/-/state/com.google/read"
             })
+            self._invalidate_article_cache()
             return True
         except Exception as e:
             log.error(f"Inoreader Mark Read Error: {e}")
@@ -525,13 +705,17 @@ class InoreaderProvider(RSSProvider):
                 "i": article_id,
                 "r": "user/-/state/com.google/read"
             })
+            self._invalidate_article_cache()
             return True
         except Exception as e:
             log.error(f"Inoreader Mark Unread Error: {e}")
             return False
 
     def mark_read_batch(self, article_ids: List[str]) -> bool:
-        return self._set_read_state_batch(article_ids, True)
+        ok = self._set_read_state_batch(article_ids, True)
+        if ok:
+            self._invalidate_article_cache()
+        return ok
 
     def mark_all_read(self, feed_id: str) -> bool:
         if not self._has_required_auth():
@@ -551,6 +735,7 @@ class InoreaderProvider(RSSProvider):
                 data={"s": stream_id, "ts": str(ts)},
             )
             if getattr(resp, "ok", False):
+                self._invalidate_article_cache()
                 return True
         except Exception as e:
             log.error(f"Inoreader mark-all-as-read failed for {feed_id}: {e}")
@@ -560,7 +745,10 @@ class InoreaderProvider(RSSProvider):
             unread_ids = list(self._iter_unread_ids(stream_id))
             if not unread_ids:
                 return True
-            return self._set_read_state_batch(unread_ids, True)
+            ok = self._set_read_state_batch(unread_ids, True)
+            if ok:
+                self._invalidate_article_cache()
+            return ok
         except Exception as e:
             log.error(f"Inoreader mark-all fallback failed for {feed_id}: {e}")
             return False
@@ -576,6 +764,7 @@ class InoreaderProvider(RSSProvider):
                 "i": article_id,
                 action: "user/-/state/com.google/starred"
             })
+            self._invalidate_article_cache()
             return True
         except Exception as e:
             log.error(f"Inoreader Set Favorite Error: {e}")
@@ -611,6 +800,7 @@ class InoreaderProvider(RSSProvider):
             
             self._request("post", f"{self.base_url}/subscription/edit", data=data)
             self._mark_cache_dirty()
+            self._clear_article_cache()
             return True
         except Exception as e:
             log.error(f"Inoreader Add Feed Error: {e}")
@@ -624,6 +814,7 @@ class InoreaderProvider(RSSProvider):
                 "ac": "unsubscribe"
             })
             self._mark_cache_dirty()
+            self._clear_article_cache()
             return True
         except Exception as e:
             log.error(f"Inoreader Remove Feed Error: {e}")
@@ -661,6 +852,7 @@ class InoreaderProvider(RSSProvider):
             resp = self._request("post", f"{self.base_url}/subscription/edit", data=data)
             if resp.ok:
                 self._mark_cache_dirty()
+                self._clear_article_cache()
             return resp.ok
         except Exception as e:
             log.error(f"Inoreader Update Feed Error: {e}")
@@ -721,6 +913,7 @@ class InoreaderProvider(RSSProvider):
             })
             if resp.ok:
                 self._mark_cache_dirty()
+                self._clear_article_cache()
             return resp.ok
         except Exception as e:
             log.error(f"Inoreader Rename Category Error: {e}")
@@ -734,6 +927,7 @@ class InoreaderProvider(RSSProvider):
                 "s": tag
             })
             self._mark_cache_dirty()
+            self._clear_article_cache()
             return True
         except Exception as e:
             log.error(f"Inoreader Delete Category Error: {e}")

@@ -109,6 +109,13 @@ class RSSProvider(abc.ABC):
 
     def update_feed(self, feed_id: str, title: str = None, url: str = None, category: str = None) -> bool:
         return False
+
+    # Optional: providers may support resetting a user-customized title back to provider-managed/default.
+    def supports_feed_title_reset(self) -> bool:
+        return False
+
+    def reset_feed_title(self, feed_id: str) -> bool:
+        return False
         
     def import_opml(self, path: str, target_category: str = None) -> bool:
         """Default implementation using utils.parse_opml and add_feed."""

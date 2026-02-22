@@ -473,6 +473,7 @@ def detect_media(url: str, timeout: int = 20) -> tuple[str | None, str | None]:
                 ext = data.get("ext", "")
                 if ext == "mp3": mtype = "audio/mpeg"
                 elif ext == "m4a": mtype = "audio/mp4"
+                elif ext == "flac": mtype = "audio/flac"
                 elif ext == "mp4": mtype = "video/mp4"
                 else: mtype = "application/octet-stream" # Generic
                 

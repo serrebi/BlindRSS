@@ -494,6 +494,100 @@ def _strip_castanet_boilerplate(text: str) -> str:
     return t
 
 
+def _strip_bloomberg_boilerplate(text: str) -> str:
+    """Remove Bloomberg page chrome/footer when extraction falls back to page markdown."""
+    original = _normalize_whitespace(text or "")
+    paras = _split_paragraphs(original)
+    if not paras:
+        return ""
+
+    def _is_author_line(p: str) -> bool:
+        p = (p or "").strip()
+        if re.match(r"(?i)^By\s+\[[^\]]+\]\(", p):
+            return True
+        # Bloomberg sometimes emits plain author text (e.g., "By Bloomberg News")
+        return bool(re.match(r"(?i)^By\s+[A-Z][A-Za-z .,'’\\-]{1,100}$", p))
+
+    def _is_bloomberg_meta_or_control(p: str) -> bool:
+        p = (p or "").strip()
+        if not p:
+            return True
+        if re.match(r"(?i)^(Gift this article|Add us on Google|Save|Translate|Listen)$", p):
+            return True
+        if re.match(r"(?i)^(Updated on|Published on)$", p):
+            return True
+        if re.match(r"(?i)^[A-Z][a-z]+\s+\d{1,2},\s+\d{4}\s+at\s+\d{1,2}:\d{2}\s+[AP]M\s+UTC$", p):
+            return True
+        if p.startswith("[Contact us: Provide news feedback or report an error]("):
+            return True
+        if p.startswith("[Confidential tip? Send a tip to our reporters]("):
+            return True
+        if p.startswith("[Site feedback: Take our Survey]("):
+            return True
+        if p.startswith("### **Takeaways** by Bloomberg AI") or p.startswith("### Takeaways by Bloomberg AI"):
+            return True
+        if p.startswith("Takeaways by Bloomberg AI"):
+            return True
+        return False
+
+    def _is_bloomberg_end_marker(p: str) -> bool:
+        p = (p or "").strip()
+        if not p:
+            return False
+        if p.startswith("[Before it's here, it's on the Bloomberg Terminal"):
+            return True
+        if p.startswith("### More From Bloomberg") or p.startswith("### Top Reads"):
+            return True
+        if p.startswith("[Home](https://www.bloomberg.com/)[BTV+]"):
+            return True
+        if p.startswith("[Terms of Service]("):
+            return True
+        if "Bloomberg L.P. All Rights Reserved" in p:
+            return True
+        if p.startswith("Explore live news and interviews"):
+            return True
+        if p.startswith("Get unlimited access for just"):
+            return True
+        if p.startswith("By accepting, you agree to our updated [Terms of Service"):
+            return True
+        return False
+
+    def _is_bloomberg_header_line(p: str) -> bool:
+        return _is_author_line(p) or _is_bloomberg_meta_or_control(p)
+
+    start = 0
+    header_anchor_idx = None
+    for i, p in enumerate(paras):
+        if _is_author_line(p):
+            header_anchor_idx = i
+            break
+    if header_anchor_idx is None:
+        for i, p in enumerate(paras):
+            if _is_bloomberg_meta_or_control(p):
+                header_anchor_idx = i
+                break
+
+    if header_anchor_idx is not None:
+        seq_start = header_anchor_idx
+        while seq_start > 0 and _is_bloomberg_header_line(paras[seq_start - 1]):
+            seq_start -= 1
+
+        i = seq_start
+        while i < len(paras) and _is_bloomberg_header_line(paras[i]):
+            i += 1
+        if i < len(paras):
+            start = i
+
+    end = len(paras)
+    for i in range(start, len(paras)):
+        if _is_bloomberg_end_marker(paras[i]):
+            end = i
+            break
+
+    cleaned = "\n\n".join(paras[start:end]).strip()
+    return cleaned or original
+
+
 def _postprocess_extracted_text(text: str, url: str) -> str:
     t = _normalize_whitespace(text or "")
     if not t:
@@ -521,6 +615,8 @@ def _postprocess_extracted_text(text: str, url: str) -> str:
         t = _strip_canada_boilerplate(t)
     elif "castanet.net" in netloc:
         t = _strip_castanet_boilerplate(t)
+    elif "bloomberg.com" in netloc:
+        t = _strip_bloomberg_boilerplate(t)
 
     return _normalize_whitespace(t)
 

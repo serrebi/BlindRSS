@@ -12,6 +12,7 @@ from core.discovery import discover_feed, is_ytdlp_supported
 from core import utils
 from core.casting import CastingManager
 from core import inoreader_oauth
+from core import translation as translation_mod
 
 log = logging.getLogger(__name__)
 
@@ -304,6 +305,197 @@ class ExcludeNotificationFeedsDialog(wx.Dialog):
 
 
 class SettingsDialog(wx.Dialog):
+    _TRANSLATION_LANGUAGE_PRESETS = [
+        ("Abkhazian (ab)", "ab"),
+        ("Afar (aa)", "aa"),
+        ("Afrikaans (af)", "af"),
+        ("Akan (ak)", "ak"),
+        ("Albanian (sq)", "sq"),
+        ("Amharic (am)", "am"),
+        ("Arabic (ar)", "ar"),
+        ("Aragonese (an)", "an"),
+        ("Armenian (hy)", "hy"),
+        ("Assamese (as)", "as"),
+        ("Avaric (av)", "av"),
+        ("Avestan (ae)", "ae"),
+        ("Aymara (ay)", "ay"),
+        ("Azerbaijani (az)", "az"),
+        ("Bambara (bm)", "bm"),
+        ("Bashkir (ba)", "ba"),
+        ("Basque (eu)", "eu"),
+        ("Belarusian (be)", "be"),
+        ("Bengali (bn)", "bn"),
+        ("Bislama (bi)", "bi"),
+        ("Bosnian (bs)", "bs"),
+        ("Breton (br)", "br"),
+        ("Bulgarian (bg)", "bg"),
+        ("Burmese (my)", "my"),
+        ("Catalan (ca)", "ca"),
+        ("Chamorro (ch)", "ch"),
+        ("Chechen (ce)", "ce"),
+        ("Chichewa (ny)", "ny"),
+        ("Chinese (Simplified) (zh-CN)", "zh-CN"),
+        ("Chinese (Traditional) (zh-TW)", "zh-TW"),
+        ("Chinese (zh)", "zh"),
+        ("Church Slavic (cu)", "cu"),
+        ("Chuvash (cv)", "cv"),
+        ("Cornish (kw)", "kw"),
+        ("Corsican (co)", "co"),
+        ("Cree (cr)", "cr"),
+        ("Croatian (hr)", "hr"),
+        ("Czech (cs)", "cs"),
+        ("Danish (da)", "da"),
+        ("Divehi (dv)", "dv"),
+        ("Dutch (nl)", "nl"),
+        ("Dzongkha (dz)", "dz"),
+        ("English (en)", "en"),
+        ("Esperanto (eo)", "eo"),
+        ("Estonian (et)", "et"),
+        ("Ewe (ee)", "ee"),
+        ("Faroese (fo)", "fo"),
+        ("Fijian (fj)", "fj"),
+        ("Finnish (fi)", "fi"),
+        ("French (fr)", "fr"),
+        ("Fulah (ff)", "ff"),
+        ("Galician (gl)", "gl"),
+        ("Ganda (lg)", "lg"),
+        ("Georgian (ka)", "ka"),
+        ("German (de)", "de"),
+        ("Guarani (gn)", "gn"),
+        ("Gujarati (gu)", "gu"),
+        ("Haitian (ht)", "ht"),
+        ("Hausa (ha)", "ha"),
+        ("Hebrew (he)", "he"),
+        ("Herero (hz)", "hz"),
+        ("Hindi (hi)", "hi"),
+        ("Hiri Motu (ho)", "ho"),
+        ("Hungarian (hu)", "hu"),
+        ("Icelandic (is)", "is"),
+        ("Ido (io)", "io"),
+        ("Igbo (ig)", "ig"),
+        ("Indonesian (id)", "id"),
+        ("Interlingua (International Auxiliary Language Association) (ia)", "ia"),
+        ("Interlingue (ie)", "ie"),
+        ("Inuktitut (iu)", "iu"),
+        ("Inupiaq (ik)", "ik"),
+        ("Irish (ga)", "ga"),
+        ("Italian (it)", "it"),
+        ("Japanese (ja)", "ja"),
+        ("Javanese (jv)", "jv"),
+        ("Kalaallisut (kl)", "kl"),
+        ("Kannada (kn)", "kn"),
+        ("Kanuri (kr)", "kr"),
+        ("Kashmiri (ks)", "ks"),
+        ("Kazakh (kk)", "kk"),
+        ("Khmer (km)", "km"),
+        ("Kikuyu (ki)", "ki"),
+        ("Kinyarwanda (rw)", "rw"),
+        ("Kirghiz (ky)", "ky"),
+        ("Komi (kv)", "kv"),
+        ("Kongo (kg)", "kg"),
+        ("Korean (ko)", "ko"),
+        ("Kuanyama (kj)", "kj"),
+        ("Kurdish (ku)", "ku"),
+        ("Lao (lo)", "lo"),
+        ("Latin (la)", "la"),
+        ("Latvian (lv)", "lv"),
+        ("Limburgan (li)", "li"),
+        ("Lingala (ln)", "ln"),
+        ("Lithuanian (lt)", "lt"),
+        ("Luba-Katanga (lu)", "lu"),
+        ("Luxembourgish (lb)", "lb"),
+        ("Macedonian (mk)", "mk"),
+        ("Malagasy (mg)", "mg"),
+        ("Malay (macrolanguage) (ms)", "ms"),
+        ("Malayalam (ml)", "ml"),
+        ("Maltese (mt)", "mt"),
+        ("Manx (gv)", "gv"),
+        ("Maori (mi)", "mi"),
+        ("Marathi (mr)", "mr"),
+        ("Marshallese (mh)", "mh"),
+        ("Modern Greek (1453-) (el)", "el"),
+        ("Mongolian (mn)", "mn"),
+        ("Nauru (na)", "na"),
+        ("Navajo (nv)", "nv"),
+        ("Ndonga (ng)", "ng"),
+        ("Nepali (macrolanguage) (ne)", "ne"),
+        ("North Ndebele (nd)", "nd"),
+        ("Northern Sami (se)", "se"),
+        ("Norwegian (no)", "no"),
+        ("Norwegian Bokmal (nb)", "nb"),
+        ("Norwegian Nynorsk (nn)", "nn"),
+        ("Occitan (post 1500) (oc)", "oc"),
+        ("Ojibwa (oj)", "oj"),
+        ("Oriya (macrolanguage) (or)", "or"),
+        ("Oromo (om)", "om"),
+        ("Ossetian (os)", "os"),
+        ("Pali (pi)", "pi"),
+        ("Panjabi (pa)", "pa"),
+        ("Persian (fa)", "fa"),
+        ("Polish (pl)", "pl"),
+        ("Portuguese (Brazil) (pt-BR)", "pt-BR"),
+        ("Portuguese (Portugal) (pt-PT)", "pt-PT"),
+        ("Portuguese (pt)", "pt"),
+        ("Pushto (ps)", "ps"),
+        ("Quechua (qu)", "qu"),
+        ("Romanian (ro)", "ro"),
+        ("Romansh (rm)", "rm"),
+        ("Rundi (rn)", "rn"),
+        ("Russian (ru)", "ru"),
+        ("Samoan (sm)", "sm"),
+        ("Sango (sg)", "sg"),
+        ("Sanskrit (sa)", "sa"),
+        ("Sardinian (sc)", "sc"),
+        ("Scottish Gaelic (gd)", "gd"),
+        ("Serbian (sr)", "sr"),
+        ("Serbo-Croatian (sh)", "sh"),
+        ("Shona (sn)", "sn"),
+        ("Sichuan Yi (ii)", "ii"),
+        ("Sindhi (sd)", "sd"),
+        ("Sinhala (si)", "si"),
+        ("Slovak (sk)", "sk"),
+        ("Slovenian (sl)", "sl"),
+        ("Somali (so)", "so"),
+        ("South Ndebele (nr)", "nr"),
+        ("Southern Sotho (st)", "st"),
+        ("Spanish (es)", "es"),
+        ("Sundanese (su)", "su"),
+        ("Swahili (macrolanguage) (sw)", "sw"),
+        ("Swati (ss)", "ss"),
+        ("Swedish (sv)", "sv"),
+        ("Tagalog (tl)", "tl"),
+        ("Tahitian (ty)", "ty"),
+        ("Tajik (tg)", "tg"),
+        ("Tamil (ta)", "ta"),
+        ("Tatar (tt)", "tt"),
+        ("Telugu (te)", "te"),
+        ("Thai (th)", "th"),
+        ("Tibetan (bo)", "bo"),
+        ("Tigrinya (ti)", "ti"),
+        ("Tonga (Tonga Islands) (to)", "to"),
+        ("Tsonga (ts)", "ts"),
+        ("Tswana (tn)", "tn"),
+        ("Turkish (tr)", "tr"),
+        ("Turkmen (tk)", "tk"),
+        ("Twi (tw)", "tw"),
+        ("Uighur (ug)", "ug"),
+        ("Ukrainian (uk)", "uk"),
+        ("Urdu (ur)", "ur"),
+        ("Uzbek (uz)", "uz"),
+        ("Venda (ve)", "ve"),
+        ("Vietnamese (vi)", "vi"),
+        ("Volapuk (vo)", "vo"),
+        ("Walloon (wa)", "wa"),
+        ("Welsh (cy)", "cy"),
+        ("Western Frisian (fy)", "fy"),
+        ("Wolof (wo)", "wo"),
+        ("Xhosa (xh)", "xh"),
+        ("Yiddish (yi)", "yi"),
+        ("Yoruba (yo)", "yo"),
+        ("Zhuang (za)", "za"),
+        ("Zulu (zu)", "zu"),
+    ]
+
     def __init__(self, parent, config, notification_feeds=None):
         super().__init__(parent, title="Settings", size=(500, 450))
         
@@ -469,6 +661,15 @@ class SettingsDialog(wx.Dialog):
         self.refresh_startup_chk = wx.CheckBox(general_panel, label="Automatically refresh feeds upon start")
         self.refresh_startup_chk.SetValue(bool(config.get("refresh_on_startup", True)))
         general_sizer.Add(self.refresh_startup_chk, 0, wx.ALL, 5)
+
+        self.prompt_missing_deps_chk = wx.CheckBox(
+            general_panel,
+            label="Ask to install missing media dependencies on startup",
+        )
+        self.prompt_missing_deps_chk.SetValue(
+            bool(config.get("prompt_missing_dependencies_on_startup", True))
+        )
+        general_sizer.Add(self.prompt_missing_deps_chk, 0, wx.ALL, 5)
 
         self.start_on_login_chk = wx.CheckBox(general_panel, label="Start BlindRSS when Windows starts")
         self.start_on_login_chk.SetValue(bool(config.get("start_on_windows_login", False)))
@@ -796,6 +997,112 @@ class SettingsDialog(wx.Dialog):
 
         notifications_panel.SetSizer(notifications_sizer)
         notebook.AddPage(notifications_panel, "Notifications")
+
+        # Translate Tab (automatic article translation via Grok/xAI)
+        translate_panel = wx.Panel(notebook)
+        translate_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        translate_note = (
+            "Configure automatic article translation.\n"
+            "Your API key is stored locally in config.json."
+        )
+        translate_sizer.Add(wx.StaticText(translate_panel, label=translate_note), 0, wx.ALL, 8)
+
+        self.translation_enabled_chk = wx.CheckBox(
+            translate_panel,
+            label="Enable automatic translation for article content",
+        )
+        self.translation_enabled_chk.SetValue(bool(config.get("translation_enabled", False)))
+        translate_sizer.Add(self.translation_enabled_chk, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        provider_row = wx.BoxSizer(wx.HORIZONTAL)
+        provider_row.Add(wx.StaticText(translate_panel, label="Provider:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.translation_provider_ctrl = wx.Choice(translate_panel, choices=["grok"])
+        if not self.translation_provider_ctrl.SetStringSelection(str(config.get("translation_provider", "grok") or "grok")):
+            self.translation_provider_ctrl.SetSelection(0)
+        provider_row.Add(self.translation_provider_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
+        translate_sizer.Add(provider_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self._translation_language_label_to_code = {
+            str(label): str(code)
+            for label, code in self._TRANSLATION_LANGUAGE_PRESETS
+        }
+        self._translation_language_code_to_label = {
+            str(code).lower(): str(label)
+            for label, code in self._TRANSLATION_LANGUAGE_PRESETS
+        }
+
+        target_row = wx.BoxSizer(wx.HORIZONTAL)
+        target_row.Add(
+            wx.StaticText(translate_panel, label="Target language:"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            8,
+        )
+        self.translation_target_language_ctrl = wx.ComboBox(
+            translate_panel,
+            choices=[label for label, _code in self._TRANSLATION_LANGUAGE_PRESETS],
+            style=wx.CB_DROPDOWN,
+        )
+        self.translation_target_language_ctrl.SetValue(
+            self._translation_language_display_value(
+                str(config.get("translation_target_language", "en") or "en")
+            )
+        )
+        target_row.Add(self.translation_target_language_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        translate_sizer.Add(target_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        translate_sizer.Add(
+            wx.StaticText(
+                translate_panel,
+                label="Choose a language or type a code (e.g. en, es, fr, pt-BR).",
+            ),
+            0,
+            wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            8,
+        )
+
+        model_row = wx.BoxSizer(wx.HORIZONTAL)
+        model_row.Add(
+            wx.StaticText(translate_panel, label="Grok model (optional):"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            8,
+        )
+        model_choices = [
+            str(m)
+            for m in getattr(translation_mod, "_DEFAULT_MODEL_CANDIDATES", ())
+            if str(m or "").strip()
+        ]
+        self.translation_grok_model_ctrl = wx.ComboBox(
+            translate_panel,
+            choices=list(dict.fromkeys(model_choices)),
+            style=wx.CB_DROPDOWN,
+        )
+        self.translation_grok_model_ctrl.SetValue(str(config.get("translation_grok_model", "") or ""))
+        model_row.Add(self.translation_grok_model_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        translate_sizer.Add(model_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        translate_sizer.Add(
+            wx.StaticText(
+                translate_panel,
+                label="Pick a common model or type a custom one. Leave blank for auto fallback order.",
+            ),
+            0,
+            wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            8,
+        )
+
+        api_key_row = wx.BoxSizer(wx.HORIZONTAL)
+        api_key_row.Add(wx.StaticText(translate_panel, label="Grok API key:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.translation_grok_api_key_ctrl = wx.TextCtrl(
+            translate_panel,
+            value=str(config.get("translation_grok_api_key", "") or ""),
+            style=wx.TE_PASSWORD,
+        )
+        api_key_row.Add(self.translation_grok_api_key_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        translate_sizer.Add(api_key_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        translate_panel.SetSizer(translate_sizer)
+        notebook.AddPage(translate_panel, "Translate")
 
         # Main Sizer
         main_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -1141,6 +1448,41 @@ class SettingsDialog(wx.Dialog):
         except Exception:
             return ""
 
+    def _translation_language_display_value(self, raw_value: str) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return "English (en)"
+        try:
+            mapped = (self._translation_language_code_to_label or {}).get(value.lower())
+        except Exception:
+            mapped = None
+        return mapped or value
+
+    def _translation_language_code_from_ui(self) -> str:
+        try:
+            raw = str(self.translation_target_language_ctrl.GetValue() or "").strip()
+        except Exception:
+            raw = ""
+        if not raw:
+            return "en"
+
+        try:
+            direct = (self._translation_language_label_to_code or {}).get(raw)
+        except Exception:
+            direct = None
+        if direct:
+            return str(direct)
+
+        # Accept manually typed values that include a label suffix like "Spanish (es)".
+        if raw.endswith(")") and "(" in raw:
+            try:
+                maybe = raw[raw.rfind("(") + 1:-1].strip()
+            except Exception:
+                maybe = ""
+            if maybe:
+                return maybe
+        return raw
+
     def _build_soundcard_choices(self, selected_device_id: str) -> list[tuple[str, str]]:
         choices: list[tuple[str, str]] = [("System Default", "")]
         seen_ids = {""}
@@ -1260,6 +1602,7 @@ class SettingsDialog(wx.Dialog):
             "start_maximized": self.start_maximized_chk.GetValue(),
             "debug_mode": self.debug_mode_chk.GetValue(),
             "refresh_on_startup": self.refresh_startup_chk.GetValue(),
+            "prompt_missing_dependencies_on_startup": self.prompt_missing_deps_chk.GetValue(),
             "start_on_windows_login": self.start_on_login_chk.GetValue(),
             "remember_last_feed": self.remember_last_feed_chk.GetValue(),
             "auto_check_updates": self.auto_update_chk.GetValue(),
@@ -1271,6 +1614,11 @@ class SettingsDialog(wx.Dialog):
             "windows_notifications_max_per_refresh": self.windows_notifications_max_ctrl.GetValue(),
             "windows_notifications_show_summary_when_capped": self.windows_notifications_summary_chk.GetValue(),
             "windows_notifications_excluded_feeds": sorted(self._notification_excluded_feed_ids),
+            "translation_enabled": self.translation_enabled_chk.GetValue(),
+            "translation_provider": self.translation_provider_ctrl.GetStringSelection() or "grok",
+            "translation_target_language": self._translation_language_code_from_ui(),
+            "translation_grok_model": (self.translation_grok_model_ctrl.GetValue() or "").strip(),
+            "translation_grok_api_key": (self.translation_grok_api_key_ctrl.GetValue() or "").strip(),
             "active_provider": self.provider_choice.GetStringSelection(),
             "providers": providers,
         }

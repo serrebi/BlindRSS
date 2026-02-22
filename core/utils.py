@@ -22,6 +22,13 @@ HEADERS = {
     'Accept': 'application/rss+xml,application/xml,application/atom+xml,text/xml;q=0.9,*/*;q=0.8'
 }
 
+_FLAC_MIME_ALIASES = {
+    "audio/flac",
+    "audio/x-flac",
+    "application/flac",
+    "application/x-flac",
+}
+
 
 def add_revalidation_headers(headers: dict | None = None) -> dict:
     """Return headers with cache-bypass directives for proxy/CDN revalidation."""
@@ -31,6 +38,21 @@ def add_revalidation_headers(headers: dict | None = None) -> dict:
     merged.setdefault("Pragma", "no-cache")
     merged.setdefault("Expires", "0")
     return merged
+
+
+def canonical_media_type(media_type: str | None) -> str:
+    """Normalize common media MIME aliases to a stable value."""
+    mt = str(media_type or "").split(";", 1)[0].strip().lower()
+    if mt in _FLAC_MIME_ALIASES:
+        return "audio/flac"
+    return mt
+
+
+def media_type_is_audio_video_or_podcast(media_type: str | None) -> bool:
+    mt = canonical_media_type(media_type)
+    if not mt:
+        return False
+    return mt.startswith(("audio/", "video/")) or "podcast" in mt
 
 # Common timezone abbreviations mapping for dateutil
 TZINFOS = {
@@ -474,7 +496,7 @@ def fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=None
 
     # 2) ID3 CHAP frames if audio
     media_url_str = str(media_url or "")
-    media_type_l = str(media_type or "").lower()
+    media_type_l = canonical_media_type(media_type)
     media_path_l = urllib.parse.urlsplit(media_url_str).path.lower() or media_url_str.lower()
     audio_exts = (".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".wav", ".flac")
 

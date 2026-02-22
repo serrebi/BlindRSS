@@ -200,6 +200,7 @@ def init_db():
             id TEXT PRIMARY KEY,
             url TEXT,
             title TEXT,
+            title_is_custom INTEGER DEFAULT 0,
             category TEXT,
             icon_url TEXT
         )''')
@@ -294,6 +295,10 @@ def init_db():
             pass
         try:
             c.execute("ALTER TABLE feeds ADD COLUMN last_modified TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("ALTER TABLE feeds ADD COLUMN title_is_custom INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
             
