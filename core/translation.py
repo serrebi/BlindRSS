@@ -9,8 +9,15 @@ log = logging.getLogger(__name__)
 
 _XAI_CHAT_COMPLETIONS_URL = "https://api.x.ai/v1/chat/completions"
 _DEFAULT_MODEL_CANDIDATES = (
+    # Prefer fast non-reasoning models for translation latency/cost, then fall back.
+    "grok-4-1-fast-non-reasoning",
+    "grok-4-fast-non-reasoning",
     "grok-3-mini",
+    "grok-4-1-fast-reasoning",
+    "grok-4-fast-reasoning",
+    "grok-4-0709",
     "grok-3",
+    # Legacy aliases retained for older xAI API accounts/compatibility.
     "grok-4",
     "grok-beta",
 )
@@ -85,21 +92,88 @@ def _extract_chat_completion_text(payload: dict) -> str:
     return ""
 
 
-def _model_not_found_error(resp: requests.Response | None, err_text: str = "") -> bool:
+def _error_message_text(value) -> str:
+    if isinstance(value, dict):
+        # xAI/OpenAI-style error envelopes may nest the useful text under error.message.
+        for key in ("message", "error", "detail", "code", "type"):
+            try:
+                nested = _error_message_text(value.get(key))
+            except Exception:
+                nested = ""
+            if nested:
+                return nested
+        try:
+            return str(value)
+        except Exception:
+            return ""
+    if isinstance(value, (list, tuple)):
+        parts = []
+        for item in value:
+            txt = _error_message_text(item)
+            if txt:
+                parts.append(txt)
+        return " ".join(parts)
+    if value is None:
+        return ""
+    try:
+        return str(value)
+    except Exception:
+        return ""
+
+
+def _retryable_model_error(resp: requests.Response | None, err_text: str = "") -> bool:
     if resp is not None:
         try:
-            if int(getattr(resp, "status_code", 0) or 0) not in (400, 404):
+            # Some xAI keys can see a model in the catalog but still get model-level
+            # access denials (403) for a specific model. Retrying another candidate is safe.
+            if int(getattr(resp, "status_code", 0) or 0) not in (400, 403, 404):
                 return False
         except Exception:
             return False
         try:
             data = resp.json()
-            msg = str(data.get("error") or data.get("message") or data).lower()
-            return ("model" in msg) and ("not found" in msg or "unknown" in msg or "invalid" in msg)
+            msg = _error_message_text(data).lower()
+            if "model" not in msg:
+                return False
+            return any(
+                token in msg
+                for token in (
+                    "not found",
+                    "unknown",
+                    "invalid",
+                    "unavailable",
+                    "not available",
+                    "unsupported",
+                    "not allowed",
+                    "not permitted",
+                    "permission",
+                    "access",
+                    "entitled",
+                    "tier",
+                )
+            )
         except Exception:
             pass
     txt = str(err_text or "").lower()
-    return ("model" in txt) and ("not found" in txt or "unknown" in txt or "invalid" in txt)
+    if "model" not in txt:
+        return False
+    return any(
+        token in txt
+        for token in (
+            "not found",
+            "unknown",
+            "invalid",
+            "unavailable",
+            "not available",
+            "unsupported",
+            "not allowed",
+            "not permitted",
+            "permission",
+            "access",
+            "entitled",
+            "tier",
+        )
+    )
 
 
 def _translate_chunk_grok(
@@ -162,7 +236,7 @@ def _translate_chunk_grok(
                     err_text = resp.text or ""
                 except Exception:
                     err_text = ""
-                if _model_not_found_error(resp, err_text):
+                if _retryable_model_error(resp, err_text):
                     last_err = RuntimeError(f"Grok model '{model}' unavailable")
                     continue
                 try:
@@ -177,7 +251,7 @@ def _translate_chunk_grok(
             raise RuntimeError("Grok returned an empty translation response.")
         except Exception as e:
             last_err = e
-            if _model_not_found_error(getattr(e, "response", None), str(e)):
+            if _retryable_model_error(getattr(e, "response", None), str(e)):
                 continue
             break
 

@@ -247,3 +247,83 @@ def test_miniflux_refresh_skips_targeted_refresh_when_unhealthy(monkeypatch):
     p.refresh(force=False)
 
     assert ("PUT", "/v1/feeds/10/refresh") not in calls
+
+
+def test_miniflux_refresh_backs_off_repeated_targeted_feed_500s(monkeypatch):
+    p = _provider(feed_timeout_seconds=10)
+    calls = []
+    now = datetime.now(timezone.utc)
+    stale = (now - timedelta(hours=4)).isoformat()
+    mono = {"t": 1000.0}
+
+    feeds_payload = [
+        {
+            "id": 52,
+            "title": "Problem Feed",
+            "category": {"title": "Podcasts"},
+            "checked_at": stale,
+            "parsing_error_count": 0,
+        }
+    ]
+
+    def _fake_monotonic():
+        return mono["t"]
+
+    def _fake_req(method, endpoint, json=None, params=None):
+        calls.append((method, endpoint))
+        if endpoint == "/v1/feeds/refresh":
+            p._last_request_info = {
+                "ok": True,
+                "used_cache": False,
+                "status_code": 204,
+                "endpoint": endpoint,
+                "method": method,
+            }
+            return None
+        if endpoint == "/v1/feeds":
+            p._last_request_info = {
+                "ok": True,
+                "used_cache": False,
+                "status_code": 200,
+                "endpoint": endpoint,
+                "method": method,
+            }
+            return feeds_payload
+        if endpoint == "/v1/feeds/counters":
+            p._last_request_info = {
+                "ok": True,
+                "used_cache": False,
+                "status_code": 200,
+                "endpoint": endpoint,
+                "method": method,
+            }
+            return {"unreads": {"52": 0}}
+        if endpoint == "/v1/feeds/52/refresh":
+            p._last_request_info = {
+                "ok": False,
+                "used_cache": False,
+                "status_code": 500,
+                "endpoint": endpoint,
+                "method": method,
+            }
+            return None
+        p._last_request_info = {
+            "ok": True,
+            "used_cache": False,
+            "status_code": 204,
+            "endpoint": endpoint,
+            "method": method,
+        }
+        return None
+
+    monkeypatch.setattr("providers.miniflux.time.monotonic", _fake_monotonic)
+    monkeypatch.setattr(p, "_req", _fake_req)
+
+    p.refresh(force=False)
+    p.refresh(force=False)  # still inside cooldown -> should skip targeted feed retry
+
+    assert calls.count(("PUT", "/v1/feeds/52/refresh")) == 1
+
+    mono["t"] += 61.0  # first cooldown expires (60s)
+    p.refresh(force=False)
+    assert calls.count(("PUT", "/v1/feeds/52/refresh")) == 2

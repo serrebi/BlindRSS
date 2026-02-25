@@ -83,6 +83,41 @@ def test_translate_text_grok_retries_on_missing_model(monkeypatch):
     assert int(calls[1]["timeout"]) == 12
 
 
+def test_translate_text_grok_retries_on_model_access_denied(monkeypatch):
+    calls = []
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        calls.append((json or {}).get("model"))
+        if len(calls) == 1:
+            return _Resp(
+                403,
+                payload={"error": {"message": "You do not have access to model grok-4-fast-non-reasoning"}},
+                text='{"error":{"message":"You do not have access to model grok-4-fast-non-reasoning"}}',
+            )
+        return _Resp(
+            200,
+            payload={
+                "choices": [
+                    {"message": {"content": "Hola"}}
+                ]
+            },
+        )
+
+    monkeypatch.setattr(tr.requests, "post", _fake_post)
+
+    out = tr.translate_text_grok(
+        "Hello",
+        api_key="secret-key",
+        target_language="es",
+        model_candidates=["grok-4-fast-non-reasoning", "grok-3-mini"],
+        timeout_s=12,
+        chunk_chars=1000,
+    )
+
+    assert out == "Hola"
+    assert calls == ["grok-4-fast-non-reasoning", "grok-3-mini"]
+
+
 def test_translate_text_dispatches_to_grok(monkeypatch):
     seen = {}
 
@@ -132,3 +167,9 @@ def test_translate_text_grok_uses_explicit_model_only(monkeypatch):
 
     assert out == "Hallo"
     assert calls == ["my-custom-grok-model"]
+
+
+def test_default_grok_model_candidates_include_fast_non_reasoning_variants():
+    candidates = tuple(getattr(tr, "_DEFAULT_MODEL_CANDIDATES", ()))
+    assert "grok-4-fast-non-reasoning" in candidates
+    assert "grok-4-1-fast-non-reasoning" in candidates

@@ -202,6 +202,132 @@ def get_ytdlp_cookie_sources(url: str | None = None) -> list[tuple]:
     return _build_cookie_sources()
 
 
+def _youtube_search_entries_to_channel_feeds(entries, limit: int = 10) -> list[dict]:
+    """Convert yt-dlp ytsearch entries into unique YouTube channel RSS feed results."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    try:
+        limit = max(1, min(50, int(limit or 10)))
+    except Exception:
+        limit = 10
+
+    for entry in (entries or []):
+        if not isinstance(entry, dict):
+            continue
+
+        channel_id = str(entry.get("channel_id") or "").strip()
+        channel_url = str(entry.get("channel_url") or "").strip()
+        entry_url = str(entry.get("url") or entry.get("webpage_url") or "").strip()
+        uploader_url = str(entry.get("uploader_url") or "").strip()
+
+        # ytsearch can return a channel item directly or video items that include channel metadata.
+        if not channel_url:
+            for candidate in (entry_url, uploader_url):
+                if not candidate:
+                    continue
+                low = candidate.lower()
+                if "youtube.com" in low and any(p in low for p in ("/channel/", "/user/", "/@")):
+                    channel_url = candidate
+                    break
+
+        feed_url = ""
+        if channel_id:
+            feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+        elif channel_url:
+            try:
+                feed_url = get_ytdlp_feed_url(channel_url) or ""
+            except Exception:
+                feed_url = ""
+        if not feed_url:
+            continue
+
+        dedupe_key = channel_id or feed_url
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        title = (
+            str(entry.get("channel") or "").strip()
+            or str(entry.get("uploader") or "").strip()
+            or str(entry.get("title") or "").strip()
+            or channel_id
+            or feed_url
+        )
+        handle = str(entry.get("uploader_id") or "").strip()
+        detail = "YouTube channel"
+        if handle:
+            detail = f"{detail} ({handle})"
+
+        out.append(
+            {
+                "title": title,
+                "detail": detail,
+                "url": feed_url,
+            }
+        )
+        if len(out) >= limit:
+            break
+
+    return out
+
+
+def search_youtube_channels(term: str, limit: int = 10, timeout: int = 15) -> list[dict]:
+    """Search YouTube via yt-dlp and return channel RSS feed candidates.
+
+    Results are normalized for the Feed Search dialog and use native YouTube RSS URLs.
+    """
+    query = str(term or "").strip()
+    if not query:
+        return []
+
+    try:
+        limit = max(1, min(20, int(limit or 10)))
+    except Exception:
+        limit = 10
+    try:
+        timeout = max(5, min(60, int(timeout or 15)))
+    except Exception:
+        timeout = 15
+
+    # Ask for more video results than final channel results to give dedupe room.
+    fetch_count = max(limit * 3, 12)
+
+    try:
+        from core.dependency_check import _get_startup_info
+
+        creationflags = 0
+        if platform.system().lower() == "windows":
+            creationflags = 0x08000000
+
+        cmd = [
+            "yt-dlp",
+            "--dump-single-json",
+            "--flat-playlist",
+            "--playlist-end",
+            str(fetch_count),
+            f"ytsearch{fetch_count}:{query}",
+        ]
+
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags,
+            startupinfo=_get_startup_info(),
+            timeout=timeout,
+        )
+        rc = getattr(res, "returncode", None)
+        if rc is None or int(rc) != 0 or not getattr(res, "stdout", None):
+            return []
+
+        data = json.loads(res.stdout)
+        entries = data.get("entries") if isinstance(data, dict) else []
+        return _youtube_search_entries_to_channel_feeds(entries, limit=limit)
+    except Exception:
+        return []
+
+
 def get_ytdlp_feed_url(url: str) -> str:
     """Try to get a native RSS feed for a yt-dlp supported URL (e.g. YouTube)."""
     if not url:

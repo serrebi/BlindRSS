@@ -38,6 +38,10 @@ class MinifluxProvider(RSSProvider):
             "endpoint": "",
             "method": "",
         }
+        # Backoff for repeatedly failing targeted per-feed refresh endpoints.
+        # This avoids hammering a single broken feed refresh route and spamming logs.
+        self._targeted_refresh_backoff_until: dict[str, float] = {}
+        self._targeted_refresh_fail_counts: dict[str, int] = {}
 
     def _cacheable_get_endpoint(self, endpoint: str) -> str | None:
         ep = str(endpoint or "").split("?", 1)[0].strip()
@@ -105,6 +109,77 @@ class MinifluxProvider(RSSProvider):
     def _retry_backoff_seconds(self, attempt_index: int) -> float:
         # attempt_index is 1-based
         return min(4.0, 0.4 * (2 ** max(0, int(attempt_index) - 1)))
+
+    def _targeted_refresh_failure_backoff_seconds(self, failure_count: int) -> float:
+        # Longer backoff at the per-feed refresh orchestration layer (separate from HTTP retry backoff)
+        # to avoid repeated 5xx spam for the same problematic feed.
+        try:
+            n = max(1, int(failure_count))
+        except Exception:
+            n = 1
+        return min(1800.0, 60.0 * (2 ** (n - 1)))  # 60s, 120s, 240s... cap 30m
+
+    def _should_attempt_targeted_refresh(self, feed_id: str, *, force: bool = False) -> bool:
+        if force:
+            return True
+        fid = str(feed_id or "").strip()
+        if not fid:
+            return False
+        try:
+            block_until = float(self._targeted_refresh_backoff_until.get(fid, 0.0) or 0.0)
+        except Exception:
+            block_until = 0.0
+        now_mono = time.monotonic()
+        if block_until > now_mono:
+            return False
+        if fid in self._targeted_refresh_backoff_until:
+            try:
+                self._targeted_refresh_backoff_until.pop(fid, None)
+            except Exception:
+                pass
+        return True
+
+    def _record_targeted_refresh_attempt_result(self, feed_id: str, ok: bool, status_code: int | None) -> None:
+        fid = str(feed_id or "").strip()
+        if not fid:
+            return
+        if bool(ok):
+            try:
+                self._targeted_refresh_backoff_until.pop(fid, None)
+                self._targeted_refresh_fail_counts.pop(fid, None)
+            except Exception:
+                pass
+            return
+
+        # Back off on any failure status (especially repeated 5xx) to reduce log spam
+        # and avoid hammering the same endpoint every refresh cycle.
+        try:
+            fail_count = int(self._targeted_refresh_fail_counts.get(fid, 0) or 0) + 1
+        except Exception:
+            fail_count = 1
+        self._targeted_refresh_fail_counts[fid] = fail_count
+        delay = self._targeted_refresh_failure_backoff_seconds(fail_count)
+        try:
+            self._targeted_refresh_backoff_until[fid] = time.monotonic() + float(delay)
+        except Exception:
+            pass
+        try:
+            if int(status_code or 0) >= 500 or int(status_code or 0) in (429, 502, 503, 504):
+                log.warning(
+                    "Miniflux targeted refresh backoff for feed %s after HTTP %s (%.0fs).",
+                    fid,
+                    int(status_code or 0),
+                    delay,
+                )
+            else:
+                log.debug(
+                    "Miniflux targeted refresh backoff for feed %s after failure status=%s (%.0fs).",
+                    fid,
+                    status_code,
+                    delay,
+                )
+        except Exception:
+            pass
 
     def get_name(self) -> str:
         return "Miniflux"
@@ -514,8 +589,24 @@ class MinifluxProvider(RSSProvider):
             )
 
         if retry_budget > 0 and allow_targeted_refresh:
-            for feed_id in per_feed_retry_ids[:retry_budget]:
+            attempted = 0
+            for feed_id in per_feed_retry_ids:
+                if attempted >= retry_budget:
+                    break
+                if not self._should_attempt_targeted_refresh(feed_id, force=force):
+                    continue
                 self._req("PUT", f"/v1/feeds/{feed_id}/refresh")
+                attempted += 1
+                info = dict(getattr(self, "_last_request_info", {}) or {})
+                if (
+                    str(info.get("endpoint", "")) == f"/v1/feeds/{feed_id}/refresh"
+                    and str(info.get("method", "")).upper() == "PUT"
+                ):
+                    self._record_targeted_refresh_attempt_result(
+                        feed_id,
+                        bool(info.get("ok", False)),
+                        info.get("status_code"),
+                    )
 
         # Re-read feed/counter metadata after targeted refresh requests.
         feeds = self._req("GET", "/v1/feeds") or feeds

@@ -8,7 +8,7 @@ import time
 import logging
 import sys
 from urllib.parse import urlparse
-from core.discovery import discover_feed, is_ytdlp_supported
+from core.discovery import discover_feed, is_ytdlp_supported, search_youtube_channels
 from core import utils
 from core.casting import CastingManager
 from core import inoreader_oauth
@@ -1738,7 +1738,7 @@ class FeedSearchDialog(wx.Dialog):
 
         # Attribution / Help
         help_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        help_sizer.Add(wx.StaticText(self, label="Sources: iTunes, gPodder, Feedly, Feedsearch, NewsBlur, Reddit, Fediverse"), 0, wx.ALL, 5)
+        help_sizer.Add(wx.StaticText(self, label="Sources: iTunes, gPodder, YouTube, Feedly, Feedsearch, NewsBlur, Reddit, Fediverse"), 0, wx.ALL, 5)
         sizer.Add(help_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 5)
         
         # Buttons
@@ -1799,6 +1799,9 @@ class FeedSearchDialog(wx.Dialog):
         
         # 3. Feedly (RSS/General)
         launch(self._search_feedly, "Feedly")
+
+        # 3.5. YouTube channel search (returns native YouTube RSS feed URLs)
+        launch(self._search_youtube_channels, "YouTube")
         
         # 4. NewsBlur (Autocomplete)
         launch(self._search_newsblur, "NewsBlur")
@@ -1842,7 +1845,12 @@ class FeedSearchDialog(wx.Dialog):
             except Exception:
                 pass
 
-        wx.CallAfter(self._on_search_complete, all_results)
+        if self._stop_event.is_set():
+            return
+        try:
+            wx.CallAfter(self._on_search_complete, all_results)
+        except Exception:
+            pass
 
     # --- Provider Implementations ---
 
@@ -1901,6 +1909,14 @@ class FeedSearchDialog(wx.Dialog):
                             "url": feed_id[5:]
                         })
                 queue.put(("Feedly", results))
+        except Exception:
+            pass
+
+    def _search_youtube_channels(self, term, queue):
+        try:
+            results = list(search_youtube_channels(term, limit=12, timeout=15) or [])
+            if results:
+                queue.put(("YouTube", results))
         except Exception:
             pass
 
@@ -2100,20 +2116,35 @@ class FeedSearchDialog(wx.Dialog):
 
 
     def _on_search_complete(self, results):
-        self.search_ctrl.Enable()
-        self.search_btn.Enable()
-        self.status_lbl.SetLabel(f"Found {len(results)} results.")
-        self.search_ctrl.SetFocus()
-        
+        # Dialog may have been closed while background search threads were running.
+        if getattr(self, "_stop_event", None) is not None and self._stop_event.is_set():
+            return
+
+        try:
+            self.search_ctrl.Enable()
+            self.search_btn.Enable()
+            self.status_lbl.SetLabel(f"Found {len(results)} results.")
+            self.search_ctrl.SetFocus()
+        except Exception:
+            # wx raises when the underlying C++ widgets were already destroyed.
+            return
+
         self.results_data = results
-        
-        for i, item in enumerate(self.results_data):
-            idx = self.results_list.InsertItem(i, item["title"])
-            self.results_list.SetItem(idx, 1, item["provider"])
-            self.results_list.SetItem(idx, 2, item["detail"])
+
+        try:
+            for i, item in enumerate(self.results_data):
+                idx = self.results_list.InsertItem(i, item["title"])
+                self.results_list.SetItem(idx, 1, item["provider"])
+                self.results_list.SetItem(idx, 2, item["detail"])
+        except Exception:
+            return
 
     def on_item_activated(self, event):
         # Select item and close
+        try:
+            self._stop_event.set()
+        except Exception:
+            pass
         self.EndModal(wx.ID_OK)
 
     def get_selected_url(self):
