@@ -418,6 +418,7 @@ class PlayerFrame(wx.Frame):
         self._last_range_proxy_initial_burst_kb = None
         self._last_range_proxy_initial_inline_kb = None
         self._range_proxy_retry_count = 0
+        self._range_proxy_last_stall_recover_ts = 0.0
         self._last_load_chapters = None
         self._last_load_title = None
 
@@ -1317,6 +1318,52 @@ class PlayerFrame(wx.Frame):
                 self._load_vlc_url(self._last_orig_url, http_headers=self._last_vlc_http_headers)
             except Exception:
                 pass
+
+    def _maybe_recover_stalled_proxy_playback(self, state, playing_now: bool, cur_ms: int) -> None:
+        """Fallback when proxied playback stalls without VLC raising an error event."""
+        try:
+            if self.is_casting:
+                return
+            if not bool(getattr(self, "_last_used_range_proxy", False)):
+                return
+            if not str(getattr(self, "_last_orig_url", "") or "").strip():
+                return
+            if bool(playing_now) or int(cur_ms) > 0:
+                return
+            if int(getattr(self, "_range_proxy_retry_count", 0) or 0) >= 2:
+                return
+            load_started = float(getattr(self, "_load_start_ts", 0.0) or 0.0)
+            if load_started <= 0.0:
+                return
+            now_mono = float(time.monotonic())
+            if (now_mono - load_started) < 8.0:
+                return
+            try:
+                import vlc as _vlc_mod
+                stalled_states = (
+                    _vlc_mod.State.NothingSpecial,
+                    _vlc_mod.State.Opening,
+                    _vlc_mod.State.Buffering,
+                    _vlc_mod.State.Stopped,
+                    _vlc_mod.State.Error,
+                )
+            except Exception:
+                stalled_states = ()
+            if stalled_states and state not in stalled_states:
+                return
+            last_recover = float(getattr(self, "_range_proxy_last_stall_recover_ts", 0.0) or 0.0)
+            if (now_mono - last_recover) < 6.0:
+                return
+            self._range_proxy_last_stall_recover_ts = now_mono
+            log.warning(
+                "Detected stalled proxied playback after %.1fs (state=%s, pos=%sms); attempting recovery",
+                max(0.0, now_mono - load_started),
+                state,
+                int(cur_ms),
+            )
+            self._handle_vlc_error()
+        except Exception:
+            pass
 
     def _load_vlc_url(
         self,
@@ -2405,6 +2452,10 @@ class PlayerFrame(wx.Frame):
                 host_name = ""
             if host_name in ("127.0.0.1", "localhost"):
                 return url
+            # YouTube direct media URLs (googlevideo CDN) can be sensitive to
+            # proxying in packaged builds; prefer direct VLC playback.
+            if host_name.endswith("googlevideo.com"):
+                return url
             # HLS playlists often contain relative segment URLs; proxying them through
             # the range cache breaks resolution and also isn't helpful for caching.
             if ".m3u8" in low:
@@ -3296,6 +3347,10 @@ class PlayerFrame(wx.Frame):
             vlc_cur = 0
         if vlc_cur < 0:
             vlc_cur = 0
+        try:
+            self._maybe_recover_stalled_proxy_playback(state, bool(playing_now), int(vlc_cur))
+        except Exception:
+            pass
 
         try:
             ui_cur = int(getattr(self, "_pos_ms", 0) or 0)

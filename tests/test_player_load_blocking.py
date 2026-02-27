@@ -76,6 +76,35 @@ def test_maybe_range_cache_url_nonblocking():
     print(f"PASS: _maybe_range_cache_url() completed quickly ({elapsed:.3f}s)")
 
 
+def test_maybe_range_cache_url_bypasses_googlevideo():
+    """YouTube direct media URLs should bypass the local range proxy."""
+    import wx
+
+    app = wx.App(False)
+
+    from gui.player import PlayerFrame
+    from core.config import ConfigManager
+
+    config = ConfigManager()
+    frame = PlayerFrame(None, config)
+    frame.Hide()
+
+    try:
+        test_url = (
+            "https://rr1---sn-uxa0n-t8ge7.googlevideo.com/videoplayback"
+            "?expire=1772240853&id=o-AHYPyeJvJhG2Mxf9UWlPqnu9yfGPSrMdWIuIrrB9-fE_&itag=140"
+        )
+        result_url = frame._maybe_range_cache_url(
+            test_url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            url_is_resolved=True,
+        )
+        assert result_url == test_url
+        assert bool(getattr(frame, "_last_used_range_proxy", False)) is False
+    finally:
+        frame.Destroy()
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Testing player load blocking behavior")
