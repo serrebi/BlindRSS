@@ -188,6 +188,74 @@ def test_translate_text_dispatches_to_gemini(monkeypatch):
     assert seen["kwargs"]["model"] == "gemini-2.0-flash"
 
 
+def test_translate_text_openrouter_retries_on_missing_model(monkeypatch):
+    calls = []
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(
+            {
+                "url": url,
+                "auth": (headers or {}).get("Authorization"),
+                "referer": (headers or {}).get("HTTP-Referer"),
+                "title": (headers or {}).get("X-Title"),
+                "model": (json or {}).get("model"),
+                "timeout": timeout,
+            }
+        )
+        if len(calls) == 1:
+            return _Resp(
+                404,
+                payload={"error": {"message": "model not found"}},
+                text='{"error":{"message":"model not found"}}',
+            )
+        return _Resp(
+            200,
+            payload={
+                "choices": [
+                    {"message": {"content": "Ciao"}},
+                ]
+            },
+        )
+
+    monkeypatch.setattr(tr.requests, "post", _fake_post)
+
+    out = tr.translate_text_openrouter(
+        "Hello",
+        api_key="openrouter-secret",
+        target_language="it",
+        model_candidates=["missing-model", "openrouter/free"],
+        timeout_s=8,
+        chunk_chars=1000,
+    )
+
+    assert out == "Ciao"
+    assert calls[0]["model"] == "missing-model"
+    assert calls[1]["model"] == "openrouter/free"
+    assert calls[0]["auth"] == "Bearer openrouter-secret"
+    assert str(calls[0]["url"] or "").startswith("https://openrouter.ai/api/v1/chat/completions")
+    assert calls[0]["referer"]
+    assert calls[0]["title"]
+
+
+def test_translate_text_dispatches_to_openrouter(monkeypatch):
+    seen = {}
+
+    def _fake_translate_text_openrouter(*args, **kwargs):
+        seen["kwargs"] = dict(kwargs)
+        return "Translated"
+
+    monkeypatch.setattr(tr, "translate_text_openrouter", _fake_translate_text_openrouter)
+    out = tr.translate_text(
+        "Hello",
+        provider="openrouter",
+        api_key="k",
+        target_language="de",
+        openrouter_model="openrouter/free",
+    )
+    assert out == "Translated"
+    assert seen["kwargs"]["model"] == "openrouter/free"
+
+
 def test_translate_text_qwen_retries_on_missing_model(monkeypatch):
     calls = []
 
@@ -293,9 +361,43 @@ def test_translate_text_qwen_retries_across_region_endpoints(monkeypatch):
 
 def test_default_provider_model_candidates_include_current_recommended_options():
     openai_candidates = tuple(getattr(tr, "_DEFAULT_OPENAI_MODEL_CANDIDATES", ()))
+    openrouter_candidates = tuple(getattr(tr, "_DEFAULT_OPENROUTER_MODEL_CANDIDATES", ()))
     gemini_candidates = tuple(getattr(tr, "_DEFAULT_GEMINI_MODEL_CANDIDATES", ()))
     qwen_candidates = tuple(getattr(tr, "_DEFAULT_QWEN_MODEL_CANDIDATES", ()))
 
     assert "gpt-5-mini" in openai_candidates
+    assert "openrouter/free" in openrouter_candidates
     assert "gemini-3-flash-preview" in gemini_candidates
     assert "qwen-mt-plus" in qwen_candidates
+
+
+def test_list_openrouter_models_parses_model_ids(monkeypatch):
+    class _ModelsResp:
+        status_code = 200
+        ok = True
+        text = ""
+
+        @staticmethod
+        def json():
+            return {
+                "data": [
+                    {"id": "openrouter/free"},
+                    {"id": "google/gemma-3-4b-it:free"},
+                    {"id": "openrouter/free"},
+                    {"id": "openai/gpt-4.1-mini"},
+                ]
+            }
+
+    def _fake_get(url, headers=None, timeout=None):
+        assert str(url).startswith("https://openrouter.ai/api/v1/models")
+        assert (headers or {}).get("Authorization") == "Bearer key123"
+        return _ModelsResp()
+
+    monkeypatch.setattr(tr.utils, "safe_requests_get", _fake_get)
+    models = tr.list_openrouter_models(api_key="key123", timeout_s=12)
+
+    assert models == [
+        "google/gemma-3-4b-it:free",
+        "openai/gpt-4.1-mini",
+        "openrouter/free",
+    ]

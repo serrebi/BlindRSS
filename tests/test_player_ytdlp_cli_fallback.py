@@ -1,0 +1,64 @@
+import os
+import sys
+from unittest.mock import patch
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+pytest.importorskip("wx")
+pytest.importorskip("vlc")
+
+from gui.player import _extract_ytdlp_info_via_cli
+
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = int(returncode)
+        self.stdout = str(stdout)
+        self.stderr = str(stderr)
+
+
+def test_extract_ytdlp_info_via_cli_returns_first_playlist_entry_and_uses_browser_name():
+    captured_cmd = {}
+
+    def _fake_run(cmd, **_kwargs):
+        captured_cmd["cmd"] = list(cmd)
+        return _FakeCompletedProcess(
+            returncode=0,
+            stdout='{"entries":[{"url":"https://cdn.example/audio.m4a","title":"Example"}]}',
+            stderr="",
+        )
+
+    with patch("gui.player.subprocess.run", side_effect=_fake_run), patch(
+        "gui.player.platform.system", return_value="Windows"
+    ), patch("core.dependency_check._get_startup_info", return_value=None):
+        info = _extract_ytdlp_info_via_cli(
+            "https://www.youtube.com/watch?v=abc123",
+            headers={"Accept-Language": "en-US,en;q=0.9", "Origin": "https://www.youtube.com"},
+            cookie_source=("edge", r"C:\Users\alice\AppData\Local\Microsoft\Edge\User Data"),
+            timeout_s=20,
+        )
+
+    assert info["url"] == "https://cdn.example/audio.m4a"
+    assert info["title"] == "Example"
+
+    cmd = captured_cmd["cmd"]
+    assert "--cookies-from-browser" in cmd
+    assert "edge" in cmd
+    assert r"C:\Users\alice\AppData\Local\Microsoft\Edge\User Data" not in cmd
+    assert "--dump-single-json" in cmd
+    assert "--format" in cmd
+    assert "--add-header" in cmd
+    assert "Accept-Language: en-US,en;q=0.9" in cmd
+
+
+def test_extract_ytdlp_info_via_cli_raises_on_nonzero_exit():
+    with patch(
+        "gui.player.subprocess.run",
+        return_value=_FakeCompletedProcess(returncode=1, stdout="", stderr="Extractor error"),
+    ), patch("gui.player.platform.system", return_value="Windows"), patch(
+        "core.dependency_check._get_startup_info", return_value=None
+    ):
+        with pytest.raises(RuntimeError, match="Extractor error"):
+            _extract_ytdlp_info_via_cli("https://example.com/video")

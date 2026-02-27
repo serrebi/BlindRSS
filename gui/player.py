@@ -6,6 +6,8 @@ import sqlite3
 import platform
 import logging
 import webbrowser
+import json
+import subprocess
 from core import utils
 from core import discovery
 from core import playback_state
@@ -54,6 +56,122 @@ def _is_ytdlp_dpapi_cookie_error(exc_or_msg) -> bool:
     if not text:
         return False
     return "dpapi" in text or "failed to decrypt with dpapi" in text
+
+
+def _extract_ytdlp_info_via_cli(
+    url: str,
+    *,
+    headers: dict | None = None,
+    cookie_source: tuple | None = None,
+    timeout_s: int = 30,
+) -> dict:
+    target_url = str(url or "").strip()
+    if not target_url:
+        raise RuntimeError("yt-dlp CLI: empty URL")
+
+    hdrs = dict(headers or {})
+    user_agent = str(
+        hdrs.get("User-Agent")
+        or hdrs.get("user-agent")
+        or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ).strip()
+    referer = target_url
+
+    cmd = [
+        "yt-dlp",
+        "--dump-single-json",
+        "--no-playlist",
+        "--format",
+        _YTDLP_VLC_AUDIO_FORMAT,
+        "--quiet",
+        "--no-warnings",
+        "--no-progress",
+        "--geo-bypass",
+        "--color",
+        "never",
+        "--user-agent",
+        user_agent,
+        "--referer",
+        referer,
+    ]
+
+    for key, value in hdrs.items():
+        key_s = str(key or "").strip()
+        if not key_s or key_s.lower() in ("user-agent", "referer"):
+            continue
+        val_s = str(value or "").strip()
+        if not val_s:
+            continue
+        cmd.extend(["--add-header", f"{key_s}: {val_s}"])
+
+    if isinstance(cookie_source, tuple) and cookie_source:
+        browser = str(cookie_source[0] or "").strip()
+        if browser:
+            cmd.extend(["--cookies-from-browser", browser])
+
+    cmd.append(target_url)
+
+    try:
+        timeout_s = max(8, min(120, int(timeout_s or 30)))
+    except Exception:
+        timeout_s = 30
+
+    try:
+        from core.dependency_check import _get_startup_info
+
+        creationflags = 0
+        startupinfo = None
+        if platform.system().lower() == "windows":
+            creationflags = 0x08000000
+            startupinfo = _get_startup_info()
+
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
+            timeout=timeout_s,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError("yt-dlp CLI not found on PATH") from e
+
+    rc = getattr(res, "returncode", -1)
+    try:
+        rc = int(rc)
+    except Exception:
+        rc = -1
+    out = str(getattr(res, "stdout", "") or "").strip()
+    err = str(getattr(res, "stderr", "") or "").strip()
+    if rc != 0:
+        msg = err or out or f"yt-dlp CLI failed (exit {rc})"
+        raise RuntimeError(msg)
+    if not out:
+        raise RuntimeError("yt-dlp CLI returned no JSON output")
+
+    try:
+        info = json.loads(out)
+    except Exception as e:
+        raise RuntimeError(f"yt-dlp CLI returned invalid JSON: {e}") from e
+
+    if not isinstance(info, dict):
+        raise RuntimeError("yt-dlp CLI returned unexpected JSON payload")
+
+    if "entries" in info:
+        try:
+            entries = list(info.get("entries") or [])
+            if entries:
+                first = entries[0]
+                if isinstance(first, dict):
+                    info = first
+        except Exception:
+            pass
+
+    return info
 
 
 def _should_reapply_seek(target_ms: int, current_ms: int, tolerance_ms: int, remaining_retries: int) -> bool:
@@ -2569,6 +2687,74 @@ class PlayerFrame(wx.Frame):
                                     _log(f"yt-dlp cookies failed ({source[0]}): cookie loading failed")
                                 else:
                                     _log(f"yt-dlp cookies failed ({source[0]})")
+
+                    if info is None:
+                        cli_last_err = None
+                        cli_base_err = None
+                        cli_dpapi_err = None
+                        cli_skip_cookie_attempts = bool(skip_cookie_attempts)
+                        try:
+                            cli_timeout_s = int(
+                                max(
+                                    10,
+                                    min(
+                                        120,
+                                        float(self.config_manager.get("playback_resolve_timeout_s", 4.0) or 4.0) * 8.0,
+                                    ),
+                                )
+                            )
+                        except Exception:
+                            cli_timeout_s = 30
+
+                        # Frozen builds can keep an up-to-date yt-dlp CLI on disk between releases.
+                        # Try it before failing when embedded Python yt_dlp extraction breaks.
+                        for kind, source in attempts:
+                            if kind == "cookies" and cli_skip_cookie_attempts:
+                                continue
+                            cli_source = source if kind == "cookies" else None
+                            try:
+                                info = _extract_ytdlp_info_via_cli(
+                                    url,
+                                    headers=ytdlp_headers,
+                                    cookie_source=cli_source,
+                                    timeout_s=cli_timeout_s,
+                                )
+                                if kind == "cookies" and source:
+                                    _log(f"yt-dlp CLI cookies OK ({source[0]})")
+                                _log("yt-dlp resolved via CLI fallback")
+                                break
+                            except Exception as cli_e:
+                                cli_last_err = cli_e
+                                if kind == "base":
+                                    cli_base_err = cli_e
+                                if kind == "cookies" and source:
+                                    if _is_ytdlp_dpapi_cookie_error(cli_e):
+                                        cli_dpapi_err = cli_e
+                                        cli_skip_cookie_attempts = True
+                                        try:
+                                            self._ytdlp_browser_cookies_dpapi_unavailable = True
+                                            self._ytdlp_browser_cookies_dpapi_notice_shown = True
+                                        except Exception:
+                                            pass
+                                        try:
+                                            _log(
+                                                f"yt-dlp CLI cookies failed ({source[0]}): Windows DPAPI decryption unavailable; "
+                                                "skipping remaining browser cookie attempts this session"
+                                            )
+                                        except Exception:
+                                            pass
+                                    elif _is_ytdlp_cookie_load_error(cli_e):
+                                        _log(f"yt-dlp CLI cookies failed ({source[0]}): cookie loading failed")
+                                    else:
+                                        _log(f"yt-dlp CLI cookies failed ({source[0]})")
+
+                        if info is None:
+                            if dpapi_cookie_err is None and cli_dpapi_err is not None:
+                                dpapi_cookie_err = cli_dpapi_err
+                            if base_err is None and cli_base_err is not None:
+                                base_err = cli_base_err
+                            if cli_last_err is not None and last_err is None:
+                                last_err = cli_last_err
 
                     if info is None:
                         rokfin_probe = None

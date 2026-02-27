@@ -156,6 +156,40 @@ def test_translation_runtime_config_uses_qwen_provider_specific_api_key_and_mode
     assert cfg.get("model") == "qwen-plus"
 
 
+def test_translation_runtime_config_uses_openrouter_provider_specific_api_key_and_model():
+    host = _DummyMain(
+        {
+            "translation_enabled": True,
+            "translation_provider": "openrouter",
+            "translation_target_language": "it",
+            "translation_openrouter_model": "openrouter/free",
+            "translation_openrouter_api_key": "or-secret",
+            "translation_openai_api_key": "openai-secret",
+        }
+    )
+    cfg = host._translation_runtime_config()
+    assert isinstance(cfg, dict)
+    assert cfg.get("provider") == "openrouter"
+    assert cfg.get("api_key") == "or-secret"
+    assert cfg.get("model") == "openrouter/free"
+
+
+def test_fulltext_cache_key_includes_openrouter_model_when_configured():
+    host = _DummyMain(
+        {
+            "translation_enabled": True,
+            "translation_provider": "openrouter",
+            "translation_target_language": "ru",
+            "translation_openrouter_model": "openrouter/free",
+            "translation_openrouter_api_key": "secret",
+        }
+    )
+    article = SimpleNamespace(url="https://example.com/a", id="a1")
+    cache_key, _url, _aid = host._fulltext_cache_key_for_article(article, 0)
+
+    assert cache_key.endswith("::tr[openrouter:ru:openrouter/free]")
+
+
 def test_should_prefer_feed_fulltext_for_ning_forum_comment_link_is_false():
     host = _DummyMain()
     html = """

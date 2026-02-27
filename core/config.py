@@ -98,6 +98,8 @@ DEFAULT_CONFIG = {
     "translation_grok_api_key": "",
     "translation_openai_model": "",
     "translation_openai_api_key": "",
+    "translation_openrouter_model": "",
+    "translation_openrouter_api_key": "",
     "translation_gemini_model": "",
     "translation_gemini_api_key": "",
     "translation_qwen_model": "",

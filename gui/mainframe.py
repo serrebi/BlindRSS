@@ -4125,13 +4125,18 @@ class MainFrame(wx.Frame):
             provider = str(self.config_manager.get("translation_provider", "grok") or "grok").strip().lower()
         except Exception:
             provider = "grok"
-        if provider not in ("grok", "openai", "gemini", "qwen"):
+        if provider not in ("grok", "openai", "openrouter", "gemini", "qwen"):
             provider = "grok"
 
         api_key = ""
         if provider == "openai":
             try:
                 api_key = str(self.config_manager.get("translation_openai_api_key", "") or "").strip()
+            except Exception:
+                api_key = ""
+        elif provider == "openrouter":
+            try:
+                api_key = str(self.config_manager.get("translation_openrouter_api_key", "") or "").strip()
             except Exception:
                 api_key = ""
         elif provider == "gemini":
@@ -4168,6 +4173,10 @@ class MainFrame(wx.Frame):
         except Exception:
             openai_model = ""
         try:
+            openrouter_model = str(self.config_manager.get("translation_openrouter_model", "") or "").strip()
+        except Exception:
+            openrouter_model = ""
+        try:
             gemini_model = str(self.config_manager.get("translation_gemini_model", "") or "").strip()
         except Exception:
             gemini_model = ""
@@ -4179,6 +4188,8 @@ class MainFrame(wx.Frame):
         model = ""
         if provider == "openai":
             model = openai_model
+        elif provider == "openrouter":
+            model = openrouter_model
         elif provider == "gemini":
             model = gemini_model
         elif provider == "qwen":
@@ -4205,6 +4216,7 @@ class MainFrame(wx.Frame):
             "model": model,
             "grok_model": grok_model,
             "openai_model": openai_model,
+            "openrouter_model": openrouter_model,
             "gemini_model": gemini_model,
             "qwen_model": qwen_model,
             "timeout_s": timeout_s,
@@ -4237,6 +4249,7 @@ class MainFrame(wx.Frame):
                 target_language=str(cfg.get("target_language") or "en"),
                 grok_model=str(cfg.get("grok_model") or ""),
                 openai_model=str(cfg.get("openai_model") or ""),
+                openrouter_model=str(cfg.get("openrouter_model") or ""),
                 gemini_model=str(cfg.get("gemini_model") or ""),
                 qwen_model=str(cfg.get("qwen_model") or ""),
                 timeout_s=int(cfg.get("timeout_s") or 45),

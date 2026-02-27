@@ -10,6 +10,10 @@ log = logging.getLogger(__name__)
 
 _XAI_CHAT_COMPLETIONS_URL = "https://api.x.ai/v1/chat/completions"
 _OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
+_OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+_OPENROUTER_APP_REFERER = "https://github.com/serrebi/BlindRSS"
+_OPENROUTER_APP_TITLE = "BlindRSS"
 _GEMINI_GENERATE_CONTENT_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 # Qwen (DashScope) OpenAI-compatible endpoint (international).
 _QWEN_CHAT_COMPLETIONS_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
@@ -41,6 +45,11 @@ _DEFAULT_OPENAI_MODEL_CANDIDATES = (
     "gpt-4.1-mini",
     "gpt-4o-mini",
     "gpt-4.1-nano",
+)
+_DEFAULT_OPENROUTER_MODEL_CANDIDATES = (
+    # Start with free routing for zero-cost testing, then fall back to auto routing.
+    "openrouter/free",
+    "openrouter/auto",
 )
 _DEFAULT_GEMINI_MODEL_CANDIDATES = (
     "gemini-3-flash-preview",
@@ -293,6 +302,72 @@ def _response_error_detail(resp: requests.Response | None) -> str:
     return msg
 
 
+def _openrouter_extra_headers() -> dict:
+    extra = {}
+    referer = str(_OPENROUTER_APP_REFERER or "").strip()
+    title = str(_OPENROUTER_APP_TITLE or "").strip()
+    if referer:
+        extra["HTTP-Referer"] = referer
+    if title:
+        extra["X-Title"] = title
+    return extra
+
+
+def list_openrouter_models(api_key: str | None = None, timeout_s: int = 20) -> list[str]:
+    headers = dict(utils.HEADERS)
+    headers["Accept"] = "application/json"
+    key = str(api_key or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    headers.update(_openrouter_extra_headers())
+    try:
+        timeout = max(5, min(60, int(timeout_s or 20)))
+    except Exception:
+        timeout = 20
+
+    try:
+        resp = utils.safe_requests_get(
+            _OPENROUTER_MODELS_URL,
+            headers=headers,
+            timeout=timeout,
+        )
+    except Exception as e:
+        raise RuntimeError(f"OpenRouter models request failed: {e}") from e
+
+    if not getattr(resp, "ok", False):
+        detail = _response_error_detail(resp)
+        if detail:
+            raise RuntimeError(f"OpenRouter models request failed ({detail})")
+        raise RuntimeError("OpenRouter models request failed")
+
+    try:
+        payload = resp.json() if resp is not None else {}
+    except Exception as e:
+        raise RuntimeError(f"OpenRouter models response was not valid JSON: {e}") from e
+
+    models = []
+    try:
+        for item in (payload.get("data") or []):
+            if not isinstance(item, dict):
+                continue
+            model_id = str(item.get("id") or "").strip()
+            if model_id:
+                models.append(model_id)
+    except Exception:
+        models = []
+
+    # Keep deterministic ordering in the UI and remove duplicates.
+    out = []
+    seen = set()
+    for model_id in sorted(models, key=lambda v: str(v).lower()):
+        key_id = str(model_id).lower()
+        if key_id in seen:
+            continue
+        seen.add(key_id)
+        out.append(str(model_id))
+    return out
+
+
 def _gemini_empty_response_reason(payload: dict) -> str:
     if not isinstance(payload, dict):
         return ""
@@ -328,6 +403,7 @@ def _translate_chunk_chat_completions(
     timeout_s: int = _DEFAULT_TIMEOUT_S,
     endpoint: str,
     provider_label: str,
+    extra_headers: dict | None = None,
 ) -> str:
     api_key = str(api_key or "").strip()
     if not api_key:
@@ -341,6 +417,13 @@ def _translate_chunk_chat_completions(
     headers["Authorization"] = f"Bearer {api_key}"
     headers["Content-Type"] = "application/json"
     headers["Accept"] = "application/json"
+    if isinstance(extra_headers, dict):
+        for key, value in extra_headers.items():
+            k = str(key or "").strip()
+            v = str(value or "").strip()
+            if not k or not v:
+                continue
+            headers[k] = v
 
     candidates = _resolve_model_candidates(model, model_candidates, default_candidates)
     if not candidates:
@@ -460,6 +543,30 @@ def _translate_chunk_openai(
         timeout_s=timeout_s,
         endpoint=endpoint,
         provider_label="OpenAI",
+    )
+
+
+def _translate_chunk_openrouter(
+    chunk: str,
+    *,
+    api_key: str,
+    target_language: str,
+    model: str | None = None,
+    model_candidates: Iterable[str] | None = None,
+    timeout_s: int = _DEFAULT_TIMEOUT_S,
+    endpoint: str = _OPENROUTER_CHAT_COMPLETIONS_URL,
+) -> str:
+    return _translate_chunk_chat_completions(
+        chunk,
+        api_key=api_key,
+        target_language=target_language,
+        model=model,
+        model_candidates=model_candidates,
+        default_candidates=_DEFAULT_OPENROUTER_MODEL_CANDIDATES,
+        timeout_s=timeout_s,
+        endpoint=endpoint,
+        provider_label="OpenRouter",
+        extra_headers=_openrouter_extra_headers(),
     )
 
 
@@ -690,6 +797,39 @@ def translate_text_gemini(
     return "".join(translated_chunks)
 
 
+def translate_text_openrouter(
+    text: str,
+    *,
+    api_key: str,
+    target_language: str,
+    model: str | None = None,
+    model_candidates: Iterable[str] | None = None,
+    timeout_s: int = _DEFAULT_TIMEOUT_S,
+    chunk_chars: int = _DEFAULT_CHUNK_CHARS,
+    endpoint: str = _OPENROUTER_CHAT_COMPLETIONS_URL,
+) -> str:
+    raw = str(text or "")
+    if not raw.strip():
+        return raw
+    if len(raw) > _MAX_TOTAL_CHARS:
+        raw = raw[:_MAX_TOTAL_CHARS]
+
+    translated_chunks: List[str] = []
+    for chunk in _iter_text_chunks(raw, max_chars=chunk_chars):
+        translated_chunks.append(
+            _translate_chunk_openrouter(
+                chunk,
+                api_key=api_key,
+                target_language=target_language,
+                model=model,
+                model_candidates=model_candidates,
+                timeout_s=timeout_s,
+                endpoint=endpoint,
+            )
+        )
+    return "".join(translated_chunks)
+
+
 def translate_text_qwen(
     text: str,
     *,
@@ -733,6 +873,7 @@ def translate_text(
     target_language: str,
     grok_model: str | None = None,
     openai_model: str | None = None,
+    openrouter_model: str | None = None,
     gemini_model: str | None = None,
     qwen_model: str | None = None,
     timeout_s: int = _DEFAULT_TIMEOUT_S,
@@ -754,6 +895,15 @@ def translate_text(
             api_key=api_key,
             target_language=target_language,
             model=openai_model,
+            timeout_s=timeout_s,
+            chunk_chars=chunk_chars,
+        )
+    if prov == "openrouter":
+        return translate_text_openrouter(
+            text,
+            api_key=api_key,
+            target_language=target_language,
+            model=openrouter_model,
             timeout_s=timeout_s,
             chunk_chars=chunk_chars,
         )

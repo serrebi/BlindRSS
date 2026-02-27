@@ -1010,7 +1010,7 @@ class SettingsDialog(wx.Dialog):
         notifications_panel.SetSizer(notifications_sizer)
         notebook.AddPage(notifications_panel, "Notifications")
 
-        # Translate Tab (automatic article translation via Grok/OpenAI/Gemini)
+        # Translate Tab (automatic article translation via Grok/OpenAI/OpenRouter/Gemini/Qwen)
         translate_panel = wx.Panel(notebook)
         translate_sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -1029,7 +1029,7 @@ class SettingsDialog(wx.Dialog):
 
         provider_row = wx.BoxSizer(wx.HORIZONTAL)
         provider_row.Add(wx.StaticText(translate_panel, label="Provider:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-        self.translation_provider_ctrl = wx.Choice(translate_panel, choices=["grok", "openai", "gemini", "qwen"])
+        self.translation_provider_ctrl = wx.Choice(translate_panel, choices=["grok", "openai", "openrouter", "gemini", "qwen"])
         if not self.translation_provider_ctrl.SetStringSelection(str(config.get("translation_provider", "grok") or "grok")):
             self.translation_provider_ctrl.SetSelection(0)
         provider_row.Add(self.translation_provider_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -1150,6 +1150,52 @@ class SettingsDialog(wx.Dialog):
         openai_api_key_row.Add(self.translation_openai_api_key_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
         translate_sizer.Add(openai_api_key_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
+        openrouter_model_row = wx.BoxSizer(wx.HORIZONTAL)
+        openrouter_model_row.Add(
+            wx.StaticText(translate_panel, label="OpenRouter model (optional):"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            8,
+        )
+        openrouter_model_choices = [
+            str(m)
+            for m in getattr(translation_mod, "_DEFAULT_OPENROUTER_MODEL_CANDIDATES", ())
+            if str(m or "").strip()
+        ]
+        self.translation_openrouter_model_ctrl = wx.ComboBox(
+            translate_panel,
+            choices=list(dict.fromkeys(openrouter_model_choices)),
+            style=wx.CB_DROPDOWN,
+        )
+        self.translation_openrouter_model_ctrl.SetValue(str(config.get("translation_openrouter_model", "") or ""))
+        openrouter_model_row.Add(self.translation_openrouter_model_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        translate_sizer.Add(openrouter_model_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        openrouter_api_key_row = wx.BoxSizer(wx.HORIZONTAL)
+        openrouter_api_key_row.Add(
+            wx.StaticText(translate_panel, label="OpenRouter API key:"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            8,
+        )
+        self.translation_openrouter_api_key_ctrl = wx.TextCtrl(
+            translate_panel,
+            value=str(config.get("translation_openrouter_api_key", "") or ""),
+            style=wx.TE_PASSWORD,
+        )
+        openrouter_api_key_row.Add(self.translation_openrouter_api_key_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        translate_sizer.Add(openrouter_api_key_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        openrouter_tools_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.translation_openrouter_load_models_btn = wx.Button(translate_panel, label="Load OpenRouter Models")
+        openrouter_tools_row.Add(self.translation_openrouter_load_models_btn, 0, wx.RIGHT, 8)
+        self.translation_openrouter_models_status_lbl = wx.StaticText(
+            translate_panel,
+            label="Loads all available model IDs from OpenRouter.",
+        )
+        openrouter_tools_row.Add(self.translation_openrouter_models_status_lbl, 0, wx.ALIGN_CENTER_VERTICAL)
+        translate_sizer.Add(openrouter_tools_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
         gemini_model_row = wx.BoxSizer(wx.HORIZONTAL)
         gemini_model_row.Add(
             wx.StaticText(translate_panel, label="Gemini model (optional):"),
@@ -1227,10 +1273,13 @@ class SettingsDialog(wx.Dialog):
         self._translation_provider_rows = {
             "grok": [model_row, self.translation_grok_model_hint_lbl, api_key_row],
             "openai": [openai_model_row, openai_api_key_row],
+            "openrouter": [openrouter_model_row, openrouter_api_key_row, openrouter_tools_row],
             "gemini": [gemini_model_row, gemini_api_key_row],
             "qwen": [qwen_model_row, qwen_api_key_row],
         }
         self.translation_provider_ctrl.Bind(wx.EVT_CHOICE, self.on_translation_provider_choice)
+        self.translation_openrouter_load_models_btn.Bind(wx.EVT_BUTTON, self.on_load_openrouter_models)
+        self._openrouter_models_loading = False
         self._update_translation_provider_controls()
 
         translate_panel.SetSizer(translate_sizer)
@@ -1258,12 +1307,103 @@ class SettingsDialog(wx.Dialog):
         except Exception:
             pass
 
+    def on_load_openrouter_models(self, event):
+        if bool(getattr(self, "_openrouter_models_loading", False)):
+            return
+
+        try:
+            api_key = str(self.translation_openrouter_api_key_ctrl.GetValue() or "").strip()
+        except Exception:
+            api_key = ""
+
+        try:
+            self._openrouter_models_loading = True
+            self.translation_openrouter_load_models_btn.Disable()
+        except Exception:
+            pass
+        try:
+            self.translation_openrouter_models_status_lbl.SetLabel("Loading OpenRouter models...")
+        except Exception:
+            pass
+
+        threading.Thread(
+            target=self._load_openrouter_models_worker,
+            args=(api_key,),
+            daemon=True,
+        ).start()
+        try:
+            event.Skip()
+        except Exception:
+            pass
+
+    def _load_openrouter_models_worker(self, api_key: str) -> None:
+        models = []
+        error = ""
+        try:
+            models = list(translation_mod.list_openrouter_models(api_key=api_key, timeout_s=25) or [])
+        except Exception as e:
+            error = str(e or "").strip() or "Unknown error"
+        try:
+            wx.CallAfter(self._on_openrouter_models_loaded, models, error)
+        except Exception:
+            pass
+
+    def _on_openrouter_models_loaded(self, models: list[str], error: str = "") -> None:
+        try:
+            self._openrouter_models_loading = False
+            self.translation_openrouter_load_models_btn.Enable()
+        except Exception:
+            pass
+
+        if error:
+            try:
+                self.translation_openrouter_models_status_lbl.SetLabel(f"OpenRouter model load failed: {error}")
+            except Exception:
+                pass
+            return
+
+        try:
+            existing_value = str(self.translation_openrouter_model_ctrl.GetValue() or "").strip()
+        except Exception:
+            existing_value = ""
+        choices = [
+            str(m)
+            for m in getattr(translation_mod, "_DEFAULT_OPENROUTER_MODEL_CANDIDATES", ())
+            if str(m or "").strip()
+        ]
+        choices.extend([str(m).strip() for m in (models or []) if str(m or "").strip()])
+
+        deduped = []
+        seen = set()
+        for item in choices:
+            key = str(item).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(str(item))
+
+        try:
+            self.translation_openrouter_model_ctrl.Clear()
+            for item in deduped:
+                self.translation_openrouter_model_ctrl.Append(item)
+        except Exception:
+            pass
+        try:
+            if existing_value and not self.translation_openrouter_model_ctrl.SetStringSelection(existing_value):
+                self.translation_openrouter_model_ctrl.SetValue(existing_value)
+        except Exception:
+            pass
+        try:
+            self.translation_openrouter_models_status_lbl.SetLabel(f"Loaded {len(models)} OpenRouter models.")
+        except Exception:
+            pass
+
     def _update_translation_provider_controls(self):
         try:
             provider = str(self.translation_provider_ctrl.GetStringSelection() or "grok").strip().lower()
         except Exception:
             provider = "grok"
-        if provider not in ("grok", "openai", "gemini", "qwen"):
+        if provider not in ("grok", "openai", "openrouter", "gemini", "qwen"):
             provider = "grok"
 
         rows_map = getattr(self, "_translation_provider_rows", {}) or {}
@@ -1789,6 +1929,8 @@ class SettingsDialog(wx.Dialog):
             "translation_grok_api_key": (self.translation_grok_api_key_ctrl.GetValue() or "").strip(),
             "translation_openai_model": (self.translation_openai_model_ctrl.GetValue() or "").strip(),
             "translation_openai_api_key": (self.translation_openai_api_key_ctrl.GetValue() or "").strip(),
+            "translation_openrouter_model": (self.translation_openrouter_model_ctrl.GetValue() or "").strip(),
+            "translation_openrouter_api_key": (self.translation_openrouter_api_key_ctrl.GetValue() or "").strip(),
             "translation_gemini_model": (self.translation_gemini_model_ctrl.GetValue() or "").strip(),
             "translation_gemini_api_key": (self.translation_gemini_api_key_ctrl.GetValue() or "").strip(),
             "translation_qwen_model": (self.translation_qwen_model_ctrl.GetValue() or "").strip(),
@@ -2562,12 +2704,7 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
         root.Add(self.results_list, 1, wx.EXPAND | wx.ALL, 5)
 
         action_row = wx.BoxSizer(wx.HORIZONTAL)
-        self.play_btn = wx.Button(self, label="Play")
-        self.subscribe_btn = wx.Button(self, label="Subscribe")
-        self.copy_btn = wx.Button(self, label="Copy URL")
         self.close_btn = wx.Button(self, wx.ID_CLOSE, "Close")
-        for btn in (self.play_btn, self.subscribe_btn, self.copy_btn):
-            action_row.Add(btn, 0, wx.ALL, 5)
         action_row.AddStretchSpacer(1)
         action_row.Add(self.close_btn, 0, wx.ALL, 5)
         root.Add(action_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
@@ -2592,9 +2729,7 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
         self.results_list.Bind(wx.EVT_LIST_COL_CLICK, self.on_results_col_click)
         self.results_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_result_selected)
         self.results_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_result_activated)
-        self.play_btn.Bind(wx.EVT_BUTTON, self.on_play_selected)
-        self.subscribe_btn.Bind(wx.EVT_BUTTON, self.on_subscribe_best)
-        self.copy_btn.Bind(wx.EVT_BUTTON, self.on_copy_selected_url)
+        self.results_list.Bind(wx.EVT_CONTEXT_MENU, self.on_results_context_menu)
         self.close_btn.Bind(wx.EVT_BUTTON, lambda _e: self.Close())
         self.Bind(wx.EVT_CHAR_HOOK, self.on_dialog_char_hook)
         self.Bind(wx.EVT_CLOSE, self.on_close)
@@ -3567,23 +3702,74 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
             return None
         return None
 
-    def _update_action_buttons(self) -> None:
+    def _get_selected_action_availability(self) -> tuple[bool, bool, bool]:
         item = self._get_selected_result()
         play_ok = bool(item and str(item.get("url") or "").strip())
         native_ok = bool(item and str(item.get("native_subscribe_url") or "").strip())
         source_ok = bool(item and str(item.get("source_subscribe_url") or "").strip())
         subscribe_ok = bool(native_ok or source_ok)
         copy_ok = play_ok
-        for btn, enabled in (
-            (getattr(self, "play_btn", None), play_ok),
-            (getattr(self, "subscribe_btn", None), subscribe_ok),
-            (getattr(self, "copy_btn", None), copy_ok),
-        ):
+        return (play_ok, subscribe_ok, copy_ok)
+
+    def _update_action_buttons(self) -> None:
+        play_ok, subscribe_ok, copy_ok = self._get_selected_action_availability()
+        self._play_action_enabled = bool(play_ok)
+        self._subscribe_action_enabled = bool(subscribe_ok)
+        self._copy_action_enabled = bool(copy_ok)
+
+    def _show_results_context_menu(self, client_pos=None) -> None:
+        play_ok, subscribe_ok, copy_ok = self._get_selected_action_availability()
+
+        menu = wx.Menu()
+        play_item = menu.Append(wx.ID_ANY, "Play")
+        subscribe_item = menu.Append(wx.ID_ANY, "Subscribe")
+        copy_item = menu.Append(wx.ID_ANY, "Copy URL")
+        play_item.Enable(bool(play_ok))
+        subscribe_item.Enable(bool(subscribe_ok))
+        copy_item.Enable(bool(copy_ok))
+
+        menu.Bind(wx.EVT_MENU, self.on_play_selected, play_item)
+        menu.Bind(wx.EVT_MENU, self.on_subscribe_best, subscribe_item)
+        menu.Bind(wx.EVT_MENU, self.on_copy_selected_url, copy_item)
+
+        try:
+            if client_pos is None:
+                idx = self.results_list.GetFirstSelected()
+                if idx != wx.NOT_FOUND:
+                    rect = self.results_list.GetItemRect(idx)
+                    client_pos = wx.Point(max(0, int(rect.x) + 8), max(0, int(rect.y) + 8))
+            if client_pos is None:
+                self.results_list.PopupMenu(menu)
+            else:
+                self.results_list.PopupMenu(menu, client_pos)
+        finally:
             try:
-                if btn:
-                    btn.Enable(bool(enabled))
+                menu.Destroy()
             except Exception:
                 pass
+
+    def on_results_context_menu(self, event):
+        client_pos = None
+        try:
+            screen_pos = event.GetPosition()
+            if isinstance(screen_pos, wx.Point) and int(screen_pos.x) >= 0 and int(screen_pos.y) >= 0:
+                client_pos = self.results_list.ScreenToClient(screen_pos)
+        except Exception:
+            client_pos = None
+
+        if client_pos is not None:
+            try:
+                idx, _flags = self.results_list.HitTest(client_pos)
+            except Exception:
+                idx = wx.NOT_FOUND
+            if idx != wx.NOT_FOUND:
+                try:
+                    self.results_list.Select(idx)
+                    self.results_list.Focus(idx)
+                except Exception:
+                    pass
+
+        self._show_results_context_menu(client_pos)
 
     def on_result_selected(self, event):
         try:

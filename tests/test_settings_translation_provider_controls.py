@@ -44,6 +44,7 @@ class _Host:
         self._translation_provider_rows = {
             "grok": ["grok_model", "grok_api"],
             "openai": ["openai_model", "openai_api"],
+            "openrouter": ["openrouter_model", "openrouter_api"],
             "gemini": ["gemini_model", "gemini_api"],
             "qwen": ["qwen_model", "qwen_api"],
         }
@@ -65,6 +66,8 @@ def test_update_translation_provider_controls_shows_only_openai_rows():
     assert _hidden_rows(host._translation_layout_sizer.calls) == {
         "grok_model",
         "grok_api",
+        "openrouter_model",
+        "openrouter_api",
         "gemini_model",
         "gemini_api",
         "qwen_model",
@@ -86,3 +89,10 @@ def test_update_translation_provider_controls_shows_only_qwen_rows():
     host._update_translation_provider_controls()
 
     assert _shown_rows(host._translation_layout_sizer.calls) == {"qwen_model", "qwen_api"}
+
+
+def test_update_translation_provider_controls_shows_only_openrouter_rows():
+    host = _Host("openrouter")
+    host._update_translation_provider_controls()
+
+    assert _shown_rows(host._translation_layout_sizer.calls) == {"openrouter_model", "openrouter_api"}
