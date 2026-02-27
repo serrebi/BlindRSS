@@ -1712,6 +1712,24 @@ class FeedPropertiesDialog(wx.Dialog):
 
 
 class FeedSearchDialog(wx.Dialog):
+    _SOURCE_ALL = "__all__"
+    _SOURCE_CHOICES = [
+        ("All sources", _SOURCE_ALL),
+        ("iTunes", "itunes"),
+        ("gPodder", "gpodder"),
+        ("Feedly", "feedly"),
+        ("YouTube", "youtube"),
+        ("NewsBlur", "newsblur"),
+        ("Reddit", "reddit"),
+        ("Fediverse (all)", "fediverse"),
+        ("Mastodon", "mastodon"),
+        ("Bluesky", "bluesky"),
+        ("PieFed", "piefed"),
+        ("Lemmy/Kbin", "lemmy"),
+        ("Feedsearch (URL/domain)", "feedsearch"),
+        ("BlindRSS discovery (URL/domain)", "blindrss"),
+    ]
+
     def __init__(self, parent):
         super().__init__(parent, title="Find a Podcast or RSS Feed", size=(800, 600))
         
@@ -1729,7 +1747,13 @@ class FeedSearchDialog(wx.Dialog):
         self.search_ctrl.ShowCancelButton(True)
         wx.CallAfter(self.search_ctrl.SetFocus)
         input_sizer.Add(self.search_ctrl, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
-        
+
+        input_sizer.Add(wx.StaticText(self, label="Source:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 5)
+        source_labels = [label for label, _ in self._SOURCE_CHOICES]
+        self.source_combo = wx.ComboBox(self, choices=source_labels, style=wx.CB_READONLY)
+        self.source_combo.SetSelection(0)
+        input_sizer.Add(self.source_combo, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, 5)
+
         self.search_btn = wx.Button(self, label="Search")
         input_sizer.Add(self.search_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
         
@@ -1773,25 +1797,84 @@ class FeedSearchDialog(wx.Dialog):
         self._stop_event.set()
         event.Skip()
 
+    @staticmethod
+    def _is_url_like_term(term):
+        t = str(term or "").strip().lower()
+        return bool("." in t or "://" in t or t.startswith("lbry:"))
+
+    def _get_selected_source(self):
+        try:
+            label = str(self.source_combo.GetValue() or "").strip()
+        except Exception:
+            return ("All sources", self._SOURCE_ALL)
+
+        for source_label, source_key in self._SOURCE_CHOICES:
+            if source_label == label:
+                return (source_label, source_key)
+        return ("All sources", self._SOURCE_ALL)
+
+    def _build_search_targets(self, term, source_key):
+        all_targets = [
+            ("iTunes", "itunes", self._search_itunes),
+            ("gPodder", "gpodder", self._search_gpodder),
+            ("Feedly", "feedly", self._search_feedly),
+            ("YouTube", "youtube", self._search_youtube_channels),
+            ("NewsBlur", "newsblur", self._search_newsblur),
+            ("Reddit", "reddit", self._search_reddit),
+            ("Fediverse", "fediverse", self._search_fediverse),
+            ("Feedsearch", "feedsearch", self._search_feedsearch),
+            ("BlindRSS", "blindrss", self._search_blindrss),
+        ]
+        specific_targets = {
+            "mastodon": ("Mastodon", "mastodon", self._search_mastodon),
+            "bluesky": ("Bluesky", "bluesky", self._search_bluesky),
+            "piefed": ("PieFed", "piefed", self._search_piefed),
+            "lemmy": ("Lemmy/Kbin", "lemmy", self._search_lemmy),
+        }
+
+        by_key = {key: (name, key, fn) for name, key, fn in all_targets}
+        by_key.update(specific_targets)
+
+        if source_key == self._SOURCE_ALL:
+            target_keys = [key for _, key, _ in all_targets]
+        elif source_key in by_key:
+            target_keys = [source_key]
+        else:
+            target_keys = [key for _, key, _ in all_targets]
+
+        url_like = self._is_url_like_term(term)
+        filtered = []
+        for key in target_keys:
+            name, _, fn = by_key[key]
+            if key in ("feedsearch", "blindrss") and not url_like:
+                continue
+            filtered.append((name, fn))
+        return filtered
+
     def on_search(self, event):
         term = (self.search_ctrl.GetValue() or "").strip()
         if not term:
             return
-            
+
+        source_label, source_key = self._get_selected_source()
+
         self.results_list.DeleteAllItems()
         self.results_data = []
         self._stop_event.clear()
-        
+
         # Update UI
         self.search_ctrl.Disable()
+        self.source_combo.Disable()
         self.search_btn.Disable()
-        self.status_lbl.SetLabel("Searching...")
-        
-        # Start unified search thread
-        threading.Thread(target=self._unified_search_manager, args=(term,), daemon=True).start()
+        if source_key == self._SOURCE_ALL:
+            self.status_lbl.SetLabel("Searching all sources...")
+        else:
+            self.status_lbl.SetLabel(f"Searching {source_label}...")
 
-    def _unified_search_manager(self, term):
-        import urllib.parse
+        # Start unified search thread
+        threading.Thread(target=self._unified_search_manager, args=(term, source_key), daemon=True).start()
+
+    def _unified_search_manager(self, term, source_key):
         from queue import Queue
 
         results_queue = Queue()
@@ -1803,35 +1886,9 @@ class FeedSearchDialog(wx.Dialog):
             t.start()
             active_threads.append(t)
 
-        # 1. iTunes (Podcasts)
-        launch(self._search_itunes, "iTunes")
-        
-        # 2. gPodder (Podcasts)
-        launch(self._search_gpodder, "gPodder")
-        
-        # 3. Feedly (RSS/General)
-        launch(self._search_feedly, "Feedly")
+        for provider_name, target in self._build_search_targets(term, source_key):
+            launch(target, provider_name)
 
-        # 3.5. YouTube channel/playlist search (returns native YouTube RSS feed URLs)
-        launch(self._search_youtube_channels, "YouTube")
-        
-        # 4. NewsBlur (Autocomplete)
-        launch(self._search_newsblur, "NewsBlur")
-
-        # 5. Reddit (Subreddits)
-        launch(self._search_reddit, "Reddit")
-
-        # 6. Fediverse (Lemmy/Kbin)
-        launch(self._search_fediverse, "Fediverse")
-
-        # 7. Feedsearch.dev + BlindRSS (URL based)
-        # Only run these if it looks like a URL or domain, OR if user wants broad search
-        # Feedsearch.dev claims to search by URL. If we pass a keyword, it might fail, but let's try.
-        # BlindRSS discovery is strictly URL based.
-        if "." in term or "://" in term or term.lower().startswith("lbry:"):
-            launch(self._search_feedsearch, "Feedsearch")
-            launch(self._search_blindrss, "BlindRSS")
-        
         # Wait for threads
         for t in active_threads:
             t.join(timeout=15) # Global timeout per provider
@@ -1929,6 +1986,90 @@ class FeedSearchDialog(wx.Dialog):
             results = list(search_youtube_feeds(term, limit=12, timeout=15) or [])
             if results:
                 queue.put(("YouTube", results))
+        except Exception:
+            pass
+
+    def _search_mastodon(self, term, queue):
+        try:
+            results = list(search_mastodon_feeds(term, limit=12, timeout=15) or [])
+            if results:
+                queue.put(("Mastodon", results))
+        except Exception:
+            pass
+
+    def _search_bluesky(self, term, queue):
+        try:
+            results = list(search_bluesky_feeds(term, limit=12, timeout=15) or [])
+            if results:
+                queue.put(("Bluesky", results))
+        except Exception:
+            pass
+
+    def _search_piefed(self, term, queue):
+        try:
+            results = list(search_piefed_feeds(term, limit=12, timeout=15) or [])
+            if results:
+                queue.put(("PieFed", results))
+        except Exception:
+            pass
+
+    def _search_lemmy_items(self, term):
+        import urllib.parse
+
+        results = []
+        # Query lemmy.world as a gateway to the Fediverse
+        url = f"https://lemmy.world/api/v3/search?q={urllib.parse.quote(term)}&type_=Communities&sort=TopAll&limit=15"
+        headers = {"User-Agent": "BlindRSS/1.0"}
+        resp = utils.safe_requests_get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return results
+
+        data = resp.json()
+        # Structure: { "communities": [ { "community": { ... }, "counts": { ... } } ] }
+        comms = data.get("communities", [])
+        for c in comms:
+            comm = c.get("community", {})
+            counts = c.get("counts", {})
+
+            title = comm.get("title")
+            name = comm.get("name")
+            actor_id = comm.get("actor_id")
+
+            if not actor_id:
+                continue
+
+            # Actor ID is usually community URL: https://instance/c/name or https://instance/m/name.
+            rss_url = ""
+            provider_label = "Fediverse"
+
+            if "/c/" in actor_id:
+                # Lemmy actor URL to RSS URL.
+                base = actor_id.split("/c/")[0]
+                comm_name = actor_id.split("/c/")[1]
+                rss_url = f"{base}/feeds/c/{comm_name}.xml"
+                provider_label = "Lemmy"
+            elif "/m/" in actor_id:
+                # Kbin actor URL to RSS URL.
+                rss_url = f"{actor_id}/rss"
+                provider_label = "Kbin"
+            else:
+                continue
+
+            subs = counts.get("subscribers")
+            desc = f"{name} ({subs} subs)" if subs else name
+
+            results.append({
+                "title": title or name,
+                "detail": f"{provider_label} - {desc}",
+                "url": rss_url
+            })
+        return results
+
+    def _search_lemmy(self, term, queue):
+        try:
+            results = list(self._search_lemmy_items(term) or [])
+            if results:
+                queue.put(("Lemmy/Kbin", results))
         except Exception:
             pass
 
@@ -2032,62 +2173,7 @@ class FeedSearchDialog(wx.Dialog):
             pass
 
         try:
-            import urllib.parse
-            # Query lemmy.world as a gateway to the Fediverse
-            url = f"https://lemmy.world/api/v3/search?q={urllib.parse.quote(term)}&type_=Communities&sort=TopAll&limit=15"
-            headers = {"User-Agent": "BlindRSS/1.0"}
-            resp = utils.safe_requests_get(url, headers=headers, timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                results = []
-                # Structure: { "communities": [ { "community": { ... }, "counts": { ... } } ] }
-                comms = data.get("communities", [])
-                for c in comms:
-                    comm = c.get("community", {})
-                    counts = c.get("counts", {})
-                    
-                    title = comm.get("title")
-                    name = comm.get("name")
-                    actor_id = comm.get("actor_id")
-                    
-                    if not actor_id: continue
-                    
-                    # Distinguish Lemmy vs Kbin vs Mbin etc.
-                    # Actor ID is usually the community URL: https://instance/c/name or https://instance/m/name
-                    # RSS Construction:
-                    # Lemmy: https://instance/feeds/c/name.xml
-                    # Kbin: https://instance/m/name/rss (or .xml)
-                    
-                    rss_url = ""
-                    provider_label = "Fediverse"
-                    
-                    if "/c/" in actor_id:
-                        # Likely Lemmy
-                        # Actor: https://lemmy.ml/c/linux
-                        # RSS: https://lemmy.ml/feeds/c/linux.xml
-                        base = actor_id.split("/c/")[0]
-                        comm_name = actor_id.split("/c/")[1]
-                        rss_url = f"{base}/feeds/c/{comm_name}.xml"
-                        provider_label = "Lemmy"
-                    elif "/m/" in actor_id:
-                        # Likely Kbin
-                        # Actor: https://kbin.social/m/gaming
-                        # RSS: https://kbin.social/m/gaming/rss
-                        rss_url = f"{actor_id}/rss"
-                        provider_label = "Kbin"
-                    else:
-                        # Fallback/Unknown
-                        continue
-
-                    subs = counts.get("subscribers")
-                    desc = f"{name} ({subs} subs)" if subs else name
-                    
-                    results.append({
-                        "title": title or name,
-                        "detail": f"{provider_label} - {desc}",
-                        "url": rss_url
-                    })
-                _extend(results)
+            _extend(self._search_lemmy_items(term))
         except Exception:
             pass
 
@@ -2164,6 +2250,8 @@ class FeedSearchDialog(wx.Dialog):
         try:
             self.search_ctrl.Enable()
             self.search_btn.Enable()
+            if getattr(self, "source_combo", None):
+                self.source_combo.Enable()
             self.status_lbl.SetLabel(f"Found {len(results)} results.")
             self.search_ctrl.SetFocus()
         except Exception:

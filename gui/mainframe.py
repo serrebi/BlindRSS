@@ -1363,6 +1363,32 @@ class MainFrame(wx.Frame):
             log.debug("Could not find focused window: %s", e)
             return None
 
+    def _is_text_input_focused(self, focus) -> bool:
+        try:
+            if focus is None:
+                return False
+        except Exception:
+            return False
+
+        try:
+            if focus == self.content_ctrl:
+                return True
+        except Exception:
+            pass
+
+        try:
+            if focus == self.search_ctrl or focus in self.search_ctrl.GetChildren():
+                return True
+        except Exception:
+            pass
+
+        try:
+            if isinstance(focus, wx.TextCtrl):
+                return True
+        except Exception:
+            pass
+        return False
+
     def _make_list_activate_event(self, idx: int) -> wx.ListEvent:
         evt = wx.ListEvent(wx.wxEVT_LIST_ITEM_ACTIVATED, self.list_ctrl.GetId())
         try:
@@ -1381,9 +1407,12 @@ class MainFrame(wx.Frame):
             key = event.GetKeyCode()
         except Exception:
             key = None
+        try:
+            focus = self._get_focused_window()
+        except Exception:
+            focus = None
 
         if key == wx.WXK_SPACE and not event.AltDown():
-            focus = self._get_focused_window()
             if focus == self.list_ctrl:
                 idx = self.list_ctrl.GetFirstSelected()
                 if idx != wx.NOT_FOUND:
@@ -1399,7 +1428,6 @@ class MainFrame(wx.Frame):
             getattr(wx, "WXK_NUMPAD_DECIMAL", None),
         }
         if key in delete_keys:
-            focus = self._get_focused_window()
             if focus == self.tree:
                 try:
                     item = self.tree.GetSelection()
@@ -1415,7 +1443,6 @@ class MainFrame(wx.Frame):
                     log.exception("Error handling tree delete shortcut")
 
         if key == wx.WXK_F2 and not event.ControlDown() and not event.ShiftDown() and not event.AltDown() and not event.MetaDown():
-            focus = self._get_focused_window()
             if focus == self.tree:
                 try:
                     self.on_edit_feed(None)
@@ -1442,6 +1469,9 @@ class MainFrame(wx.Frame):
             and not event.AltDown()
             and not event.MetaDown()
         ):
+            if key in (wx.WXK_LEFT, wx.WXK_RIGHT) and self._is_text_input_focused(focus):
+                event.Skip()
+                return
             pw = getattr(self, "player_window", None)
             if pw:
                 if key == wx.WXK_LEFT:
@@ -1458,6 +1488,9 @@ class MainFrame(wx.Frame):
                         pass
 
         if event.ControlDown() and not event.ShiftDown() and not event.AltDown() and not event.MetaDown():
+            if key in (wx.WXK_LEFT, wx.WXK_RIGHT, wx.WXK_UP, wx.WXK_DOWN) and self._is_text_input_focused(focus):
+                event.Skip()
+                return
             pw = getattr(self, "player_window", None)
             if pw:
                 actions = {
