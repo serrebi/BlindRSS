@@ -13,6 +13,14 @@ _OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 _GEMINI_GENERATE_CONTENT_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 # Qwen (DashScope) OpenAI-compatible endpoint (international).
 _QWEN_CHAT_COMPLETIONS_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
+_QWEN_CHAT_COMPLETIONS_ENDPOINTS = (
+    # International (Singapore)
+    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+    # China mainland (Beijing)
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    # United States (Virginia)
+    "https://dashscope-us.aliyuncs.com/compatible-mode/v1/chat/completions",
+)
 
 _DEFAULT_GROK_MODEL_CANDIDATES = (
     # Prefer fast non-reasoning models for translation latency/cost, then fall back.
@@ -22,22 +30,29 @@ _DEFAULT_GROK_MODEL_CANDIDATES = (
     "grok-4-1-fast-reasoning",
     "grok-4-fast-reasoning",
     "grok-4-0709",
+    "grok-3-fast",
     "grok-3",
     # Legacy aliases retained for older xAI API accounts/compatibility.
     "grok-4",
     "grok-beta",
 )
 _DEFAULT_OPENAI_MODEL_CANDIDATES = (
+    "gpt-5-mini",
     "gpt-4.1-mini",
     "gpt-4o-mini",
     "gpt-4.1-nano",
 )
 _DEFAULT_GEMINI_MODEL_CANDIDATES = (
+    "gemini-3-flash-preview",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
 )
 _DEFAULT_QWEN_MODEL_CANDIDATES = (
+    # Translation-specialized models.
+    "qwen-mt-plus",
+    "qwen-mt-flash",
+    "qwen-mt-lite",
     "qwen-plus",
     "qwen-plus-latest",
     "qwen3.5-plus",
@@ -212,6 +227,22 @@ def _resolve_model_candidates(
     if not candidates:
         candidates = [str(m).strip() for m in (default_candidates or ()) if str(m).strip()]
     return candidates
+
+
+def _resolve_endpoint_candidates(
+    explicit_endpoint: str | None,
+    endpoint_candidates: Iterable[str] | None,
+    default_candidates: Iterable[str],
+) -> list[str]:
+    explicit = str(explicit_endpoint or "").strip()
+    if endpoint_candidates is not None:
+        candidates = [str(m).strip() for m in endpoint_candidates if str(m).strip()]
+        if explicit and explicit not in candidates:
+            candidates.insert(0, explicit)
+        return candidates
+    if explicit:
+        return [explicit]
+    return [str(m).strip() for m in (default_candidates or ()) if str(m).strip()]
 
 
 def _append_query_param(url: str, name: str, value: str) -> str:
@@ -526,19 +557,36 @@ def _translate_chunk_qwen(
     model: str | None = None,
     model_candidates: Iterable[str] | None = None,
     timeout_s: int = _DEFAULT_TIMEOUT_S,
-    endpoint: str = _QWEN_CHAT_COMPLETIONS_URL,
+    endpoint: str | None = None,
+    endpoint_candidates: Iterable[str] | None = None,
 ) -> str:
-    return _translate_chunk_chat_completions(
-        chunk,
-        api_key=api_key,
-        target_language=target_language,
-        model=model,
-        model_candidates=model_candidates,
-        default_candidates=_DEFAULT_QWEN_MODEL_CANDIDATES,
-        timeout_s=timeout_s,
-        endpoint=endpoint,
-        provider_label="Qwen",
+    endpoints = _resolve_endpoint_candidates(
+        endpoint,
+        endpoint_candidates,
+        _QWEN_CHAT_COMPLETIONS_ENDPOINTS,
     )
+    if not endpoints:
+        endpoints = [str(_QWEN_CHAT_COMPLETIONS_URL)]
+
+    last_err = None
+    for endpoint_url in endpoints:
+        try:
+            return _translate_chunk_chat_completions(
+                chunk,
+                api_key=api_key,
+                target_language=target_language,
+                model=model,
+                model_candidates=model_candidates,
+                default_candidates=_DEFAULT_QWEN_MODEL_CANDIDATES,
+                timeout_s=timeout_s,
+                endpoint=endpoint_url,
+                provider_label="Qwen",
+            )
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise RuntimeError(str(last_err) or "Qwen translation failed")
 
 
 def translate_text_grok(
@@ -651,7 +699,8 @@ def translate_text_qwen(
     model_candidates: Iterable[str] | None = None,
     timeout_s: int = _DEFAULT_TIMEOUT_S,
     chunk_chars: int = _DEFAULT_CHUNK_CHARS,
-    endpoint: str = _QWEN_CHAT_COMPLETIONS_URL,
+    endpoint: str | None = None,
+    endpoint_candidates: Iterable[str] | None = None,
 ) -> str:
     raw = str(text or "")
     if not raw.strip():
@@ -670,6 +719,7 @@ def translate_text_qwen(
                 model_candidates=model_candidates,
                 timeout_s=timeout_s,
                 endpoint=endpoint,
+                endpoint_candidates=endpoint_candidates,
             )
         )
     return "".join(translated_chunks)

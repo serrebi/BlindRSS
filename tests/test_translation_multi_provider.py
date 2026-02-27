@@ -248,3 +248,54 @@ def test_translate_text_dispatches_to_qwen(monkeypatch):
     )
     assert out == "Translated"
     assert seen["kwargs"]["model"] == "qwen-plus"
+
+
+def test_translate_text_qwen_retries_across_region_endpoints(monkeypatch):
+    calls = []
+    endpoint_sequence = [
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    ]
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        if "dashscope-intl" in url:
+            return _Resp(
+                403,
+                payload={"error": {"message": "region not available for this api key"}},
+                text='{"error":{"message":"region not available for this api key"}}',
+            )
+        return _Resp(
+            200,
+            payload={
+                "choices": [
+                    {"message": {"content": "Hallo"}},
+                ]
+            },
+        )
+
+    monkeypatch.setattr(tr.requests, "post", _fake_post)
+
+    out = tr.translate_text_qwen(
+        "Hello",
+        api_key="qwen-secret",
+        target_language="de",
+        model="qwen-plus",
+        timeout_s=6,
+        chunk_chars=1000,
+        endpoint_candidates=endpoint_sequence,
+    )
+
+    assert out == "Hallo"
+    assert any("dashscope-intl" in c for c in calls)
+    assert any("dashscope.aliyuncs.com" in c for c in calls)
+
+
+def test_default_provider_model_candidates_include_current_recommended_options():
+    openai_candidates = tuple(getattr(tr, "_DEFAULT_OPENAI_MODEL_CANDIDATES", ()))
+    gemini_candidates = tuple(getattr(tr, "_DEFAULT_GEMINI_MODEL_CANDIDATES", ()))
+    qwen_candidates = tuple(getattr(tr, "_DEFAULT_QWEN_MODEL_CANDIDATES", ()))
+
+    assert "gpt-5-mini" in openai_candidates
+    assert "gemini-3-flash-preview" in gemini_candidates
+    assert "qwen-mt-plus" in qwen_candidates
