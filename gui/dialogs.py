@@ -2133,8 +2133,18 @@ class FeedSearchDialog(wx.Dialog):
         self.search_ctrl.Bind(wx.EVT_SEARCHCTRL_SEARCH_BTN, self.on_search)
         self.results_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_item_activated)
         self.Bind(wx.EVT_CLOSE, self.on_close)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
 
         self.results_data = [] # List of dicts: title, provider, detail, url
+
+    def _on_char_hook(self, event):
+        try:
+            if event.GetKeyCode() == wx.WXK_ESCAPE:
+                self.EndModal(wx.ID_CANCEL)
+                return
+        except Exception:
+            pass
+        event.Skip()
 
     def on_close(self, event):
         self._stop_event.set()
@@ -2791,8 +2801,11 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
 
     def on_dialog_char_hook(self, event):
         try:
+            key = event.GetKeyCode()
+            if key == wx.WXK_ESCAPE:
+                self.Close()
+                return
             if bool(getattr(self, "_search_running", False)):
-                key = event.GetKeyCode()
                 nav_keys = {
                     wx.WXK_TAB,
                     wx.WXK_UP,
