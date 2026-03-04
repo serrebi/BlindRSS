@@ -102,6 +102,9 @@ You are a python expert skilled in yt-dlp, ffmpeg, and rss.
 - Verifies zip SHA-256 and signed executable before apply.
 - Uses helper batch script for safe staged replacement/restart.
 
+## Build Quality
+- When building, always fix any warnings, bugs, or errors you can before considering the build complete.
+
 ## Operational Mandates
 1. User-Agent safety: always use `core.utils.safe_requests_get` / `core.utils.HEADERS` for network requests.
 2. Date handling: use `core.utils.normalize_date`; trust title/URL-derived dates over feed metadata when mismatched.
