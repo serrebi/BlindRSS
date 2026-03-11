@@ -318,8 +318,8 @@ class YouTubeSearchConversionTests(unittest.TestCase):
             results = discovery.search_youtube_feeds("example", limit=12, timeout=10)
 
         self.assertEqual(len(results), 2)
-        self.assertEqual(results[0]["url"], channel_results[0]["url"])
-        self.assertEqual(results[1]["url"], playlist_results[0]["url"])
+        self.assertEqual(results[0]["url"], playlist_results[0]["url"])
+        self.assertEqual(results[1]["url"], channel_results[0]["url"])
 
     def test_search_youtube_feeds_can_fill_up_to_100_results(self) -> None:
         channel_results = [
@@ -456,7 +456,7 @@ class YouTubeSearchConversionTests(unittest.TestCase):
         self.assertLess(abs(call_times["channels_start"] - call_times["playlists_start"]), 0.15)
         self.assertLess(elapsed, 0.4)
 
-    def test_search_youtube_feeds_sorts_by_play_count_across_sources_for_lets_play_query(self) -> None:
+    def test_search_youtube_feeds_prioritizes_playlists_before_channels(self) -> None:
         channel_results = [
             {
                 "title": "Some channel",
@@ -480,7 +480,7 @@ class YouTubeSearchConversionTests(unittest.TestCase):
             out = discovery.search_youtube_feeds("lets play rimworld", limit=1, timeout=10)
 
         self.assertEqual(len(out), 1)
-        self.assertIn("channel_id=UCCHAN", out[0]["url"])
+        self.assertIn("playlist_id=PLdvFbaCu1RVgZtWw0_2PkdO-10zua4mLM", out[0]["url"])
 
     def test_search_youtube_feeds_reserves_playlist_headroom_when_channel_results_are_dense(self) -> None:
         channel_results = [

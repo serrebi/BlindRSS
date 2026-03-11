@@ -2271,10 +2271,12 @@ def search_youtube_feeds(term: str, limit: int = 100, timeout: int = 15) -> list
             channel_items = list(search_youtube_channels(search_query, limit=channel_limit, timeout=timeout) or [])
             playlist_items = list(_search_youtube_playlists(search_query, limit=playlist_limit, timeout=timeout) or [])
 
-        ranked_items: list[tuple[int, int, int, int, dict]] = []
+        ranked_items: list[tuple[int, int, int, int, int, dict]] = []
         for idx, item in enumerate(list(channel_items) + list(playlist_items)):
             if not isinstance(item, dict):
                 continue
+            url = str(item.get("url") or "").strip().lower()
+            is_playlist = "playlist_id=" in url or "/playlist?" in url
             play_raw = item.get("play_count")
             play_count = None
             if play_raw is not None:
@@ -2289,6 +2291,7 @@ def search_youtube_feeds(term: str, limit: int = 100, timeout: int = 15) -> list
             match_score = _youtube_query_match_score(title, search_query)
             ranked_items.append(
                 (
+                    0 if is_playlist else 1,
                     0 if play_count is not None else 1,
                     -(play_count if play_count is not None else 0),
                     -int(match_score),
@@ -2298,7 +2301,7 @@ def search_youtube_feeds(term: str, limit: int = 100, timeout: int = 15) -> list
             )
 
         ranked_items.sort()
-        for _has_missing_play_count, _neg_play_count, _neg_match_score, _idx, item in ranked_items:
+        for _kind_rank, _has_missing_play_count, _neg_play_count, _neg_match_score, _idx, item in ranked_items:
             url = str(item.get("url") or "").strip()
             if not url or url in seen_urls:
                 continue
