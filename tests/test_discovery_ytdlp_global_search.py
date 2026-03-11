@@ -141,6 +141,7 @@ def test_search_ytdlp_site_normalizes_kind_and_subscribe_urls():
     assert video["url"] == "https://www.youtube.com/watch?v=BaW_jenozKc"
     assert video["kind"] == "media"
     assert video["play_count"] == 123456
+    assert "Example" in video["detail"]
     assert video["native_subscribe_url"].endswith("channel_id=UCVID123")
     assert video["source_subscribe_url"] == "https://www.youtube.com/channel/UCVID123"
 
@@ -155,6 +156,19 @@ def test_search_ytdlp_site_normalizes_kind_and_subscribe_urls():
     assert feed["kind"] == "feed"
     assert feed["native_subscribe_url"] == "https://example.com/feed.xml"
     assert feed["source_subscribe_url"] == "https://example.com/feed.xml"
+
+
+def test_build_ytdlp_search_result_detail_includes_uploader_handle_when_name_missing():
+    entry = {
+        "url": "https://www.youtube.com/watch?v=abc123",
+        "uploader_id": "ExampleCreator",
+        "duration": 92,
+    }
+
+    detail = discovery._build_ytdlp_search_result_detail(entry, site_label="YouTube", kind="media")
+
+    assert "@ExampleCreator" in detail
+    assert "1:32" in detail
 
 
 def test_soundcloud_media_results_expose_uploader_subscribe_url():
@@ -297,6 +311,36 @@ def test_resolve_ytdlp_url_title_prefers_ytdlp_title():
         title = discovery.resolve_ytdlp_url_title("https://example.com/watch/1", timeout=8)
 
     assert title == "Resolved Name"
+
+
+def test_resolve_ytdlp_url_enrichment_includes_owner_label_from_ytdlp_metadata():
+    class _FakeYDL:
+        def __init__(self, _opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            assert download is False
+            return {
+                "title": "Resolved Name",
+                "webpage_url": url,
+                "channel": "Example Channel",
+                "uploader_id": "@ExampleChannel",
+            }
+
+    fake_mod = types.SimpleNamespace(YoutubeDL=_FakeYDL)
+    with patch.dict(sys.modules, {"yt_dlp": fake_mod}), patch(
+        "core.dependency_check._get_startup_info", return_value=None
+    ), patch("core.discovery.get_ytdlp_cookie_sources", return_value=[]):
+        out = discovery.resolve_ytdlp_url_enrichment("https://www.youtube.com/watch?v=abc123", timeout=8)
+
+    assert out["title"] == "Resolved Name"
+    assert "Example Channel" in out["owner_label"]
 
 
 def test_resolve_quick_url_title_uses_youtube_oembed():

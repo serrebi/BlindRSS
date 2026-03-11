@@ -2088,6 +2088,9 @@ class FeedPropertiesDialog(wx.Dialog):
 
 
 class FeedSearchDialog(wx.Dialog):
+    _SEARCH_POLL_INTERVAL_S = 0.1
+    _SEARCH_TOTAL_TIMEOUT_ALL_SOURCES_S = 60.0
+    _SEARCH_TOTAL_TIMEOUT_SINGLE_SOURCE_S = 60.0
     _SOURCE_ALL = "__all__"
     _SOURCE_CHOICES = [
         ("All sources", _SOURCE_ALL),
@@ -2262,6 +2265,7 @@ class FeedSearchDialog(wx.Dialog):
 
     def _unified_search_manager(self, term, source_key):
         from queue import Queue
+        from queue import Empty
 
         results_queue = Queue()
         active_threads = []
@@ -2275,30 +2279,70 @@ class FeedSearchDialog(wx.Dialog):
         for provider_name, target in self._build_search_targets(term, source_key):
             launch(target, provider_name)
 
-        # Wait for threads
-        for t in active_threads:
-            t.join(timeout=15) # Global timeout per provider
-
-        # Process results
         all_results = []
         seen_urls = set()
 
-        while not results_queue.empty():
+        def _consume_queue_entry(provider, items):
+            for item in (items or []):
+                url = str(item.get("url", "") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                all_results.append({
+                    "title": item.get("title", url),
+                    "provider": provider,
+                    "detail": item.get("detail", ""),
+                    "url": url
+                })
+
+        try:
+            poll_interval = max(0.05, min(1.0, float(getattr(self, "_SEARCH_POLL_INTERVAL_S", 0.1) or 0.1)))
+        except Exception:
+            poll_interval = 0.1
+        try:
+            if source_key == self._SOURCE_ALL:
+                total_timeout = float(getattr(self, "_SEARCH_TOTAL_TIMEOUT_ALL_SOURCES_S", 60.0) or 60.0)
+            else:
+                total_timeout = float(getattr(self, "_SEARCH_TOTAL_TIMEOUT_SINGLE_SOURCE_S", 60.0) or 60.0)
+            total_timeout = max(0.5, min(90.0, total_timeout))
+        except Exception:
+            total_timeout = 60.0
+
+        deadline = time.monotonic() + total_timeout
+        while True:
+            if self._stop_event.is_set():
+                return
+
+            now = time.monotonic()
+            if now >= deadline:
+                break
+
+            alive = any(t.is_alive() for t in active_threads)
+            if not alive and results_queue.empty():
+                break
+
+            wait_s = min(poll_interval, max(0.01, deadline - now))
             try:
-                provider, items = results_queue.get_nowait()
-                for item in items:
-                    url = item.get("url", "").strip()
-                    if not url or url in seen_urls:
-                        continue
-                    seen_urls.add(url)
-                    all_results.append({
-                        "title": item.get("title", url),
-                        "provider": provider,
-                        "detail": item.get("detail", ""),
-                        "url": url
-                    })
+                provider, items = results_queue.get(timeout=wait_s)
+                _consume_queue_entry(provider, items)
+            except Empty:
+                pass
             except Exception:
                 pass
+
+        # Final best-effort drain for late-arriving completed providers.
+        while True:
+            try:
+                provider, items = results_queue.get_nowait()
+                _consume_queue_entry(provider, items)
+            except Empty:
+                break
+            except Exception:
+                break
+
+        if source_key == self._SOURCE_ALL and all_results:
+            # Keep YouTube results at the top of the merged list for easier discovery.
+            all_results.sort(key=lambda item: 0 if str(item.get("provider") or "").strip().lower() == "youtube" else 1)
 
         if self._stop_event.is_set():
             return
@@ -2369,7 +2413,7 @@ class FeedSearchDialog(wx.Dialog):
 
     def _search_youtube_channels(self, term, queue):
         try:
-            results = list(search_youtube_feeds(term, limit=12, timeout=15) or [])
+            results = list(search_youtube_feeds(term, limit=100, timeout=15) or [])
             if results:
                 queue.put(("YouTube", results))
         except Exception:
@@ -3050,6 +3094,7 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
                     str(cached.get("native_subscribe_url") or ""),
                     str(cached.get("source_subscribe_url") or ""),
                     int(generation),
+                    str(cached.get("owner_label") or ""),
                 )
             except Exception:
                 pass
@@ -3095,7 +3140,7 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
                         except Exception:
                             pass
                         try:
-                            wx.CallAfter(self._apply_enriched_result, key, quick_title, "", "", int(generation))
+                            wx.CallAfter(self._apply_enriched_result, key, quick_title, "", "", int(generation), "")
                         except Exception:
                             pass
             except Exception:
@@ -3145,6 +3190,7 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
                     str(cache.get("native_subscribe_url") or ""),
                     str(cache.get("source_subscribe_url") or ""),
                     int(gen),
+                    str(cache.get("owner_label") or ""),
                 )
             except Exception:
                 pass
@@ -3182,6 +3228,7 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
             title = str(enrich.get("title") or "").strip()
             native_sub = str(enrich.get("native_subscribe_url") or "").strip()
             source_sub = str(enrich.get("source_subscribe_url") or "").strip()
+            owner_label = str(enrich.get("owner_label") or "").strip()
             cached_title = ""
             try:
                 with self._title_enrich_url_cache_lock:
@@ -3191,6 +3238,7 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
                         "title": title or cached_title or "",
                         "native_subscribe_url": native_sub or str(cached_prev.get("native_subscribe_url") or ""),
                         "source_subscribe_url": source_sub or str(cached_prev.get("source_subscribe_url") or ""),
+                        "owner_label": owner_label or str(cached_prev.get("owner_label") or ""),
                         "_heavy_done": True,
                     }
                     self._title_enrich_url_cache[url] = merged
@@ -3199,10 +3247,10 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
             if not title:
                 title = cached_title
 
-            if not title and not native_sub and not source_sub:
+            if not title and not native_sub and not source_sub and not owner_label:
                 return
             try:
-                wx.CallAfter(self._apply_enriched_result, key, title, native_sub, source_sub, int(generation))
+                wx.CallAfter(self._apply_enriched_result, key, title, native_sub, source_sub, int(generation), owner_label)
             except Exception:
                 pass
         finally:
@@ -3224,6 +3272,7 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
         native_subscribe_url: str,
         source_subscribe_url: str,
         generation: int,
+        owner_label: str = "",
     ) -> None:
         if getattr(self, "_stop_event", None) is not None and self._stop_event.is_set():
             return
@@ -3236,6 +3285,7 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
         changed = False
         title_changed = False
         subscribe_changed = False
+        detail_changed = False
         for item in (self._all_results or []):
             if self._result_key_for_item(item) != key:
                 continue
@@ -3262,6 +3312,17 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
                 item["source_subscribe_url"] = source_subscribe_url
                 changed = True
                 subscribe_changed = True
+            if owner_label:
+                cur_detail = str(item.get("detail") or "").strip()
+                low_detail = cur_detail.lower()
+                low_owner = str(owner_label).strip().lower()
+                if low_owner and low_owner not in low_detail:
+                    if cur_detail:
+                        item["detail"] = f"{cur_detail} | {owner_label}"
+                    else:
+                        item["detail"] = owner_label
+                    changed = True
+                    detail_changed = True
             break
 
         if not changed:
@@ -3280,7 +3341,7 @@ class YtdlpGlobalSearchDialog(wx.Dialog):
                     self._update_action_buttons()
                 return
 
-        if subscribe_changed and not title_changed:
+        if subscribe_changed and not title_changed and not detail_changed:
             self._update_action_buttons()
             return
 
