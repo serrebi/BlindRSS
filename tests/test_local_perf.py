@@ -97,7 +97,7 @@ def test_refresh_performance(provider):
         assert mock_chapters.call_count == 0
 
 
-def test_refresh_fetches_chapters_when_chapter_url_present(provider):
+def test_refresh_defers_chapter_fetch_when_chapter_url_present(provider):
     feed_id = _add_test_feed(provider)
 
     with patch("core.utils.safe_requests_get") as mock_get, \
@@ -115,10 +115,54 @@ def test_refresh_fetches_chapters_when_chapter_url_present(provider):
 
         provider.refresh_feed(feed_id)
 
+        assert mock_chapters.call_count == 0
+
+        conn = get_connection()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT chapter_url FROM articles ORDER BY id LIMIT 1")
+            row = c.fetchone()
+        finally:
+            conn.close()
+
+        assert row is not None
+        assert row[0] == chapter_url
+
+
+def test_get_article_chapters_fetches_stored_chapter_url_on_demand(provider):
+    feed_id = _add_test_feed(provider)
+
+    with patch("core.utils.safe_requests_get") as mock_get, \
+         patch("feedparser.parse") as mock_parse, \
+         patch("core.utils.fetch_and_store_chapters") as mock_chapters:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"xml"
+        mock_resp.text = "<rss><channel><item><podcast:chapters href='https://example.com/chapters.json'/></item></channel></rss>"
+        mock_resp.headers = {}
+        mock_get.return_value = mock_resp
+
+        chapter_url = "https://example.com/chapters.json"
+        mock_parse.return_value = MockFeed(count=1, chapter_url=chapter_url)
+        mock_chapters.return_value = [{"start": 0.0, "title": "Intro", "href": None}]
+
+        provider.refresh_feed(feed_id)
+
+        conn = get_connection()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT id FROM articles ORDER BY id LIMIT 1")
+            article_id = c.fetchone()[0]
+        finally:
+            conn.close()
+
+        chapters = provider.get_article_chapters(article_id)
+
+        assert chapters == [{"start": 0.0, "title": "Intro", "href": None}]
         assert mock_chapters.call_count == 1
         args, kwargs = mock_chapters.call_args
-        assert args[3] == chapter_url
-        assert kwargs["cursor"] is not None
+        assert args[0] == article_id
+        assert kwargs == {"chapter_url": chapter_url}
 
 if __name__ == "__main__":
     # Manually run if executed as script

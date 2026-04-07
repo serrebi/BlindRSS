@@ -193,7 +193,26 @@ class FeedCacheRevalidationTests(unittest.TestCase):
         self.assertEqual(count2, 2)
         self.assertEqual(etag2, "v2")
 
+    def test_force_refresh_still_uses_conditional_revalidation(self):
+        provider = LocalProvider(self.config)
+
+        provider.refresh(force=False)
+
+        StaleCacheHandler.saw_no_cache = False
+        provider.refresh(force=True)
+
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM articles WHERE feed_id = ?", (self.feed_id,))
+        count = int(c.fetchone()[0] or 0)
+        c.execute("SELECT etag FROM feeds WHERE id = ?", (self.feed_id,))
+        etag = c.fetchone()[0]
+        conn.close()
+
+        self.assertTrue(StaleCacheHandler.saw_no_cache)
+        self.assertEqual(count, 1)
+        self.assertEqual(etag, "v1")
+
 
 if __name__ == "__main__":
     unittest.main()
-

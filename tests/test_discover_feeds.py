@@ -70,6 +70,48 @@ class DiscoverFeedsTests(unittest.TestCase):
 
         self.assertEqual(feeds.count("https://example.com/feed.xml"), 1)
 
+    def test_discover_feed_prefers_page_specific_alternate_feed_over_site_feed(self) -> None:
+        html = """
+        <html><head>
+          <link rel="alternate" type="application/rss+xml" title="The Verge" href="/rss/index.xml" />
+          <link rel="alternate" type="application/rss+xml" title="Vergecast" href="/rss/the-vergecast/index.xml" />
+        </head><body></body></html>
+        """
+
+        with patch("core.discovery.utils.safe_requests_get", return_value=_DummyResp(html)):
+            out = discovery.discover_feed("https://www.theverge.com/the-vergecast")
+
+        self.assertEqual(out, "https://www.theverge.com/rss/the-vergecast/index.xml")
+
+    def test_discover_feeds_orders_page_specific_alternate_feed_first(self) -> None:
+        html = """
+        <html><head>
+          <link rel="alternate" type="application/rss+xml" title="The Verge" href="/rss/index.xml" />
+          <link rel="alternate" type="application/rss+xml" title="Vergecast" href="/rss/the-vergecast/index.xml" />
+        </head><body></body></html>
+        """
+
+        with patch("core.discovery.utils.safe_requests_get", return_value=_DummyResp(html)):
+            with patch("core.discovery.utils.safe_requests_head", return_value=_DummyHeadResp(404, "text/html")):
+                feeds = discovery.discover_feeds("https://www.theverge.com/the-vergecast")
+
+        self.assertGreaterEqual(len(feeds), 2)
+        self.assertEqual(feeds[0], "https://www.theverge.com/rss/the-vergecast/index.xml")
+        self.assertIn("https://www.theverge.com/rss/index.xml", feeds)
+
+    def test_discover_feed_ignores_generic_json_alternate_links(self) -> None:
+        html = """
+        <html><head>
+          <link rel="alternate" type="application/json" href="/wp-json/wp/v2/pages/2042942" />
+          <link rel="alternate" type="application/rss+xml" href="/feed.xml" />
+        </head><body></body></html>
+        """
+
+        with patch("core.discovery.utils.safe_requests_get", return_value=_DummyResp(html)):
+            out = discovery.discover_feed("https://example.com/tech")
+
+        self.assertEqual(out, "https://example.com/feed.xml")
+
 
 if __name__ == "__main__":
     unittest.main()

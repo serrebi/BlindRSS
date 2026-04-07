@@ -5,6 +5,7 @@ import threading
 import sqlite3
 import concurrent.futures
 import os
+import requests
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 from urllib.parse import urlparse
@@ -26,13 +27,29 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 log = logging.getLogger(__name__)
 
-_REFRESH_WORKERS_CPU_1_2 = 1
-_REFRESH_WORKERS_CPU_3_4 = 2
-_REFRESH_WORKERS_CPU_5_PLUS = 3
+_REFRESH_WORKERS_CPU_1_2 = 2
+_REFRESH_WORKERS_CPU_3_4 = 4
+_REFRESH_WORKERS_CPU_5_8 = 6
+_REFRESH_WORKERS_CPU_9_PLUS = 8
 _REFRESH_PER_HOST_LOW_CPU = 1
 _REFRESH_PER_HOST_NORMAL = 2
+_REFRESH_PER_HOST_HIGH_CPU = 2
 
 _REMOVE_FEED_BUSY_TIMEOUT_MS = 5000
+_FAST_REFRESH_DISCOVERY_TIMEOUT_SECONDS = 4.0
+_FAST_REFRESH_DIRECT_PROBE_TIMEOUT_SECONDS = 4.0
+_DISCOVERY_FAILURE_CACHE_TTL_SECONDS = 900.0
+_DISCOVERY_SUCCESS_CACHE_TTL_SECONDS = 86400.0
+_RETRYABLE_HTTP_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+_PERMANENT_FAILURE_COOLDOWN_SECONDS = 1800.0
+_TRANSIENT_FAILURE_COOLDOWN_SECONDS = 300.0
+_NAME_RESOLUTION_ERROR_MARKERS = (
+    "failed to resolve",
+    "name resolution",
+    "temporary failure in name resolution",
+    "nodename nor servname provided",
+    "getaddrinfo failed",
+)
 
 
 def _is_locked_error(error: Exception) -> bool:
@@ -81,7 +98,9 @@ def _adaptive_refresh_worker_cap(cpu_count: Optional[int] = None) -> int:
         return _REFRESH_WORKERS_CPU_1_2
     if cpu <= 4:
         return _REFRESH_WORKERS_CPU_3_4
-    return _REFRESH_WORKERS_CPU_5_PLUS
+    if cpu <= 8:
+        return _REFRESH_WORKERS_CPU_5_8
+    return _REFRESH_WORKERS_CPU_9_PLUS
 
 
 def _compute_refresh_limits(
@@ -92,18 +111,223 @@ def _compute_refresh_limits(
 ) -> Tuple[int, int, int]:
     adaptive_cap = _adaptive_refresh_worker_cap(cpu_count)
     max_workers = max(1, min(int(configured_workers), adaptive_cap, max(1, int(feed_count))))
-    per_host_cap = _REFRESH_PER_HOST_LOW_CPU if adaptive_cap <= 2 else _REFRESH_PER_HOST_NORMAL
+    if adaptive_cap <= _REFRESH_WORKERS_CPU_1_2:
+        per_host_cap = _REFRESH_PER_HOST_LOW_CPU
+    elif adaptive_cap >= _REFRESH_WORKERS_CPU_5_8:
+        per_host_cap = _REFRESH_PER_HOST_HIGH_CPU
+    else:
+        per_host_cap = _REFRESH_PER_HOST_NORMAL
     per_host_limit = max(1, min(int(configured_per_host), per_host_cap, max_workers))
     return max_workers, per_host_limit, adaptive_cap
+
+
+def _url_looks_feed_like(url: str) -> bool:
+    low = str(url or "").strip().lower()
+    if not low:
+        return False
+    return low.endswith((".xml", ".rss", ".atom")) or "feed" in low
+
+
+def _http_status_from_error(error: Exception) -> Optional[int]:
+    response = getattr(error, "response", None)
+    if response is None:
+        return None
+    try:
+        status = int(getattr(response, "status_code", 0) or 0)
+    except Exception:
+        return None
+    return status or None
+
+
+def _is_name_resolution_error(error: Exception) -> bool:
+    text = str(error or "").lower()
+    return any(marker in text for marker in _NAME_RESOLUTION_ERROR_MARKERS)
+
+
+def _should_retry_refresh_error(error: Exception) -> bool:
+    status = _http_status_from_error(error)
+    if status is not None:
+        return status in _RETRYABLE_HTTP_STATUS_CODES
+
+    if isinstance(error, (requests.exceptions.Timeout, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout)):
+        return True
+
+    if isinstance(error, requests.exceptions.ConnectionError):
+        return not _is_name_resolution_error(error)
+
+    return False
+
+
+def _retry_backoff_seconds(attempt: int, error: Optional[Exception] = None) -> float:
+    response = getattr(error, "response", None) if error is not None else None
+    retry_after = None
+    try:
+        retry_after = response.headers.get("Retry-After") if response is not None else None
+    except Exception:
+        retry_after = None
+
+    if retry_after:
+        try:
+            return max(0.0, min(5.0, float(retry_after)))
+        except (TypeError, ValueError):
+            pass
+
+    return max(0.25, min(2.0, float(attempt or 1)))
+
+
+def _failure_cooldown_seconds_for_error(error: Exception) -> float:
+    status = _http_status_from_error(error)
+    if status is not None:
+        if status in (400, 401, 403, 404, 405, 410, 422):
+            return _PERMANENT_FAILURE_COOLDOWN_SECONDS
+        if status in _RETRYABLE_HTTP_STATUS_CODES:
+            return _TRANSIENT_FAILURE_COOLDOWN_SECONDS
+
+    if isinstance(error, (requests.exceptions.Timeout, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout)):
+        return _TRANSIENT_FAILURE_COOLDOWN_SECONDS
+
+    if isinstance(error, requests.exceptions.ConnectionError):
+        if _is_name_resolution_error(error):
+            return _PERMANENT_FAILURE_COOLDOWN_SECONDS
+        return _TRANSIENT_FAILURE_COOLDOWN_SECONDS
+
+    return _TRANSIENT_FAILURE_COOLDOWN_SECONDS
+
+
+def _response_looks_feed_like(resp) -> bool:
+    content_type = str(getattr(resp, "headers", {}).get("Content-Type", "") or "").lower()
+    if any(marker in content_type for marker in ("rss", "atom", "xml", "feed+json")):
+        return True
+
+    try:
+        snippet = str(getattr(resp, "text", "") or "")[:512].lstrip().lower()
+    except Exception:
+        snippet = ""
+
+    return (
+        snippet.startswith("<?xml")
+        or "<rss" in snippet
+        or "<feed" in snippet
+        or '"version":"https://jsonfeed.org/version/' in snippet
+        or '"version": "https://jsonfeed.org/version/' in snippet
+    )
 
 
 class LocalProvider(RSSProvider):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         init_db()
+        self._discovery_cache: Dict[str, Tuple[Optional[str], float]] = {}
+        self._discovery_cache_lock = threading.Lock()
+        self._refresh_failure_cooldowns: Dict[str, Tuple[float, Optional[str]]] = {}
+        self._refresh_failure_cooldowns_lock = threading.Lock()
 
     def get_name(self) -> str:
         return "Local RSS"
+
+    def _discover_feed_url(self, url: str, timeout_s: Optional[float] = None, use_cache: bool = False) -> Optional[str]:
+        key = str(url or "").strip()
+        if not key:
+            return None
+
+        now = time.monotonic()
+        if use_cache:
+            with self._discovery_cache_lock:
+                cached = self._discovery_cache.get(key)
+                if cached is not None:
+                    cached_value, expires_at = cached
+                    if expires_at > now:
+                        return cached_value
+                    self._discovery_cache.pop(key, None)
+
+        request_timeout = None
+        probe_timeout = None
+        if timeout_s is not None:
+            try:
+                request_timeout = max(1.0, float(timeout_s))
+            except Exception:
+                request_timeout = None
+            if request_timeout is not None:
+                probe_timeout = max(1.0, min(request_timeout, 5.0))
+
+        resolved = None
+        try:
+            resolved = discover_feed(key, request_timeout=request_timeout or 10.0, probe_timeout=probe_timeout or 5.0)
+        except Exception:
+            resolved = None
+
+        if use_cache:
+            ttl = _DISCOVERY_SUCCESS_CACHE_TTL_SECONDS if resolved else _DISCOVERY_FAILURE_CACHE_TTL_SECONDS
+            with self._discovery_cache_lock:
+                self._discovery_cache[key] = (resolved, now + ttl)
+
+        return resolved
+
+    def _resolve_feed_url(
+        self,
+        url: str,
+        allow_network: bool = True,
+        discovery_timeout: Optional[float] = None,
+        use_cache: bool = False,
+    ) -> str:
+        resolved = str(url or "").strip()
+        if not resolved:
+            return resolved
+
+        if allow_network:
+            from core.discovery import get_ytdlp_feed_url
+
+            try:
+                resolved = get_ytdlp_feed_url(resolved) or self._discover_feed_url(
+                    resolved,
+                    timeout_s=discovery_timeout,
+                    use_cache=use_cache,
+                ) or resolved
+            except Exception:
+                pass
+
+        try:
+            resolved = rumble_mod.normalize_rumble_feed_url(resolved)
+        except Exception:
+            pass
+
+        try:
+            resolved = odysee_mod.normalize_odysee_feed_url(resolved)
+        except Exception:
+            pass
+
+        return str(resolved or url or "").strip()
+
+    def _get_refresh_failure_cooldown(self, feed_id: str) -> Tuple[Optional[float], Optional[str]]:
+        key = str(feed_id or "").strip()
+        if not key:
+            return None, None
+
+        now = time.monotonic()
+        with self._refresh_failure_cooldowns_lock:
+            cached = self._refresh_failure_cooldowns.get(key)
+            if cached is None:
+                return None, None
+            expires_at, error_msg = cached
+            if expires_at <= now:
+                self._refresh_failure_cooldowns.pop(key, None)
+                return None, None
+            return expires_at, error_msg
+
+    def _set_refresh_failure_cooldown(self, feed_id: str, cooldown_s: float, error_msg: Optional[str] = None) -> None:
+        key = str(feed_id or "").strip()
+        if not key:
+            return
+        ttl = max(1.0, float(cooldown_s or 0.0))
+        with self._refresh_failure_cooldowns_lock:
+            self._refresh_failure_cooldowns[key] = (time.monotonic() + ttl, error_msg)
+
+    def _clear_refresh_failure_cooldown(self, feed_id: str) -> None:
+        key = str(feed_id or "").strip()
+        if not key:
+            return
+        with self._refresh_failure_cooldowns_lock:
+            self._refresh_failure_cooldowns.pop(key, None)
 
     def refresh_feed(self, feed_id: str, progress_cb=None) -> bool:
         conn = get_connection()
@@ -127,35 +351,32 @@ class LocalProvider(RSSProvider):
         retries = max(0, int(self.config.get("feed_retry_attempts", 1) or 0))
 
         try:
-            self._refresh_single_feed(row, host_limits, feed_timeout, retries, progress_cb, force=True)
+            self._refresh_single_feed(
+                row,
+                host_limits,
+                feed_timeout,
+                retries,
+                progress_cb,
+                force=True,
+                respect_failure_cooldown=False,
+            )
             return True
         except Exception as e:
             log.error(f"Single feed refresh failed: {e}")
             return False
 
-    def refresh(self, progress_cb=None, force: bool = False) -> bool:
-        conn = get_connection()
-        try:
-            c = conn.cursor()
-            # Fetch etag/last_modified for conditional get plus metadata for UI updates
-            c.execute(
-                "SELECT id, url, title, category, etag, last_modified, COALESCE(title_is_custom, 0) FROM feeds"
-            )
-            feeds = c.fetchall()
-        finally:
-            conn.close()
-
-        if not feeds:
+    def _refresh_feed_rows(self, feed_rows, progress_cb=None, force: bool = False) -> bool:
+        if not feed_rows:
             return True
 
-        configured_workers = max(1, int(self.config.get("max_concurrent_refreshes", 5) or 1))
-        configured_per_host = max(1, int(self.config.get("per_host_max_connections", 3) or 1))
+        configured_workers = max(1, int(self.config.get("max_concurrent_refreshes", 6) or 1))
+        configured_per_host = max(1, int(self.config.get("per_host_max_connections", 2) or 1))
 
         cpu_count = max(1, int(os.cpu_count() or 1))
         max_workers, per_host_limit, adaptive_cap = _compute_refresh_limits(
             configured_workers,
             configured_per_host,
-            len(feeds),
+            len(feed_rows),
             cpu_count=cpu_count,
         )
 
@@ -175,17 +396,24 @@ class LocalProvider(RSSProvider):
                 cpu_count,
                 adaptive_cap,
             )
+
         feed_timeout = max(1, int(self.config.get("feed_timeout_seconds", 15) or 15))
         retries = max(0, int(self.config.get("feed_retry_attempts", 1) or 0))
-
         host_limits = defaultdict(lambda: threading.Semaphore(per_host_limit))
 
         def task(feed_row):
-            return self._refresh_single_feed(feed_row, host_limits, feed_timeout, retries, progress_cb, force)
+            return self._refresh_single_feed(
+                feed_row,
+                host_limits,
+                feed_timeout,
+                retries,
+                progress_cb,
+                force,
+                respect_failure_cooldown=True,
+            )
 
-        # Increase workers for network-bound tasks
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(task, f): f for f in feeds}
+            futures = {executor.submit(task, feed_row): feed_row for feed_row in feed_rows}
             for future in concurrent.futures.as_completed(futures):
                 try:
                     future.result()
@@ -193,7 +421,63 @@ class LocalProvider(RSSProvider):
                     log.error(f"Refresh worker error: {e}")
         return True
 
-    def _refresh_single_feed(self, feed_row, host_limits, feed_timeout, retries, progress_cb, force=False):
+    def refresh(self, progress_cb=None, force: bool = False) -> bool:
+        conn = get_connection()
+        try:
+            c = conn.cursor()
+            # Fetch etag/last_modified for conditional get plus metadata for UI updates
+            c.execute(
+                "SELECT id, url, title, category, etag, last_modified, COALESCE(title_is_custom, 0) FROM feeds"
+            )
+            feeds = c.fetchall()
+        finally:
+            conn.close()
+
+        return self._refresh_feed_rows(feeds, progress_cb=progress_cb, force=force)
+
+    def refresh_feeds_by_ids(self, feed_ids, progress_cb=None, force: bool = True) -> bool:
+        ordered_ids = []
+        seen = set()
+        for raw_id in list(feed_ids or []):
+            fid = str(raw_id or "").strip()
+            if not fid or fid in seen:
+                continue
+            seen.add(fid)
+            ordered_ids.append(fid)
+
+        if not ordered_ids:
+            return True
+
+        conn = get_connection()
+        try:
+            c = conn.cursor()
+            placeholders = ",".join(["?"] * len(ordered_ids))
+            c.execute(
+                "SELECT id, url, title, category, etag, last_modified, COALESCE(title_is_custom, 0) "
+                f"FROM feeds WHERE id IN ({placeholders})",
+                ordered_ids,
+            )
+            rows = c.fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return False
+
+        rows_by_id = {str(row[0]): row for row in rows}
+        ordered_rows = [rows_by_id[fid] for fid in ordered_ids if fid in rows_by_id]
+        return self._refresh_feed_rows(ordered_rows, progress_cb=progress_cb, force=force)
+
+    def _refresh_single_feed(
+        self,
+        feed_row,
+        host_limits,
+        feed_timeout,
+        retries,
+        progress_cb,
+        force=False,
+        respect_failure_cooldown: bool = False,
+    ):
         # Each thread gets its own connection
         feed_id, feed_url, feed_title, feed_category, etag, last_modified, title_is_custom = feed_row
         status = "ok"
@@ -201,6 +485,24 @@ class LocalProvider(RSSProvider):
         new_article_summaries = []
         error_msg = None
         final_title = feed_title or "Unknown Feed"
+        failure_cooldown_seconds = None
+
+        if respect_failure_cooldown:
+            expires_at, cached_error = self._get_refresh_failure_cooldown(feed_id)
+            if expires_at is not None:
+                status = "cooldown"
+                error_msg = cached_error
+                state = self._collect_feed_state(
+                    feed_id,
+                    final_title,
+                    feed_category,
+                    status,
+                    new_items,
+                    error_msg,
+                    new_article_summaries,
+                )
+                self._emit_progress(progress_cb, state)
+                return
 
         def _preview_for_notification(raw_text):
             text = str(raw_text or "").strip()
@@ -242,15 +544,14 @@ class LocalProvider(RSSProvider):
         if force:
             headers = utils.add_revalidation_headers(headers)
 
-        use_conditional = (not force) and (not is_npr_feed)
+        use_conditional = (not is_npr_feed) and bool(etag or last_modified)
         if use_conditional:
             if etag:
                 headers['If-None-Match'] = etag
             if last_modified:
                 headers['If-Modified-Since'] = last_modified
 
-            if etag or last_modified:
-                headers = utils.add_revalidation_headers(headers)
+            headers = utils.add_revalidation_headers(headers)
         elif not force and is_npr_feed and (etag or last_modified):
             log.debug("Skipping conditional headers for NPR feed %s", feed_url)
 
@@ -539,18 +840,72 @@ class LocalProvider(RSSProvider):
 
                 return
 
+            should_attempt_initial_resolution = False
+            direct_fetch_timeout = feed_timeout
+            direct_fetch_retries = retries
+            direct_feed_probe_only = False
+            if not _url_looks_feed_like(feed_url):
+                try:
+                    conn0 = get_connection()
+                    try:
+                        c0 = conn0.cursor()
+                        c0.execute("SELECT 1 FROM articles WHERE feed_id = ? LIMIT 1", (feed_id,))
+                        should_attempt_initial_resolution = c0.fetchone() is None
+                    finally:
+                        conn0.close()
+                except Exception:
+                    should_attempt_initial_resolution = False
+
+            if should_attempt_initial_resolution:
+                resolved_feed_url = self._resolve_feed_url(
+                    feed_url,
+                    discovery_timeout=_FAST_REFRESH_DISCOVERY_TIMEOUT_SECONDS,
+                    use_cache=True,
+                )
+                if resolved_feed_url and resolved_feed_url != feed_url:
+                    log.info("Resolved local feed URL during refresh: %s -> %s", feed_url, resolved_feed_url)
+                    try:
+                        connu = get_connection()
+                        try:
+                            cu = connu.cursor()
+                            cu.execute(
+                                "UPDATE feeds SET url = ?, etag = NULL, last_modified = NULL WHERE id = ?",
+                                (resolved_feed_url, feed_id),
+                            )
+                            connu.commit()
+                        finally:
+                            connu.close()
+                    except Exception:
+                        log.debug("Failed to persist resolved feed URL %s for %s", resolved_feed_url, feed_id, exc_info=True)
+                    feed_url = resolved_feed_url
+                    etag = None
+                    last_modified = None
+                    headers = utils.add_revalidation_headers({})
+                    host = urlparse(feed_url).hostname or feed_url
+                    limiter = host_limits[host]
+                else:
+                    direct_feed_probe_only = True
+                    direct_fetch_timeout = min(float(feed_timeout), _FAST_REFRESH_DIRECT_PROBE_TIMEOUT_SECONDS)
+                    direct_fetch_retries = 0
+
             with limiter:
                 last_exc = None
-                attempts = retries + 1
+                attempts = direct_fetch_retries + 1
                 for attempt in range(1, attempts + 1):
                     try:
-                        resp = utils.safe_requests_get(feed_url, headers=headers, timeout=feed_timeout)
+                        resp = utils.safe_requests_get(feed_url, headers=headers, timeout=direct_fetch_timeout)
                         if resp.status_code == 304:
                             status = "not_modified"
                             new_etag = etag
                             new_last_modified = last_modified
                             break
                         resp.raise_for_status()
+                        if direct_feed_probe_only and not _response_looks_feed_like(resp):
+                            status = "error"
+                            error_msg = f"Feed discovery failed for {feed_url}"
+                            failure_cooldown_seconds = _PERMANENT_FAILURE_COOLDOWN_SECONDS
+                            xml_data = None
+                            break
                         # Use content instead of text to let feedparser handle encoding detection
                         xml_data = resp.content
                         xml_text = resp.text
@@ -561,8 +916,9 @@ class LocalProvider(RSSProvider):
                         last_exc = e
                         status = "error"
                         error_msg = f"HTTP {getattr(e.response, 'status_code', 'Error')}: {str(e)}"
-                        if attempt <= retries:
-                            backoff = min(4, attempt)  # simple backoff
+                        failure_cooldown_seconds = _failure_cooldown_seconds_for_error(e)
+                        if attempt <= direct_fetch_retries and _should_retry_refresh_error(e):
+                            backoff = _retry_backoff_seconds(attempt, e)
                             time.sleep(backoff)
                             continue
                         raise last_exc
@@ -793,10 +1149,23 @@ class LocalProvider(RSSProvider):
                     if not media_url and npr_mod.is_npr_url(url):
                         media_url, media_type = npr_mod.extract_npr_audio(url, timeout_s=feed_timeout)
 
+                    chapter_url = None
+                    if 'podcast_chapters' in entry:
+                        chapters_tag = entry.podcast_chapters
+                        chapter_url = getattr(chapters_tag, 'href', None) or getattr(chapters_tag, 'url', None) or getattr(chapters_tag, 'value', None)
+                    if not chapter_url and 'psc_chapters' in entry:
+                        chapters_tag = entry.psc_chapters
+                        chapter_url = getattr(chapters_tag, 'href', None) or getattr(chapters_tag, 'url', None) or getattr(chapters_tag, 'value', None)
+
+                    if not chapter_url:
+                        key = entry.get('guid') or entry.get('id') or entry.get('link')
+                        if key and key in chapter_map:
+                            chapter_url = chapter_map[key]
+
                     try:
                         c.execute(
-                            "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-                            (article_id, feed_id, title, url, content, date, author, media_url, media_type),
+                            "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type, chapter_url) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                            (article_id, feed_id, title, url, content, date, author, media_url, media_type, chapter_url),
                         )
                         new_items += 1
                         _record_new_article(
@@ -831,8 +1200,8 @@ class LocalProvider(RSSProvider):
 
                                 try:
                                     c.execute(
-                                        "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-                                        (scoped_id, feed_id, title, url, content, date, author, media_url, media_type),
+                                        "INSERT INTO articles (id, feed_id, title, url, content, date, author, is_read, media_url, media_type, chapter_url) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                                        (scoped_id, feed_id, title, url, content, date, author, media_url, media_type, chapter_url),
                                     )
                                     article_id = scoped_id
                                     new_items += 1
@@ -853,38 +1222,26 @@ class LocalProvider(RSSProvider):
                         else:
                             continue
 
-                    chapter_url = None
-                    if 'podcast_chapters' in entry:
-                        chapters_tag = entry.podcast_chapters
-                        chapter_url = getattr(chapters_tag, 'href', None) or getattr(chapters_tag, 'url', None) or getattr(chapters_tag, 'value', None)
-                    if not chapter_url and 'psc_chapters' in entry:
-                        chapters_tag = entry.psc_chapters
-                        chapter_url = getattr(chapters_tag, 'href', None) or getattr(chapters_tag, 'url', None) or getattr(chapters_tag, 'value', None)
-                    
-                    if not chapter_url:
-                        key = entry.get('guid') or entry.get('id') or entry.get('link')
-                        if key and key in chapter_map:
-                            chapter_url = chapter_map[key]
-
-                    if chapter_url:
-                        utils.fetch_and_store_chapters(
-                            article_id,
-                            media_url,
-                            media_type,
-                            chapter_url,
-                            allow_id3=False,
-                            cursor=c,
-                        )
-
                 # Commit once at the end
                 conn.commit()
             finally:
                 conn.close()
         except Exception as e:
-            error_msg = str(e)
+            if not error_msg:
+                error_msg = str(e)
             status = "error"
+            if failure_cooldown_seconds is None:
+                failure_cooldown_seconds = _TRANSIENT_FAILURE_COOLDOWN_SECONDS
             log.error(f"Error processing feed {feed_url}: {e}")
         finally:
+            if status in ("ok", "not_modified", "deleted"):
+                self._clear_refresh_failure_cooldown(feed_id)
+            elif status == "error":
+                self._set_refresh_failure_cooldown(
+                    feed_id,
+                    failure_cooldown_seconds or _TRANSIENT_FAILURE_COOLDOWN_SECONDS,
+                    error_msg,
+                )
             state = self._collect_feed_state(
                 feed_id,
                 final_title,
@@ -1370,14 +1727,7 @@ class LocalProvider(RSSProvider):
             conn.close()
 
     def add_feed(self, url: str, category: str = "Uncategorized") -> bool:
-        from core.discovery import get_ytdlp_feed_url
-        from core import rumble as rumble_mod
-        from core import odysee as odysee_mod
-        
-        # Try to get native feed URL for media sites (e.g. YouTube)
-        real_url = get_ytdlp_feed_url(url) or discover_feed(url) or url
-        real_url = rumble_mod.normalize_rumble_feed_url(real_url)
-        real_url = odysee_mod.normalize_odysee_feed_url(real_url)
+        real_url = self._resolve_feed_url(url)
         
         title = real_url
         try:
@@ -1639,12 +1989,25 @@ class LocalProvider(RSSProvider):
                             imported_title = str(get_attr('text') or get_attr('title') or "").strip()
                             text = imported_title or "Unknown Feed"
                             
-                            xmlUrl = get_attr('xmlUrl')
+                            xmlUrl = str(get_attr('xmlUrl') or "").strip()
                             
                             if xmlUrl:
-                                write_log(f"Found feed: {text} -> {xmlUrl}")
+                                # Keep OPML import fast by avoiding live site/feed discovery here.
+                                # Newly imported feeds are refreshed immediately after import, and
+                                # refresh will repair homepage-style URLs to the real feed URL.
+                                resolved_url = self._resolve_feed_url(xmlUrl, allow_network=False) or xmlUrl
+                                if resolved_url != xmlUrl:
+                                    write_log(f"Resolved feed URL: {xmlUrl} -> {resolved_url}")
+                                else:
+                                    write_log(f"Found feed: {text} -> {xmlUrl}")
+
                                 # It's a feed
-                                c.execute("SELECT id FROM feeds WHERE url = ?", (xmlUrl,))
+                                candidate_urls = list(dict.fromkeys([xmlUrl, resolved_url]))
+                                placeholders = ",".join(["?"] * len(candidate_urls))
+                                c.execute(
+                                    f"SELECT id FROM feeds WHERE url IN ({placeholders})",
+                                    candidate_urls,
+                                )
                                 if not c.fetchone():
                                     feed_id = str(uuid.uuid4())
                                     cat_to_use = target_category if target_category else current_category
@@ -1658,7 +2021,7 @@ class LocalProvider(RSSProvider):
                                     c.execute(
                                         "INSERT INTO feeds (id, url, title, title_is_custom, category, icon_url) "
                                         "VALUES (?, ?, ?, ?, ?, ?)",
-                                        (feed_id, xmlUrl, text, title_is_custom, cat_to_use, ""),
+                                        (feed_id, resolved_url, text, title_is_custom, cat_to_use, ""),
                                     )
                             
                             # Recursion for children
@@ -1794,4 +2157,23 @@ class LocalProvider(RSSProvider):
 
     # Optional API used by GUI when present
     def get_article_chapters(self, article_id: str):
-        return utils.get_chapters_from_db(article_id)
+        chapters = utils.get_chapters_from_db(article_id)
+        if chapters:
+            return chapters
+
+        conn = get_connection()
+        try:
+            c = conn.cursor()
+            c.execute(
+                "SELECT media_url, media_type, chapter_url FROM articles WHERE id = ? LIMIT 1",
+                (article_id,),
+            )
+            row = c.fetchone()
+        finally:
+            conn.close()
+
+        if not row:
+            return []
+
+        media_url, media_type, chapter_url = row
+        return utils.fetch_and_store_chapters(article_id, media_url, media_type, chapter_url=chapter_url)

@@ -218,6 +218,7 @@ def init_db():
             is_favorite INTEGER DEFAULT 0,
             media_url TEXT,
             media_type TEXT,
+            chapter_url TEXT,
             FOREIGN KEY(feed_id) REFERENCES feeds(id)
         )''')
         
@@ -267,6 +268,11 @@ def init_db():
             
         try:
             c.execute("ALTER TABLE articles ADD COLUMN media_type TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            c.execute("ALTER TABLE articles ADD COLUMN chapter_url TEXT")
         except sqlite3.OperationalError:
             pass
 

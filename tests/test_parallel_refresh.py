@@ -174,6 +174,41 @@ class LocalProviderParallelTests(unittest.TestCase):
         status_map = {fid: status for fid, status in progress_order}
         self.assertEqual(status_map.get(self.feed_ids["fail"]), "error")
 
+    def test_refresh_feeds_by_ids_refreshes_requested_subset_only(self):
+        provider = LocalProvider(self.config)
+        progress_order = []
+
+        def progress_cb(state):
+            progress_order.append((state.get("id"), state.get("status")))
+
+        ok = provider.refresh_feeds_by_ids(
+            [self.feed_ids["slow"], self.feed_ids["fast"]],
+            progress_cb=progress_cb,
+            force=True,
+        )
+
+        self.assertTrue(ok)
+
+        ids_in_order = [item[0] for item in progress_order]
+        self.assertIn(self.feed_ids["fast"], ids_in_order)
+        self.assertIn(self.feed_ids["slow"], ids_in_order)
+        self.assertNotIn(self.feed_ids["fail"], ids_in_order)
+        self.assertLess(ids_in_order.index(self.feed_ids["fast"]), ids_in_order.index(self.feed_ids["slow"]))
+
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM articles WHERE feed_id = ?", (self.feed_ids["fast"],))
+        fast_count = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM articles WHERE feed_id = ?", (self.feed_ids["slow"],))
+        slow_count = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM articles WHERE feed_id = ?", (self.feed_ids["fail"],))
+        fail_count = c.fetchone()[0]
+        conn.close()
+
+        self.assertGreaterEqual(fast_count, 1)
+        self.assertGreaterEqual(slow_count, 1)
+        self.assertEqual(fail_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

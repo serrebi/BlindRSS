@@ -87,6 +87,13 @@ _URL_FALLBACK_SITE_NAMES = {
 
 _ROKFIN_PUBLIC_API_BASE = "https://prod-api-v2.production.rokfin.com/api/v2/public"
 _QUICK_TITLE_PREFETCH_MAX_WORKERS = 6
+_ALTERNATE_FEED_TYPES = {
+    "application/rss+xml",
+    "application/atom+xml",
+    "application/xml",
+    "text/xml",
+    "application/feed+json",
+}
 
 
 def _load_ytdlp_extractors():
@@ -309,6 +316,76 @@ def get_ytdlp_searchable_sites(include_adult: bool = False) -> list[dict]:
     out = list(sites_by_id.values())
     out.sort(key=lambda x: (str(x.get("label", "")).lower(), str(x.get("id", "")).lower()))
     return out
+
+
+def _tokenize_feed_hint(text: str) -> list[str]:
+    return [tok for tok in re.findall(r"[a-z0-9]+", str(text or "").lower()) if len(tok) >= 3]
+
+
+def _alternate_feed_candidates(soup: BeautifulSoup, page_url: str) -> list[str]:
+    page_url_s = str(page_url or "").strip()
+    page_parsed = urlparse(page_url_s)
+    page_path = (page_parsed.path or "").strip("/")
+    page_tokens = set(_tokenize_feed_hint(page_path.replace("/", " ")))
+
+    scored: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+
+    for idx, link in enumerate(soup.find_all("link", href=True)):
+        try:
+            rel = link.get("rel")
+            rel_vals: list[str] = []
+            if isinstance(rel, str):
+                rel_vals = [rel]
+            elif isinstance(rel, list):
+                rel_vals = [str(r) for r in rel]
+            rel_vals = [r.lower().strip() for r in rel_vals if r]
+            if "alternate" not in rel_vals:
+                continue
+
+            ctype = (link.get("type") or "").lower().strip()
+            if ctype not in _ALTERNATE_FEED_TYPES:
+                continue
+
+            href = link.get("href")
+            if not href:
+                continue
+            candidate = urljoin(page_url_s, href)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+
+            score = 0
+            title = str(link.get("title") or "").strip().lower()
+            cand_path = (urlparse(candidate).path or "").lower()
+            cand_tokens = set(_tokenize_feed_hint(cand_path))
+            title_tokens = set(_tokenize_feed_hint(title))
+
+            if page_tokens:
+                overlap = len(page_tokens & cand_tokens)
+                score += overlap * 8
+                title_overlap = len(page_tokens & title_tokens)
+                score += title_overlap * 10
+                page_slug = "-".join([tok for tok in _tokenize_feed_hint(page_path.replace("/", " "))])
+                if page_slug:
+                    if page_slug in cand_path:
+                        score += 12
+                    if page_slug in title.replace(" ", "-"):
+                        score += 12
+
+            if cand_path.endswith("/index.xml") or cand_path.endswith("/rss.xml"):
+                score -= 1
+            if re.search(r"/rss/(?:index\.xml)?$", cand_path):
+                score -= 3
+            if re.search(r"(?:^|/)(comments?|comment-feed)(?:/|$)", cand_path) or "comment" in title:
+                score -= 12
+
+            scored.append((score, -idx, candidate))
+        except Exception:
+            continue
+
+    scored.sort(reverse=True)
+    return [candidate for _score, _neg_idx, candidate in scored]
 
 
 # Pre-load extractors in background thread at module import
@@ -2913,7 +2990,7 @@ def get_ytdlp_feed_url(url: str) -> str:
     return None
 
 
-def discover_feed(url: str) -> str:
+def discover_feed(url: str, request_timeout: float = 10.0, probe_timeout: float = 5.0) -> str:
     """
     Given a URL, try to find the RSS/Atom feed URL.
     Returns None if not found.
@@ -2941,18 +3018,26 @@ def discover_feed(url: str) -> str:
         pass
         
     try:
-        resp = utils.safe_requests_get(url, timeout=10)
+        req_timeout = max(1.0, float(request_timeout or 10.0))
+        head_timeout = max(1.0, float(probe_timeout or 5.0))
+
+        resp = utils.safe_requests_get(url, timeout=req_timeout)
         resp.raise_for_status()
+
+        body_text = resp.text or ""
+        content_type = str(resp.headers.get("Content-Type", "") or "").lower()
+        looks_like_xml = (
+            "xml" in content_type
+            or body_text.lstrip().startswith("<?xml")
+            or "<rss" in body_text[:512].lower()
+            or "<feed" in body_text[:512].lower()
+        )
+        soup = BeautifulSoup(body_text, "xml" if looks_like_xml else "html.parser")
         
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        # 1. <link rel="alternate" type="application/rss+xml" href="...">
-        links = soup.find_all("link", rel="alternate")
-        for link in links:
-            if link.get("type") in ["application/rss+xml", "application/atom+xml", "text/xml"]:
-                href = link.get("href")
-                if href:
-                    return urljoin(url, href)
+        # 1. Prefer the best matching alternate feed link when multiple are present.
+        candidates = _alternate_feed_candidates(soup, url)
+        if candidates:
+            return candidates[0]
                     
         # 2. Check for common patterns if no link tag
         # e.g. /feed, /rss, /atom.xml
@@ -2963,7 +3048,7 @@ def discover_feed(url: str) -> str:
             # Avoid re-checking
             candidate = base + path
             try:
-                head = utils.safe_requests_head(candidate, timeout=5, allow_redirects=True)
+                head = utils.safe_requests_head(candidate, timeout=head_timeout, allow_redirects=True)
                 if head.status_code == 200 and "xml" in head.headers.get("Content-Type", ""):
                     return candidate
             except Exception:
@@ -3019,35 +3104,9 @@ def discover_feeds(url: str) -> list[str]:
 
         soup = BeautifulSoup(html, "html.parser")
 
-        # 1) <link rel="alternate" ...>
-        for link in soup.find_all("link", href=True):
-            try:
-                rel = link.get("rel")
-                rel_vals: list[str] = []
-                if isinstance(rel, str):
-                    rel_vals = [rel]
-                elif isinstance(rel, list):
-                    rel_vals = [str(r) for r in rel]
-                rel_vals = [r.lower().strip() for r in rel_vals if r]
-                if "alternate" not in rel_vals:
-                    continue
-
-                ctype = (link.get("type") or "").lower().strip()
-                if ctype not in (
-                    "application/rss+xml",
-                    "application/atom+xml",
-                    "application/xml",
-                    "text/xml",
-                    "application/feed+json",
-                    "application/json",
-                ):
-                    continue
-
-                href = link.get("href")
-                if href:
-                    _add(urljoin(url, href))
-            except Exception:
-                continue
+        # 1) <link rel="alternate" ...>, ordered by best page/feed match first.
+        for candidate in _alternate_feed_candidates(soup, url):
+            _add(candidate)
 
         # 2) Obvious <a href> candidates (best-effort)
         for a in soup.find_all("a", href=True):

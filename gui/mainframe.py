@@ -5932,8 +5932,9 @@ class MainFrame(wx.Frame):
     def _refresh_imported_feed_ids_thread(self, feed_ids: list[str]) -> None:
         if not feed_ids:
             return
+        refresh_many = getattr(self.provider, "refresh_feeds_by_ids", None)
         refresh_one = getattr(self.provider, "refresh_feed", None)
-        if not callable(refresh_one):
+        if not callable(refresh_many) and not callable(refresh_one):
             return
 
         ordered_ids: list[str] = []
@@ -5959,11 +5960,23 @@ class MainFrame(wx.Frame):
             def progress_cb(state):
                 self._on_feed_refresh_progress(state)
 
-            for feed_id in ordered_ids:
+            if callable(refresh_many):
                 try:
-                    refresh_one(feed_id, progress_cb=progress_cb)
+                    refresh_many(ordered_ids, progress_cb=progress_cb, force=True)
                 except Exception:
-                    log.exception("Failed OPML post-import refresh for feed %s", feed_id)
+                    log.exception("Failed OPML batch post-import refresh")
+                    if callable(refresh_one):
+                        for feed_id in ordered_ids:
+                            try:
+                                refresh_one(feed_id, progress_cb=progress_cb)
+                            except Exception:
+                                log.exception("Failed OPML post-import refresh for feed %s", feed_id)
+            else:
+                for feed_id in ordered_ids:
+                    try:
+                        refresh_one(feed_id, progress_cb=progress_cb)
+                    except Exception:
+                        log.exception("Failed OPML post-import refresh for feed %s", feed_id)
         finally:
             try:
                 self._refresh_guard.release()
@@ -5983,8 +5996,9 @@ class MainFrame(wx.Frame):
                 normalized_new_ids.append(fid)
 
         if success and normalized_new_ids:
+            refresh_many = getattr(self.provider, "refresh_feeds_by_ids", None)
             refresh_one = getattr(self.provider, "refresh_feed", None)
-            if callable(refresh_one):
+            if callable(refresh_many) or callable(refresh_one):
                 threading.Thread(
                     target=self._refresh_imported_feed_ids_thread,
                     args=(normalized_new_ids,),

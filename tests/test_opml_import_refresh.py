@@ -59,6 +59,23 @@ class _ProviderNoTargetedRefresh:
         return True
 
 
+class _ProviderWithBatchRefresh:
+    def __init__(self):
+        self.batch_calls = []
+
+    def refresh_feeds_by_ids(self, feed_ids, progress_cb=None, force=True):
+        self.batch_calls.append(
+            {
+                "feed_ids": list(feed_ids or []),
+                "force": bool(force),
+            }
+        )
+        if callable(progress_cb):
+            for fid in list(feed_ids or []):
+                progress_cb({"id": str(fid), "status": "ok"})
+        return True
+
+
 class _DummyMainFrame:
     _snapshot_feed_ids = mainframe.MainFrame._snapshot_feed_ids
     _import_opml_thread = mainframe.MainFrame._import_opml_thread
@@ -137,3 +154,18 @@ def test_post_import_falls_back_to_full_refresh_when_targeted_refresh_unavailabl
 
     assert host.manual_refresh_calls == 1
     assert host.refresh_feeds_calls >= 1
+
+
+def test_post_import_prefers_batch_refresh_when_available(monkeypatch):
+    provider = _ProviderWithBatchRefresh()
+    host = _DummyMainFrame(provider)
+
+    monkeypatch.setattr(mainframe.wx, "CallAfter", lambda fn, *a, **k: fn(*a, **k))
+    monkeypatch.setattr(mainframe.wx, "MessageBox", lambda *a, **k: None)
+    monkeypatch.setattr(mainframe.threading, "Thread", _ImmediateThread)
+
+    host._post_import_opml(True, ["feed-2", "feed-3"])
+
+    assert provider.batch_calls == [{"feed_ids": ["feed-2", "feed-3"], "force": True}]
+    assert host.flush_calls == 1
+    assert host.manual_refresh_calls == 0

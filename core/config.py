@@ -22,11 +22,13 @@ DEFAULT_CONFIG = {
     "auto_download_podcasts": False,
     "auto_download_period": "unlimited",
     "refresh_interval": 300,  # seconds
-    # Keep refresh concurrency low by default so older CPUs remain responsive during refresh.
-    "max_concurrent_refreshes": 3,
-    "per_host_max_connections": 1,
+    # Refresh is primarily network-bound, but over-aggressive parallelism causes
+    # CPU spikes and can actually slow large OPML refreshes when a handful of
+    # feeds stall or throttle. Keep the default balanced.
+    "max_concurrent_refreshes": 6,
+    "per_host_max_connections": 2,
     "feed_timeout_seconds": 15,
-    "feed_retry_attempts": 5,
+    "feed_retry_attempts": 1,
     "playback_resolve_timeout_s": 4.0,
     "active_provider": "local",
     "debug_mode": False,
@@ -209,19 +211,27 @@ class ConfigManager:
         except (TypeError, ValueError):
             log.warning("Could not migrate 'resume_min_ms' due to invalid value in config.json; leaving it as is.")
 
-        # v1.63.x: lower refresh concurrency defaults to reduce lag on older hardware.
-        # Only migrate when both values still match the previous untouched defaults.
+        # v1.63.x+: refresh defaults were tuned multiple times.
+        # Only migrate when the values still match a known untouched default set.
         try:
             max_concurrent = cfg.get("max_concurrent_refreshes", None)
             per_host = cfg.get("per_host_max_connections", None)
-            if max_concurrent is not None and per_host is not None:
-                if int(max_concurrent) == 10 and int(per_host) == 4:
+            feed_retries = cfg.get("feed_retry_attempts", None)
+            if max_concurrent is not None and per_host is not None and feed_retries is not None:
+                if (int(max_concurrent), int(per_host), int(feed_retries)) in (
+                    (10, 4, 5),
+                    (12, 4, 5),
+                    (6, 2, 5),
+                    (3, 1, 5),
+                    (8, 2, 1),
+                ):
                     cfg["max_concurrent_refreshes"] = int(DEFAULT_CONFIG["max_concurrent_refreshes"])
                     cfg["per_host_max_connections"] = int(DEFAULT_CONFIG["per_host_max_connections"])
+                    cfg["feed_retry_attempts"] = int(DEFAULT_CONFIG["feed_retry_attempts"])
                     changed = True
         except (TypeError, ValueError):
             log.warning(
-                "Could not migrate refresh concurrency defaults due to invalid values in config.json; leaving them as is."
+                "Could not migrate refresh defaults due to invalid values in config.json; leaving them as is."
             )
 
         return bool(changed)
